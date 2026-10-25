@@ -20,6 +20,10 @@
 安装包在 [Releases](../../releases/latest)。这是维护者自签名的构建，签名指纹写在
 [docs/android-app.md](docs/android-app.md)；要自己签就照「开发与构建」编译。
 
+> 内置信任锚：APK 里带了一张**示例自签 CA 的公钥证书**（`res/raw/pet_ca.pem`，无私钥），
+> 让「不买域名、机器上跑自签 https」的人开箱能连。换成自己的 CA 请跑 `scripts/tls-ca.sh` 再重新出包；
+> 只用系统 CA 的部署不受影响。别人的 CA 不要信，也不要装来路不明的 APK。
+
 ## 三步用起来
 
 **1. 电脑上装插件**
