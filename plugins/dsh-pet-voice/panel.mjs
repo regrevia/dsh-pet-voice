@@ -324,7 +324,7 @@ export function panelState({ origin, pairing } = {}) {
   const modes = [
     {
       id: 'server',
-      label: '我的服务器',
+      label: '内网穿透',
       url: source.source === 'tunnel' ? String(source.publicBase ?? '').trim() : '',
     },
     { id: 'lan', label: '局域网', url: lanBase(origin) },
