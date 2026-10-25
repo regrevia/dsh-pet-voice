@@ -8,6 +8,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -18,6 +19,9 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
+import android.widget.GridLayout
+import android.widget.PopupWindow
 import android.view.inputmethod.EditorInfo
 import android.widget.AdapterView
 import android.widget.BaseAdapter
@@ -47,6 +51,7 @@ class HistoryActivity : Activity() {
     private lateinit var runStop: TextView
     private lateinit var input: EditText
     private lateinit var sendBtn: android.widget.ImageView
+    private lateinit var emojiBtn: android.widget.ImageView
     private lateinit var micBtn: android.widget.ImageView
     private lateinit var projectBtn: TextView
     private lateinit var sessionsBtn: android.widget.ImageView
@@ -105,6 +110,11 @@ class HistoryActivity : Activity() {
         setContentView(R.layout.activity_history)
 
         list = findViewById(R.id.historyList)
+        // 状态栏内边距自己加：fitsSystemWindows 会和键盘 resize 抢高度，底栏被挤掉过
+        findViewById<View>(R.id.historyRoot).setOnApplyWindowInsetsListener { v, insets ->
+            v.setPadding(0, insets.systemWindowInsetTop, 0, insets.systemWindowInsetBottom)
+            insets
+        }
         empty = findViewById(R.id.historyEmpty)
         typing = findViewById(R.id.chatTyping)
         runBar = findViewById(R.id.chatRun)
@@ -112,6 +122,7 @@ class HistoryActivity : Activity() {
         runStop = findViewById(R.id.chatStop)
         input = findViewById(R.id.chatInput)
         sendBtn = findViewById(R.id.chatSend)
+        emojiBtn = findViewById(R.id.chatEmoji)
         micBtn = findViewById(R.id.chatMic)
         projectBtn = findViewById(R.id.historyProject)
         sessionsBtn = findViewById(R.id.historySessions)
@@ -142,6 +153,7 @@ class HistoryActivity : Activity() {
             AdapterView.OnItemClickListener { _, _, pos, _ -> onPickerPick(pos) }
 
         sendBtn.setOnClickListener { sendChat() }
+        emojiBtn.setOnClickListener { showEmojiPicker() }
         runStop.setOnClickListener { stopTurn() }
         input.setOnEditorActionListener { _, actionId, ev ->
             if (actionId == EditorInfo.IME_ACTION_SEND || (ev?.keyCode == KeyEvent.KEYCODE_ENTER && ev.action == KeyEvent.ACTION_DOWN)) {
@@ -260,6 +272,66 @@ class HistoryActivity : Activity() {
         list.removeCallbacks(pinJump)
         list.post(pinJump)
         for (d in longArrayOf(150, 400, 900, 1600, 2600, 4000)) list.postDelayed(pinJump, d)
+    }
+
+    /* ---------------- 表情 ---------------- */
+
+    private fun showEmojiPicker() {
+        // 键盘先收起来，否则表情面板压在键盘上、还跟着布局跳
+        (getSystemService(InputMethodManager::class.java)).hideSoftInputFromWindow(input.windowToken, 0)
+        // 等输入行落回底部再算位置
+        input.postDelayed({ placeEmojiPicker() }, 120)
+    }
+
+    private fun placeEmojiPicker() {
+        if (isFinishing || isDestroyed) return
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundResource(R.drawable.bg_emoji_sheet)
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+        }
+        val grid = GridLayout(this).apply { columnCount = 8 }
+        EMOJIS.forEach { char ->
+            val cell = TextView(this).apply {
+                text = char
+                textSize = 22f
+                gravity = Gravity.CENTER
+                setPadding(dp(6), dp(8), dp(6), dp(8))
+                setOnClickListener { insertEmoji(char) }
+            }
+            grid.addView(
+                cell,
+                GridLayout.LayoutParams().apply {
+                    width = 0
+                    columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                },
+            )
+        }
+        sheet.addView(grid)
+
+        val cols = 8
+        val cellWidth = dp(40)
+        val width = minOf(cols * cellWidth + dp(20), resources.displayMetrics.widthPixels - dp(24))
+        val pop = PopupWindow(sheet, width, ViewGroup.LayoutParams.WRAP_CONTENT, true)
+        pop.isOutsideTouchable = true
+        pop.setBackgroundDrawable(ColorDrawable(0x00000000))
+        sheet.measure(
+            View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+        )
+        val loc = IntArray(2)
+        emojiBtn.getLocationOnScreen(loc)
+        val y = (loc[1] - sheet.measuredHeight - dp(8)).coerceAtLeast(dp(64))
+        pop.showAtLocation(findViewById(R.id.historyRoot), Gravity.NO_GRAVITY, dp(12), y)
+    }
+
+    private fun insertEmoji(char: String) {
+        val start = input.selectionStart.coerceAtLeast(0)
+        val end = input.selectionEnd.coerceAtLeast(0)
+        val from = minOf(start, end)
+        val to = maxOf(start, end)
+        input.text?.replace(from, to, char)
+        input.setSelection(from + char.length)
     }
 
     /* ---------------- 发送 / 中断 ---------------- */
@@ -480,12 +552,17 @@ class HistoryActivity : Activity() {
                 null
             }
             val out = ArrayList<Sess>()
-            res?.json?.optJSONArray("rows")?.let { arr ->
+            // 宿主返回的是 sessions（旧字段 rows 兜底），按最近更新排前面
+            val arr = res?.json?.optJSONArray("sessions") ?: res?.json?.optJSONArray("rows")
+            if (arr != null) {
                 for (i in 0 until arr.length()) {
                     val o = arr.optJSONObject(i) ?: continue
-                    out.add(Sess(o.optString("id"), o.optString("title"), o.optLong("updatedAt")))
+                    val id = o.optString("id")
+                    if (id.isBlank()) continue
+                    out.add(Sess(id, o.optString("title"), o.optLong("updatedAt")))
                 }
             }
+            out.sortByDescending { it.at }
             runOnUiThread {
                 sessions = out
                 pickerRows.clear()
@@ -645,6 +722,13 @@ class HistoryActivity : Activity() {
         cornerRadius = 16f * resources.displayMetrics.density
         setColor(bg)
     }
+
+    /** 常用表情：够用就好，不做完整表情库（一屏翻不完反而难找）。 */
+    private val EMOJIS = listOf(
+        "😀", "😄", "😂", "😌", "😊", "😍", "🤔", "😎",
+        "😴", "😭", "😮", "🙄", "😅", "🤗", "👍", "👏",
+        "🙏", "💪", "❤️", "🔥", "✨", "🎉", "🌙", "☀️",
+    )
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 

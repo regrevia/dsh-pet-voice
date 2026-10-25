@@ -5,7 +5,7 @@
 
 ## 1. 只用轮询时能不能收到回复
 
-面板把传输方式锁成 `只用轮询` 后，发一句话，在 logcat 里应该看到这几行（`adb logcat | grep -E "PetTurn|PetLatency"`）：
+把插件配置里的传输方式锁成 `只用轮询`（`panel.json` 的 `transport`）后，发一句话，在 logcat 里应该看到这几行（`adb logcat | grep -E "PetTurn|PetLatency"`）：
 
 ```
 PetLatency: +842ms transport panel=poll

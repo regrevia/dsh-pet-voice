@@ -3,8 +3,7 @@
     android:id="@+id/historyRoot"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/pet_bg"
-    android:fitsSystemWindows="true">
+    android:background="@color/pet_bg">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -154,7 +153,7 @@
 
         <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:layout_height="62dp"
             android:gravity="center_vertical"
             android:orientation="horizontal"
             android:paddingStart="12dp"
@@ -177,6 +176,17 @@
                 android:textColor="@color/pet_text"
                 android:textColorHint="@color/pet_hint"
                 android:textSize="14sp" />
+
+            <ImageView
+                android:id="@+id/chatEmoji"
+                android:layout_width="46dp"
+                android:layout_height="46dp"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_input"
+                android:contentDescription="表情"
+                android:padding="12dp"
+                android:src="@drawable/ic_emoji"
+                android:tint="@color/pet_text_dim" />
 
             <ImageView
                 android:id="@+id/chatMic"

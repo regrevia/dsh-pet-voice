@@ -34,7 +34,6 @@ const DEFAULT_CONFIG = {
   customUrl: '',
   maxDevices: 2,
   voice: 'zh-CN-XiaoyiNeural',
-  projectTitle: '',
   wakeName: '大肥鱼',
   persona: '',
   maxWords: '短',
@@ -202,15 +201,25 @@ function isHttpUrl(value) {
   return /^https?:\/\//i.test(String(value ?? '').trim())
 }
 
+/** RFC 2606 的示例域名：文档里当占位符用，面板不拿它当已配好的地址。 */
+const PLACEHOLDER_HOST = /(^|\.)example\.(com|net|org)$/i
+
+function isPlaceholderUrl(value) {
+  try {
+    return PLACEHOLDER_HOST.test(new URL(String(value ?? '').trim()).hostname)
+  } catch {
+    return false
+  }
+}
+
 function readPanelConfig() {
   const raw = readJson(CONFIG_PATH)
   const customUrl = String(raw?.customUrl ?? '').trim()
   return {
     mode: MODES.includes(raw?.mode) ? raw.mode : DEFAULT_CONFIG.mode,
-    customUrl: isHttpUrl(customUrl) ? customUrl : '',
+    customUrl: isHttpUrl(customUrl) && !isPlaceholderUrl(customUrl) ? customUrl : '',
     maxDevices: clampMaxDevices(raw?.maxDevices, DEFAULT_CONFIG.maxDevices),
     voice: String(raw?.voice ?? '').trim(),
-    projectTitle: String(raw?.projectTitle ?? '').trim(),
     wakeName: String(raw?.wakeName ?? DEFAULT_CONFIG.wakeName).trim(),
     persona: String(raw?.persona ?? '').trim().slice(0, 2000),
     maxWords: MAXWORDS_LEVELS.includes(String(raw?.maxWords ?? '').trim())
@@ -237,6 +246,7 @@ export function setPanelConfig(patch) {
   if (input.customUrl !== undefined) {
     const customUrl = String(input.customUrl ?? '').trim()
     if (customUrl && !isHttpUrl(customUrl)) throw new Error('自定义地址要是 http(s) 开头')
+    if (customUrl && isPlaceholderUrl(customUrl)) throw new Error('换成你自己的域名，example.com 只是示例')
     next.customUrl = customUrl
   }
   if (input.maxDevices !== undefined) {
@@ -244,7 +254,7 @@ export function setPanelConfig(patch) {
     if (!Number.isFinite(number)) throw new Error('设备数要是 1 到 10')
     next.maxDevices = clampMaxDevices(number, DEFAULT_CONFIG.maxDevices)
   }
-  for (const key of ['voice', 'projectTitle', 'wakeName']) {
+  for (const key of ['voice', 'wakeName']) {
     if (input[key] !== undefined) next[key] = String(input[key] ?? '').trim()
   }
   if (input.persona !== undefined) {
@@ -343,7 +353,6 @@ export function panelState({ origin, pairing } = {}) {
     pairingUrl: base ? `${base}${token ? `?k=${encodeURIComponent(token)}` : ''}` : '',
     alive: Boolean(source.alive),
     voice: config.voice,
-    projectTitle: config.projectTitle,
     wakeName: config.wakeName,
     persona: config.persona,
     maxWords: config.maxWords,
@@ -767,7 +776,8 @@ function renderSvg(grid) {
       col = end
     }
   }
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${extent} ${extent}" shape-rendering="crispEdges" fill="currentColor"><path d="${path.join('')}"/></svg>`
+  // 白底黑码：相位色是固定的，跟着主题走会在深色下糊成一片
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${extent} ${extent}" width="100%" height="100%" preserveAspectRatio="xMidYMid meet" shape-rendering="crispEdges" fill="#111111"><path d="${path.join('')}"/></svg>`
 }
 
 export function qrSvg(text) {

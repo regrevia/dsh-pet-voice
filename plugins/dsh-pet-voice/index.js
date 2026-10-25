@@ -2018,8 +2018,20 @@ const SPEECH_URL = /(?:https?:\/\/|www\.)[^\s)」』，。；、]+/g
  * 标题/引用/列表/任务框/水平线的符号前缀去掉；强调、行内代码、删除线的标记去掉；
  * 行内换行与空行压成停顿（「，」），最后兜底清掉任何残留标记符号。
  */
+/**
+ * 朗读前的表情剥离：emoji 读出来是乱码/静音/怪音，用户也不指望听见「笑脸」。
+ * 覆盖表情本体、肤色修饰、ZWJ 连字、变体选择符、按键组合、标签字符。
+ */
+const EMOJI_CHARS = /[\p{Extended_Pictographic}\p{Emoji_Modifier}\uFE0F\u200D\u20E3\u{E0020}-\u{E007F}]/gu
+export function stripEmojiForSpeech(input) {
+  return String(input ?? '').replace(EMOJI_CHARS, '')
+}
+
 export function stripForSpeech(input) {
   let text = String(input ?? '')
+  if (!text.trim()) return ''
+  // 表情先摘掉：后面的标点/换行清理会把留下的空档收干净
+  text = stripEmojiForSpeech(text)
   if (!text.trim()) return ''
   // 代码围栏：内容读出来是噪音，整段跳过（含未闭合的尾巴）
   text = text.replace(/```[^\n]*\n[\s\S]*?```/g, ' ')
@@ -2227,10 +2239,19 @@ export function renderMarkdown(input) {
 
 const MAXWORDS_LEVELS = ['短', '中', '长']
 const MAXWORDS_LINES = {
-  短: '回复控制在 80 字内，先给结论。',
-  中: '回复控制在 300 字内，先给结论再补要点。',
-  长: '可以展开说明，先给结论，再分点补充细节。',
+  短: '回复控制在 80 字内，先说结论，像聊天一样自然。',
+  中: '回复控制在 300 字内，先说结论，再自然补充几句。',
+  长: '可以展开说明，先说结论，再自然补充细节。',
 }
+
+/** 说话方式：对话要像真人聊天，不要输出测试报告式的清单（状态/延迟/下一句之类）。 */
+export const TONE_RULE = [
+  '【最高优先级的说话方式，覆盖此前一切汇报习惯】',
+  '你现在是在手机上跟主人聊天，不是干活，也不是汇报进度：用一两句口语接话，最多三句，像朋友那样。',
+  '禁止列表、编号、项目符号、表格、字段名（状态/延迟/进度/下一句/收到），禁止测试报告口吻；不许提工具、任务、会话、重启、空闲、派活。',
+  '主人发来表情就顺着接住它的情绪，不用描述或解释这个表情。',
+  '除非主人明确要清单，否则只说人话。',
+].join('\n')
 
 export function normalizeMaxWords(value) {
   const text = String(value ?? '').trim()
@@ -2254,6 +2275,7 @@ export function buildHiddenPrompt(config = {}) {
   const blocks = []
   const persona = String(config?.persona ?? '').trim()
   if (persona) blocks.push(`角色设定（用户配置的人设，覆盖默认语气）：\n${persona.slice(0, 2000)}`)
+  blocks.push(TONE_RULE)
   blocks.push(MAXWORDS_LINES[normalizeMaxWords(config?.maxWords)])
   return blocks.join('\n\n')
 }

@@ -13,7 +13,7 @@ import { createServer } from 'node:http'
 import { readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { apply, buildDispatchPrompt, buildHiddenPrompt, normalizeMaxWords, parseCommand, renderMarkdown, stripForSpeech } from './index.js'
+import { apply, buildDispatchPrompt, buildHiddenPrompt, normalizeMaxWords, parseCommand, renderMarkdown, stripEmojiForSpeech, stripForSpeech } from './index.js'
 
 const routes = []
 const listeners = new Map()
@@ -200,6 +200,10 @@ async function main() {
   check('stripForSpeech 表格不分隔行、单元格连成一句', speech.includes('端点，方法'), speech)
   check('stripForSpeech 幂等', stripForSpeech(speech) === speech, stripForSpeech(speech))
   check('stripForSpeech 纯文本原样返回', stripForSpeech('今天天气不错') === '今天天气不错')
+  check('stripForSpeech 表情不念', stripForSpeech('好开心😀🎉') === '好开心', stripForSpeech('好开心😀🎉'))
+  check('stripForSpeech 肤色/连字/变体表情不念', stripForSpeech('👍🏽和👨‍👩‍👧和❤️') === '和和', stripForSpeech('👍🏽和👨‍👩‍👧和❤️'))
+  check('stripForSpeech 纯表情没有可读内容', stripForSpeech('😀😀😀') === '', stripForSpeech('😀😀😀'))
+  check('stripEmojiForSpeech 保留文字与标点', stripEmojiForSpeech('行😀，就这样。') === '行，就这样。', stripEmojiForSpeech('行😀，就这样。'))
 
   const renderBasic = renderMarkdown('这是 **粗体**、*斜体* 和 `code`。')
   check('renderMarkdown 粗体/斜体/行内代码', ['<strong>粗体</strong>', '<em>斜体</em>', '<code>code</code>'].every((tag) => renderBasic.includes(tag)), renderBasic)
@@ -224,6 +228,7 @@ async function main() {
   check('隐藏段带人设', hiddenShort.includes('你是鲸灵。'), hiddenShort)
   check('隐藏段短/长两档约束不同', hiddenShort.includes('80 字') && hiddenLong.includes('展开说明') && hiddenShort !== hiddenLong)
   check('隐藏段与正文分离（正文不含人设）', !plain.includes('你是鲸灵。') && !plain.includes('回复长度'))
+  check('隐藏段禁止测试报告式清单', hiddenShort.includes('最高优先级的说话方式') && hiddenShort.includes('禁止列表'), hiddenShort)
   check('normalizeMaxWords 缺省/未知都落回「短」', normalizeMaxWords(undefined) === '短' && normalizeMaxWords('超长') === '短')
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   origin = `http://127.0.0.1:${server.address().port}`
@@ -1040,10 +1045,21 @@ async function main() {
   )
   const panelAgain = await (await fetch(`${origin}/pet-voice/panel/state`)).json()
   check('面板配置落盘（重新 GET 仍是改后的值）', panelAgain.maxWords === '长' && panelAgain.bubble === false && panelAgain.wakeName === '小鱼', JSON.stringify({ maxWords: panelAgain.maxWords, bubble: panelAgain.bubble, wakeName: panelAgain.wakeName }))
-  const domainSaved = await postPanel({ mode: 'domain', customUrl: 'https://pet.example.com' })
+  const placeholderDomain = await fetch(`${origin}/pet-voice/panel/state`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ mode: 'domain', customUrl: 'https://pet.example.com' }),
+  })
+  const placeholderJson = await placeholderDomain.json()
+  check(
+    '示例域名不算配好（面板不拿它出二维码）',
+    placeholderDomain.status === 400 && String(placeholderJson.error).includes('示例'),
+    `${placeholderDomain.status} ${placeholderJson.error}`,
+  )
+  const domainSaved = await postPanel({ mode: 'domain', customUrl: 'https://pet.mydomain.dev' })
   check(
     'domain 档 + 自定义地址 → 生成带 /pet-voice/ 的配对链接',
-    domainSaved.mode === 'domain' && domainSaved.customUrl === 'https://pet.example.com' && String(domainSaved.pairingUrl).startsWith('https://pet.example.com/pet-voice/?k='),
+    domainSaved.mode === 'domain' && domainSaved.customUrl === 'https://pet.mydomain.dev' && String(domainSaved.pairingUrl).startsWith('https://pet.mydomain.dev/pet-voice/?k='),
     JSON.stringify({ mode: domainSaved.mode, customUrl: domainSaved.customUrl, pairingUrl: String(domainSaved.pairingUrl).slice(0, 70) }),
   )
   const badWords = await fetch(`${origin}/pet-voice/panel/state`, {
