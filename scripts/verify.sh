@@ -83,6 +83,14 @@ for f in plugins/dsh-pet-voice/index.js mcp/pet-bridge/xiaoai.mjs mcp/pet-bridge
   run "node --check $f" node --check "$f"
 done
 
+head_ "1b. 素材归一化表（每段动作的人物高度必须一致）"
+# 需要 ffmpeg 量素材原始包围盒；没有就 SKIP，不算失败
+if command -v ffmpeg >/dev/null 2>&1 && [ -f scripts/sprite-norm.py ]; then
+  run "素材归一化表" python3 scripts/sprite-norm.py --check
+else
+  echo "  SKIP  没装 ffmpeg（缺席就不量素材）"
+fi
+
 head_ "2. 插件自测（模拟 HOME，不碰真实配置）"
 # selftest 要求干净 HOME：上次跑剩的面板文件会让它以为在真机上，直接退出 2
 rm -rf /tmp/pvtest && mkdir -p /tmp/pvtest
