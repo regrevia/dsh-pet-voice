@@ -1336,7 +1336,8 @@ class FloatingPetService : Service() {
     private fun logVad(listenedMs: Long, heard: Boolean, textLen: Int, resume: Boolean) {
         val tail = recorder.lastEndSilenceMs
         val voiced = recorder.lastVoicedMs
-        val line = "vad ${listenedMs}ms 人声${voiced}ms 尾静音${tail}ms 字数$textLen " +
+        val line = "vad ${listenedMs}ms 人声${voiced}ms 尾静音${tail}ms " +
+            "stopped=${recorder.stopReason} 字数$textLen " +
             if (heard) (if (resume) "续听" else "结束") else "没人声"
         Log.i("PetVad", line)
         NetLog.record("/api/asr", 200, listenedMs, line)

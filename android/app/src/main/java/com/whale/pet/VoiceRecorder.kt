@@ -63,6 +63,10 @@ class VoiceRecorder {
     @Volatile var lastEndSilenceMs = 0
         private set
 
+    /** 这次为什么停：说完 / 说太久 / 没人说话。诊断行里直接打出来。 */
+    @Volatile var stopReason = VadGate.Stop.NONE
+        private set
+
     @SuppressLint("MissingPermission")
     fun start(): Boolean {
         if (recording) return true
@@ -97,6 +101,7 @@ class VoiceRecorder {
         heardSpeech = false
         lastVoicedMs = 0
         lastEndSilenceMs = 0
+        stopReason = VadGate.Stop.NONE
         stopping = false
         record = rec
         recording = true
@@ -119,10 +124,12 @@ class VoiceRecorder {
     private fun loop(rec: AudioRecord) {
         val frame = ShortArray(320) // 20ms @16k
         val bytes = ByteArray(frame.size * 2)
-        var elapsedMs = 0
-        var silenceMs = 0
-        var voicedMs = 0
-        val startedAt = System.currentTimeMillis()
+        val gate = VadGate(
+            tailSilenceMs = TAIL_SILENCE_MS,
+            minVoicedMs = MIN_VOICED_MS,
+            maxMs = MAX_MS,
+            noSpeechMs = NO_SPEECH_MS,
+        )
         try {
             while (recording && !stopping) {
                 val n = rec.read(frame, 0, frame.size)
@@ -137,25 +144,19 @@ class VoiceRecorder {
                 pcm.write(bytes, 0, n * 2)
                 val rms = sqrt(sum / n) / 32768.0
                 onLevel?.invoke(min(1.0, rms * 8).toFloat())
-                val frameMs = n * 1000 / SAMPLE_RATE
-                elapsedMs += frameMs
-                if (rms > 0.02) {
-                    voicedMs += frameMs
-                    silenceMs = 0
-                    if (voicedMs >= MIN_VOICED_MS) heardSpeech = true
-                } else if (heardSpeech) {
-                    silenceMs += frameMs
+                // 收尾判定全在 VadGate 里：说什么、怎么算，JVM 单测能按毫秒断言
+                val stop = gate.feed(rms, n * 1000 / SAMPLE_RATE)
+                if (stop != VadGate.Stop.NONE) {
+                    stopReason = stop
+                    break
                 }
-                val now = System.currentTimeMillis() - startedAt
-                if (elapsedMs >= MAX_MS) break
-                if (heardSpeech && silenceMs >= TAIL_SILENCE_MS) break
-                if (!heardSpeech && now >= NO_SPEECH_MS) break
             }
         } catch (e: Exception) {
             Log.w(TAG, "录音线程异常：${e.javaClass.simpleName}")
         }
-        lastVoicedMs = voicedMs
-        lastEndSilenceMs = silenceMs
+        heardSpeech = gate.heardSpeech
+        lastVoicedMs = gate.voicedMs
+        lastEndSilenceMs = gate.silenceMs
         // 读线程自己收尾：先关硬件，再通知上层来取 WAV
         recording = false
         try {

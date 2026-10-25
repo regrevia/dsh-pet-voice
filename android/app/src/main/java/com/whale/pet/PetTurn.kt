@@ -42,6 +42,9 @@ class PetTurn(
     /** 谁在喂文本："" 未定 / "sse" / "poll"，避免同一段被喂两遍。 */
     private val feeder = java.util.concurrent.atomic.AtomicReference("")
 
+    /** 这一轮压根没开 SSE（面板锁成只用轮询）：此时 delta 只能来自轮询，别标成 sse。 */
+    @Volatile private var pollOnly = false
+
     /** SSE 最后一次收到字节的时刻：轮询据此决定「让位」还是接管。 */
     @Volatile private var sseLastAt = 0L
 
@@ -123,6 +126,7 @@ class PetTurn(
         // 硬开会先干等一个读超时，人看着「处理中」发呆。轮询本来就在，只是提前接管。
         val forcedPoll = pre.json?.optString("transport").orEmpty() == "poll"
         if (forcedPoll) {
+            pollOnly = true
             latency.mark("transport", "panel=poll")
             dbg("transport forced poll by panel")
             post { cb.onStatus("正在想…") }
@@ -339,8 +343,9 @@ class PetTurn(
             "delta" -> {
                 val d = data.optString("text")
                 if (d.isEmpty()) return
-                if (feeder.get() == "poll") return
-                feeder.set("sse")
+                // 轮询接管后 SSE 的重复增量要丢掉；纯轮询轮次没有第二条通道，照收
+                if (feeder.get() == "poll" && !pollOnly) return
+                feeder.set(if (pollOnly) "poll" else "sse")
                 assistant.append(d)
                 feedSentences(d)
                 val full = assistant.toString()
