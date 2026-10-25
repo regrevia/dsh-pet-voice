@@ -332,6 +332,21 @@ function ensureToken() {
   return token
 }
 
+/** 换新令牌：写进同一个文件，旧 cookie 与旧配对链接立刻作废，手机要重新扫码。 */
+function rotateToken() {
+  mkdirSync(HOME_DIR, { recursive: true, mode: 0o700 })
+  const token = randomBytes(24).toString('hex')
+  writeFileSync(TOKEN_PATH, `${token}\n`, { mode: 0o600 })
+  try {
+    chmodSync(TOKEN_PATH, 0o600)
+  } catch {
+    /* Windows 上 chmod 不可用，忽略 */
+  }
+  tokenCache = { value: token, mtimeMs: -1 }
+  LOG(`已换新访问 token：${TOKEN_PATH}`)
+  return token
+}
+
 /** 读状态：记住「哪个项目上次用的是哪个会话」+ 选过的人设。 */
 function loadState() {
   const empty = { projects: {}, preset: '', updatedAt: null }
@@ -3182,6 +3197,11 @@ export function apply(ctx, config) {
             return sendJson(res, 400, { ok: false, error: 'bad json' })
           }
           setPanelConfig(patch)
+          return sendJson(res, 200, await snapshot())
+        }
+
+        if (route === 'rotate-token' && method === 'POST') {
+          rotateToken()
           return sendJson(res, 200, await snapshot())
         }
 

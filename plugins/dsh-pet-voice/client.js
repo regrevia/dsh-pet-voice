@@ -157,6 +157,7 @@ window.__ModuleLoader__.load({
       const [qr, setQr] = React.useState('')
       const [error, setError] = React.useState('')
       const [copied, setCopied] = React.useState(false)
+      const [confirmRotate, setConfirmRotate] = React.useState(false)
 
       const load = React.useCallback(async () => {
         try {
@@ -238,6 +239,20 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const rotate = async () => {
+        if (!confirmRotate) {
+          setConfirmRotate(true)
+          setTimeout(() => setConfirmRotate(false), 4000)
+          return
+        }
+        setConfirmRotate(false)
+        try {
+          setState(await request('/rotate-token', {}))
+        } catch {
+          setError('换新令牌失败')
+        }
+      }
+
       const linkRow = pairingUrl
         ? h(
             'div',
@@ -248,7 +263,16 @@ window.__ModuleLoader__.load({
               onFocus: (e) => e.target.select(),
               style: { ...S.input, flex: 1, minWidth: 240, opacity: 0.75 },
             }),
-            h('button', { style: S.button, onClick: copyLink }, copied ? '已复制' : '复制链接'),
+            h(
+              'button',
+              { style: S.button, onClick: copyLink },
+              copied ? '已复制' : '复制链接',
+            ),
+            h(
+              'button',
+              { style: S.button, onClick: rotate },
+              confirmRotate ? '再点一次' : '换新令牌',
+            ),
           )
         : null
 
