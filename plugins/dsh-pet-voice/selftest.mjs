@@ -10,10 +10,36 @@
  */
 
 import { createServer } from 'node:http'
-import { readFileSync, rmSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { apply, buildDispatchPrompt, buildHiddenPrompt, normalizeMaxWords, parseCommand, renderMarkdown, stripEmojiForSpeech, stripForSpeech } from './index.js'
+
+/* 面板配置落在 ~/.dsh/pet-voice/，跑自检会改写它。这里既拦一道（占用了真 HOME 就拒绝跑），
+   也兜一道（真跑过也把 panel.json / devices.json 原样写回去）。 */
+const PANEL_DIR = join(homedir(), '.dsh/pet-voice')
+const PANEL_FILES = ['panel.json', 'devices.json']
+const savedPanelFiles = new Map()
+for (const name of PANEL_FILES) {
+  const file = join(PANEL_DIR, name)
+  if (existsSync(file)) savedPanelFiles.set(name, readFileSync(file))
+}
+if (savedPanelFiles.size && process.env.PV_SELFTEST_ALLOW_REAL !== '1') {
+  console.error(
+    'selftest 会改写面板配置，这里不是空 HOME。\n' +
+      '跑法：HOME=/tmp/pvtest node plugins/dsh-pet-voice/selftest.mjs\n' +
+      '确实要在当前 HOME 上跑，就先设 PV_SELFTEST_ALLOW_REAL=1。',
+  )
+  process.exit(2)
+}
+const restorePanelFiles = () => {
+  for (const [name, buf] of savedPanelFiles) {
+    try {
+      writeFileSync(join(PANEL_DIR, name), buf)
+    } catch {}
+  }
+}
+process.on('exit', restorePanelFiles)
 
 const routes = []
 const listeners = new Map()
@@ -1094,6 +1120,7 @@ async function main() {
 
   /* 18. 卸载要干净 */
   server.close()
+  restorePanelFiles()
   console.log('')
   const failed = results.filter((r) => !r.ok)
   console.log(`selftest: ${results.length - failed.length}/${results.length} 通过`)
