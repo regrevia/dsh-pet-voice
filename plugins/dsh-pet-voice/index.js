@@ -1836,12 +1836,14 @@ async function dispatchToSession(ctx, state, body, req, deps) {
   const ac = new AbortController()
   const acTimer = setTimeout(() => { try { ac.abort() } catch { /* ignore */ } }, 120_000)
   liveAbort.set(sessionId, ac)
+  // 人设/长度档挂进这条会话的 system prompt：只有模型看得见，不进对话记录。
+  await syncHiddenPrompt(ctx, sessionId, getPanelConfig())
   const prompt = controller.prompt(
     {
       requestId: rid || randomBytes(8).toString('hex'),
       sessionId,
       mode: 'queue',
-      content: [{ type: 'text', text: buildDispatchPrompt(text, getPanelConfig()) }],
+      content: [{ type: 'text', text: buildDispatchPrompt(text) }],
       clientTimeZone: tzOf(req),
     },
     ac.signal,
@@ -2236,16 +2238,94 @@ export function normalizeMaxWords(value) {
 }
 
 /**
- * 把「人设 + 长度档」拼到用户这句话前面。宿主 prompt 没有独立的 system 角色，
- * 所以用一个明确分段的头部块，模型一样会当系统约束读。
+ * 派发正文只有用户原话。
+ *
+ * 早期把「人设 + 长度档」拼在正文前面，理由是「宿主 prompt 没有 system 角色」——
+ * 那条前提是错的：宿主 `systemPrompt.section()` 能挂一段只作用于这一条会话的
+ * 系统提示，既不进会话记录，也不会让用户在对话里看到自己的话被加前缀。人设和
+ * 长度档现在走 buildHiddenPrompt() + syncHiddenPrompt()，正文保持原样。
  */
-export function buildDispatchPrompt(text, config = {}) {
+export function buildDispatchPrompt(text) {
+  return String(text ?? '').trim()
+}
+
+/** 隐藏段：人设 + 长度档，挂进会话的 system prompt，不落进对话正文。 */
+export function buildHiddenPrompt(config = {}) {
   const blocks = []
   const persona = String(config?.persona ?? '').trim()
-  if (persona) blocks.push(`【人设】\n${persona.slice(0, 2000)}`)
-  blocks.push(`【输出要求】\n${MAXWORDS_LINES[normalizeMaxWords(config?.maxWords)]}`)
-  blocks.push(String(text ?? '').trim())
+  if (persona) blocks.push(`角色设定（用户配置的人设，覆盖默认语气）：\n${persona.slice(0, 2000)}`)
+  blocks.push(MAXWORDS_LINES[normalizeMaxWords(config?.maxWords)])
   return blocks.join('\n\n')
+}
+
+/**
+ * sessionId -> { text, dispose }：这条会话现在挂着哪段隐藏提示。
+ *
+ * `systemPrompt.section()` 按「调用方作用域」注册。拿宠物那条会话的 agent 作用域
+ * 去注册，只有它看得见；本机主会话、别的项目会话都不受影响。同名同层重复注册会
+ * 抛错，所以人设一变就先摘掉再重挂。
+ */
+const hiddenSections = new Map()
+
+export async function syncHiddenPrompt(ctx, sessionId, config) {
+  if (!sessionId) return false
+  const text = buildHiddenPrompt(config)
+  const current = hiddenSections.get(sessionId)
+  if (current?.text === text) return true
+  if (current) {
+    try { current.dispose() } catch { /* 已经摘掉了 */ }
+    hiddenSections.delete(sessionId)
+  }
+  const controller = ctx?.get?.('sessionController')
+  const presets = ctx?.get?.('agentPresets')
+  if (!controller?.resolveAgent || typeof presets?.serviceFor !== 'function') {
+    netLog('hidden-skip', { reason: 'no-scope-api' })
+    return false
+  }
+  try {
+    const resolved = await controller.resolveAgent(sessionId)
+    const agent = resolved?.agent
+    if (!agent) {
+      netLog('hidden-skip', { reason: resolved?.error?.kind ?? 'no-agent' })
+      return false
+    }
+    // 优先从 agent 的隔离预设组里取（真正「只有这条会话看得见」）；
+    // 取不到再退回 agent 自己 ctx 上的实例，并把走的是哪条路记进诊断。
+    let service
+    let via = 'preset'
+    try {
+      service = presets.serviceFor(agent, 'systemPrompt')
+    } catch {
+      service = undefined
+    }
+    if (!service?.section) {
+      via = 'agent-ctx'
+      try {
+        service = agent.ctx?.get?.('systemPrompt')
+      } catch {
+        service = undefined
+      }
+    }
+    if (!service?.section) {
+      netLog('hidden-skip', { reason: 'no-system-prompt' })
+      return false
+    }
+    const dispose = service.section({ name: 'pet-persona', order: 100, text })
+    hiddenSections.set(sessionId, { text, dispose })
+    netLog('hidden-section', { sessionId, via, chars: text.length })
+    return true
+  } catch (error) {
+    netLog('hidden-failed', { error: String(error?.message ?? error) })
+    return false
+  }
+}
+
+/** 插件卸载时把挂上去的段都摘掉，重载后不会重复注册。 */
+export function disposeHiddenPrompts() {
+  for (const { dispose } of hiddenSections.values()) {
+    try { dispose() } catch { /* 已经摘掉了 */ }
+  }
+  hiddenSections.clear()
 }
 
 
@@ -2644,6 +2724,7 @@ export function apply(ctx, config) {
         if (!controller?.prompt) throw new Error('宿主缺少 sessionController')
         // 只派给小爱专用会话：不再看 currentSessionId()，也不读 state.projects
         const { sessionId } = await ensurePetSession()
+        await syncHiddenPrompt(ctx, sessionId, getPanelConfig())
         // 先拿游标再派发，否则这一轮的 final 可能落在游标之前而读不到
         const sinceSeq = bufferOf(sessionId).seq
         const prompt = controller.prompt(
@@ -2651,7 +2732,7 @@ export function apply(ctx, config) {
             requestId: randomBytes(8).toString('hex'),
             sessionId,
             mode: 'queue',
-            content: [{ type: 'text', text: buildDispatchPrompt(text, getPanelConfig()) }],
+            content: [{ type: 'text', text: buildDispatchPrompt(text) }],
             clientTimeZone: tz(),
           },
           AbortSignal.timeout(120_000),
@@ -3727,12 +3808,13 @@ export function apply(ctx, config) {
           return sendJson(res, 503, { ok: false, action: 'dispatch', error: '宿主缺少 sessionController' })
         }
         try {
+          await syncHiddenPrompt(ctx, pinned.sessionId, getPanelConfig())
           const prompt = controller.prompt(
             {
               requestId: randomBytes(8).toString('hex'),
               sessionId: pinned.sessionId,
               mode: 'queue',
-              content: [{ type: 'text', text: buildDispatchPrompt(parsed.content, getPanelConfig()) }],
+              content: [{ type: 'text', text: buildDispatchPrompt(parsed.content) }],
               clientTimeZone: tzOf(req),
             },
             AbortSignal.timeout(120_000),
@@ -3944,6 +4026,11 @@ export function apply(ctx, config) {
         }
       }
       downloadRoutes.clear()
+      try {
+        disposeHiddenPrompts()
+      } catch {
+        /* 已经卸载 */
+      }
       for (const set of streams.values()) {
         for (const res of set) {
           try {

@@ -450,11 +450,11 @@ node scripts/gen-pet-asset.mjs        # 把清单内联进 assets/pet/index.html
 | 待机 CPU | `/proc/<pid>/stat` 6 秒差分：仅 5 段循环时 **15.8% 单核**，加待机小动作后 **18.2%**（模拟器软解 VP9，10fps，420×465）；15fps 时 `top` 采样 23%。真机硬解预期更低但【未核实】。历史对照：早期 canvas 方案 137% → 2.1–3.7% |
 | 点一下唤醒 | 悬浮窗变 listening，系统识别器在模拟器上无结果 → `happy` 900ms 回 idle（预期） |
 | 长按 500ms | 打开 `HistoryActivity`，两行记录与「2 条」计数一致 |
-| 截图 | `docs/img/pet-overlay-idle.png`、`pet-overlay-listening.png`、`pet-overlay-thinking.png`、`pet-overlay-talking.png`、`pet-history.png` |
+| 截图 | `docs/img/pet-overlay.png`（桌面悬浮窗）、`pet-chat.png`（手机对话页） |
 | 形象渲染 | 视频帧序列（两路 `<video>` 交叉淡化）；`screencap` 与 `screenrecord` 都能拍到人物，CDP `Page.captureScreenshot` 拍到的是 alpha 全 0 空图（见 §10.3） |
 | 气泡间距（`screencap` + 掩码法，2026-10-24 20:33，让位量按目标 16dp 反解后） | 120dp：窗口 330×462，气泡 y=74..248（64dp，**3 行完整**）/ 发梢 293 → **16.0dp**；168dp：462×594，74..201（47dp）/ 249 → **17.1dp**；200dp：550×682，74..201 / 257 → **20.0dp**。三档均在判据 12–24dp 内 |
 | 120dp 气泡缺陷 | **已修**：`max-height: 50px` → `45%` + JS 量 `offsetHeight` 动态让位，3 行文案不再裁字 |
-| 图像证据 | `docs/img/pet-bubble-120.png`、`pet-bubble-168.png`、`pet-bubble-200.png` |
+| 图像证据 | 见 `docs/img/`（当前版本实拍） |
 
 **验证用的调试钩子（仅 debug 包）**：`FloatingPetService` 注册了 `com.whale.pet.action.*` 广播
 （`DEBUG_TURN` / `DEBUG_MODE` / `DEBUG_SAY` / `DEBUG_PAUSE`），只用于在模拟器上触发一轮真实请求或切状态截图；

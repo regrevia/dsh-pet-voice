@@ -2,7 +2,7 @@
 
 一只住在你电脑里的像素鲸鱼娘。**屏幕和麦克风在你手上，大脑跑在你自己电脑上的 [DeepSeek Harness](https://github.com/deepseek-ai) 会话里。**
 
-![悬浮窗对话](docs/img/pet-overlay-talking.png)
+![桌面悬浮窗](docs/img/pet-overlay.png)
 
 手机端是一个 30 MB 的 Android App：桌面悬浮着会呼吸、会说话的小鲸鱼，点一下就能说话，
 它把你这句话派给电脑上的专属会话，边生成边把回复念出来、把动作放出来。电脑关机，它就不在——
@@ -12,7 +12,7 @@
 
 | 项 | 状态 |
 | --- | --- |
-| APK | `0.9.7`（versionCode 77），Android 8.0+（API 26），targetSdk 35 |
+| APK | `0.9.8`（versionCode 78），Android 8.0+（API 26），targetSdk 35 |
 | 验证环境 | Android 11 模拟器（1080×2340）跑通全链路：配对、语音、回复、动作、历史、检查更新 |
 | 真机 | 厂商权限跳转与硬件麦克风只在 AOSP 页面验证过，各家 ROM 仍可能不同，欢迎回报 |
 | iOS | 不支持（悬浮窗与常听麦克风是 Android 特性） |
@@ -62,7 +62,7 @@ https://<你的地址>/pet-voice/?k=<一次性配对码>
 - **面板可配**：人设、输出长度、气泡开关、唤醒词、传输方式都在插件面板里改，改完手机立刻按新规矩走。
 - **检查更新**：App 内直接下载安装，覆盖安装保留配对信息。
 
-![历史与对话](docs/img/pet-history.png)
+![手机上的对话页](docs/img/pet-chat.png)
 
 ## 三种自接入方式
 
@@ -83,7 +83,7 @@ https://<你的地址>/pet-voice/?k=<一次性配对码>
 手机（悬浮窗 WebView）                 电脑（DSH 宿主进程）
   说话 ──► /api/asr   ──► 识别文本
          ──► /api/command ──► 切项目 / 派发 / 停
-         ──► /api/dispatch ──► 专属会话（带人设）
+         ──► /api/dispatch ──► 专属会话（人设走隐藏提示词）
   听 ◄── SSE 增量 / /api/poll 兜底 ◄── 逐字生成
   念 ◄── /api/tts    ◄── 句子级音频
 ```

@@ -584,7 +584,7 @@ App 只读 `/api/state` 里的 `settings`：
 
 | 字段 | 类型 | 默认 | 作用 |
 | --- | --- | --- | --- |
-| `persona` | string（≤2000 字，保留换行） | `""` | 自定义人设，作为派发 prompt 的头部 `【人设】` 段 |
+| `persona` | string（≤2000 字，保留换行） | `""` | 自定义人设，挂进该会话的 system prompt（隐藏），不进对话正文、不逐条重复 |
 | `maxWords` | `短` / `中` / `长` | `短` | 派发 prompt 的 `【输出要求】` 行（80 字 / 300 字 / 可展开） |
 | `bubble` | boolean | `true` | App 是否默认显示对话气泡 |
 | `wakeName` | string | `大肥鱼` | 唤醒词 |

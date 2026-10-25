@@ -13,7 +13,7 @@ import { createServer } from 'node:http'
 import { readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { apply, buildDispatchPrompt, normalizeMaxWords, parseCommand, renderMarkdown, stripForSpeech } from './index.js'
+import { apply, buildDispatchPrompt, buildHiddenPrompt, normalizeMaxWords, parseCommand, renderMarkdown, stripForSpeech } from './index.js'
 
 const routes = []
 const listeners = new Map()
@@ -216,11 +216,14 @@ async function main() {
   const renderLink = renderMarkdown('[官网](https://example.com) [坏链](javascript:alert(1))')
   check('renderMarkdown 只放行 http(s) 链接、外链新窗口', renderLink.includes('href="https://example.com" target="_blank"') && !renderLink.includes('javascript:'), renderLink)
 
-  const promptShort = buildDispatchPrompt('帮我看看项目', { persona: '你是鲸灵。', maxWords: '短' })
-  const promptLong = buildDispatchPrompt('帮我看看项目', { persona: '你是鲸灵。', maxWords: '长' })
-  check('buildDispatchPrompt 注入人设段', promptShort.includes('【人设】\n你是鲸灵。'), promptShort)
-  check('buildDispatchPrompt 短/长两档约束不同', promptShort.includes('80 字') && promptLong.includes('展开说明') && promptShort !== promptLong)
-  check('buildDispatchPrompt 没配人设就不生成人设段', !buildDispatchPrompt('x', { maxWords: '中' }).includes('【人设】'))
+  // 人设/长度档走会话级 system prompt（隐藏），正文只发用户原话。
+  const plain = buildDispatchPrompt('帮我看看项目')
+  check('派发正文只有用户原话', plain === '帮我看看项目', plain)
+  const hiddenShort = buildHiddenPrompt({ persona: '你是鲸灵。', maxWords: '短' })
+  const hiddenLong = buildHiddenPrompt({ persona: '你是鲸灵。', maxWords: '长' })
+  check('隐藏段带人设', hiddenShort.includes('你是鲸灵。'), hiddenShort)
+  check('隐藏段短/长两档约束不同', hiddenShort.includes('80 字') && hiddenLong.includes('展开说明') && hiddenShort !== hiddenLong)
+  check('隐藏段与正文分离（正文不含人设）', !plain.includes('你是鲸灵。') && !plain.includes('回复长度'))
   check('normalizeMaxWords 缺省/未知都落回「短」', normalizeMaxWords(undefined) === '短' && normalizeMaxWords('超长') === '短')
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   origin = `http://127.0.0.1:${server.address().port}`

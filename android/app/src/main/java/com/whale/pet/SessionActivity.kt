@@ -10,6 +10,7 @@ import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
 import android.widget.BaseAdapter
 import android.widget.EditText
 import android.widget.ListView
@@ -186,6 +187,8 @@ class SessionActivity : Activity() {
         val raw = input.text.toString().trim()
         if (raw.isBlank() || sending || sessionId.isBlank()) return
         input.setText("")
+        input.clearFocus()
+        hideKeyboard()
         errorLine = ""
         sending = true
         findViewById<TextView>(R.id.chatSend).isEnabled = false
@@ -258,9 +261,17 @@ class SessionActivity : Activity() {
         adapter.notifyDataSetChanged()
     }
 
+    /** 贴底：这一帧布局完再滚一次，键盘弹出/收起会改高度，立刻滚会滚到一半。 */
     private fun scrollBottom() {
         if (rows.isEmpty()) return
-        list.setSelection(adapter.count - 1)
+        list.post { list.setSelection(list.count - 1) }
+        list.postDelayed({ list.setSelection(list.count - 1) }, 200)
+    }
+
+    /** 发出去就把键盘收起来，回复才有地方露脸。 */
+    private fun hideKeyboard() {
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.hideSoftInputFromWindow(input.windowToken, InputMethodManager.HIDE_NOT_ALWAYS)
     }
 
     private inner class MsgAdapter : BaseAdapter() {
