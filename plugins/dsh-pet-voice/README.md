@@ -96,7 +96,7 @@ https://xxx-xxx.trycloudflare.com/pet-voice/?k=<token>
 | POST | `say` | `{text, voice?, id?}` → `{ok, seq, queued}`；`text` 超 300 字截断并标 `truncated:true`；队列只留最近 20 条；同 `id` 重复投递只入队一次 |
 | GET | `pair` | `{ok, publicBase, source:"tunnel"|"lan"|"local", tunnelAt, alive?, note?}`；页面引导卡用它填「手机上能打开的地址」。**不含 token**：`tunnel` 取 `xiaoai-url.txt` 的 origin，`lan` 用本机非回环 IPv4+宿主端口，`local` 只有 127.0.0.1（手机打不开）。`tunnelAt` 里的 `?k=` 一律替换成 `<已省略>`；`tunnel` 档会**服务端探活**（`publicBase + api/pair`，1.5 s 超时、30 s 缓存、并发去重），401 也算活着；探不通时 `alive:false` + `note:"隧道域名可能已过期（cloudflared 重启会换域名）"`，**不会**降级到 lan（私网地址手机更打不开） |
 | GET | `say?since=` | `{items:[{seq,text,voice,at}], cursor}`，按 `seq` 升序，最多 20 条；`since=-1` 只对齐游标不回放（页面刷新不重播） |
-| GET | `stream?sessionId=` | SSE：`hello` / `start {turn}` / `delta {text}` / `message {text,turn}` / `tool {name}` / `final {text,turn}` / `end {reason,turn}` / `error {message}`，15s 一次心跳。`message` 是过程消息**不是**终止；`final` / `end` 只在官方的 `turn/end` 发（工具任务不会在「我查一下」那句被误判结束），判定一轮结束只看 `end`；`start` 的轮次号取自官方 `data.turn` |
+| GET | `stream?sessionId=` | SSE：`hello` / `start {turn}` / `delta {text}` / `message {text,turn}` / `tool {name}` / `final {text,turn}` / `end {reason,turn}` / `error {message}`，15s 一次心跳。`message` 是过程消息**不是**终止；`final` / `end` 只在官方的 `turn/end` 发（工具任务不会在「我查一下」那句被误判结束；`turn/end` 90 秒没来才有兜底 `end`，这一轮还活着就一直等到 5 分钟硬上限），判定一轮结束只看 `end`；`start` 的轮次号取自官方 `data.turn` |
 | GET | `poll?sessionId=&cursor=&wait=` | 长轮询兜底，语义同 SSE。`cursor` 传帧序号续传，一次最多回 200 帧；`more:true` 表示还有没取完的，按返回的 `cursor` 接着取（游标只推进到**已返回的最后一帧**，不会跳帧）；**`cursor=-1` 是「只对齐」**：立刻回 `{frames:[], cursor:<最新 seq>}`，用来接上会话时不重播历史 |
 | POST | `cancel` | `{sessionId}` |
 | GET | `link` | 当前生效的完整配对链接（要已登录的 cookie） |

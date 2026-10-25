@@ -2743,6 +2743,43 @@ export function apply(ctx, config) {
    * 长到能覆盖正常工具调用（实测本机工具任务多在 30s 内），取 90s。
    */
   const END_GRACE_MS = 90_000
+  /**
+   * 硬上限：一轮「还活着」（turn/start 之后、turn/end 之前）超过这么久，就当它卡死，
+   * 兜底发 end。正常工具任务不会跑到这里。
+   */
+  const HARD_GRACE_MS = 5 * 60_000
+  /**
+   * 登记「该收尾了」，END_GRACE_MS 后再发 end——但**这一轮还活着就别发**。
+   *
+   * 长工具步骤（编译、装包）能跑几分钟，这期间只有 finish、等不到 turn/end。提前发
+   * end，手机会把还在生成的这一轮当成结束：正文只播到一半，气泡停在半句（2026-10-25
+   * 晚上手机只剩一个「看」，就是这个形状）。所以只要 liveTurns 里还有它，就再等一轮
+   * 宽限，直到 HARD_GRACE_MS 才认定它真的卡死。
+   */
+  function armEndFallback(sessionId, reason) {
+    const prev = pendingEnd.get(sessionId)
+    if (prev?.timer) clearTimeout(prev.timer)
+    const stamp = prev ? prev.stamp + 1 : 1
+    const since = prev?.since ?? Date.now()
+    const arm = () => {
+      const timer = setTimeout(() => {
+        const now = pendingEnd.get(sessionId)
+        if (!now || now.stamp !== stamp) return
+        const live = liveTurns.get(sessionId) ?? liveTurns.get(bareSessionId(sessionId))
+        const held = Date.now() - now.since
+        if (live && held < HARD_GRACE_MS) {
+          flowLog(TURN_LOG_PATH, `end-hold sid=${bareSessionId(sessionId)} held=${held}ms live=${Date.now() - live}ms`)
+          arm()
+          return
+        }
+        pendingEnd.delete(sessionId)
+        emit(sessionId, 'end', { reason: now.reason })
+      }, END_GRACE_MS)
+      if (typeof timer?.unref === 'function') timer.unref()
+      pendingEnd.set(sessionId, { stamp, reason, timer, since })
+    }
+    arm()
+  }
   /** sessionId -> Set<ServerResponse>：SSE 订阅者。 */
   const streams = SHARED.streams
   /** 本实例开的 SSE 响应：卸载时只收自己的，别把新实例的也 end 了。 */
@@ -2863,19 +2900,8 @@ export function apply(ctx, config) {
         return
       }
       if (chunk.type === 'finish') {
-        // 先别发 end：正文的 final 还没来（见 pendingEnd 注释）。
-        const reason = chunk.reason?.kind ?? 'stop'
-        const prev = pendingEnd.get(sessionId)
-        if (prev?.timer) clearTimeout(prev.timer)
-        const stamp = prev ? prev.stamp + 1 : 1
-        const timer = setTimeout(() => {
-          const now = pendingEnd.get(sessionId)
-          if (!now || now.stamp !== stamp) return
-          pendingEnd.delete(sessionId)
-          emit(sessionId, 'end', { reason: now.reason })
-        }, END_GRACE_MS)
-        if (typeof timer?.unref === 'function') timer.unref()
-        pendingEnd.set(sessionId, { stamp, reason, timer })
+        // 先别发 end：正文的 final 还没来（见 pendingEnd / armEndFallback 注释）。
+        armEndFallback(sessionId, chunk.reason?.kind ?? 'stop')
         return
       }
       if (chunk.type === 'tool-call-delta' && chunk.name) {

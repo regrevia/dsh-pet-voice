@@ -212,12 +212,16 @@ SSE 增量通道（本机/直连首选；公网隧道可能被前置代理缓冲
 | `message` | `{ "text": string, "turn": number\|null }` | `assistant/message`：**过程**消息，可展示但**不是**终止——工具任务后面还会继续 |
 | `tool` | `{ "name": string }` | 调了个工具 |
 | `final` | `{ "text": string, "turn": number\|null }` | 本轮完整正文，**只在 `turn/end` 发** |
-| `end` | `{ "reason": string, "turn": number\|null }` | 本轮**唯一**的终止信号，**只在 `turn/end` 发**；`reason` 如 `stop` |
+| `end` | `{ "reason": string, "turn": number\|null }` | 本轮**唯一**的终止信号，**只在 `turn/end` 发**；`reason` 如 `stop`。只有 `turn/end` 90 秒没来、且这一轮已不在跑（或超过 5 分钟硬上限）才有兜底 `end` |
 | `error` | `{ "message": string }` | 本轮出错 |
 | `say` | `{ "seq": number, "text": string, "voice": string, "at": string, "id": string }` | 全局播报（所有 SSE 订阅者都收到，不分会话），`seq` 单调递增，`id` 可能为空串 |
 
 判定一轮结束**只看 `end`**：`final` 紧挨在 `end` 前发出，但不要用 `final` 或 `message` 判结束。
 收到 `finish` 帧也不会立刻发 `end`，而是等官方 `turn/end`（否则工具任务会在「我查一下」那一句就被误判结束）。
+只为「`turn/end` 根本没来」留了兜底：`finish` 后 90 秒还没等到 `turn/end` 才发 `end`；但这期间只要这一轮
+还活着（收到过 `turn/start`、没收到 `turn/end`——长工具步骤就是这样），就继续等，直到 5 分钟硬上限。
+这一轮还活着却提前发 `end`，手机就会把还在生成的一轮当成结束：正文只播到一半、气泡停在半句
+（2026-10-25 晚上只剩一个「看」就是这个），`logs/turn.log` 里会记一行 `end-hold`。
 
 断线语义：服务端不补发历史。客户端重连后应用 `/api/poll?cursor=-1` 先对齐，再只收新帧。
 每会话的增量缓冲只保留最近 400 帧、最多 40 个会话，超出就丢最旧的——所以「断了很久再重连」
