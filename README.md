@@ -99,12 +99,13 @@ SKIP_LIVE=1 bash scripts/verify.sh
 
 # 编 APK（JDK 17，别用 21+）
 export JAVA_HOME=~/jdk17/Contents/Home
-./gradlew -p android :app:assembleRelease
+android/gradlew -p android :app:assembleRelease
 ```
 
 产物在 `android/app/build/outputs/apk/release/app-release.apk`。
 要发布自己的版本，用同一个 keystore 签名才能覆盖安装、保住配对信息，
 流程见 [docs/android-app.md](docs/android-app.md) 的发布一节。
+改完想确认「回复收得到、动画没卡、测试没红」，照着 [docs/verification.md](docs/verification.md) 跑一遍。
 
 参与开发前请读 [CONTRIBUTING.md](CONTRIBUTING.md)；安全问题走 [SECURITY.md](SECURITY.md)。
 
