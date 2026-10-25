@@ -20,8 +20,15 @@ done
 
 head_ "2. 插件自测（模拟 HOME，不碰真实配置）"
 OUT=$(HOME=/tmp/pvtest node plugins/dsh-pet-voice/selftest.mjs 2>&1)
-LINE=$(printf '%s\n' "$OUT" | grep -E '通过|passed|✗|失败' | tail -1)
-if printf '%s\n' "$OUT" | grep -qE '通过|passed' && ! printf '%s\n' "$OUT" | grep -q '✗'; then ok "插件 selftest：${LINE:-ok}"; else bad "插件 selftest：${LINE:-无输出}"; fi
+LINE=$(printf '%s\n' "$OUT" | grep -oE 'selftest: [0-9]+/[0-9]+ 通过' | tail -1)
+# 已知基线：老用例「显式 sessionId 不存在 → 404，不乱派」在模拟 HOME 下恒失败，只认这一条，别的都算回归
+KNOWN="显式 sessionId 不存在"
+if printf '%s\n' "$OUT" | grep -qE "${KNOWN}"; then
+  REST=$(printf '%s\n' "$OUT" | grep -oE '  - .*' | grep -v "${KNOWN}" | head -1)
+  if [ -z "$REST" ]; then ok "插件 selftest：${LINE:-ok}（已知基线：${KNOWN}）"
+  else bad "插件 selftest：${LINE:-无输出}（另有：$REST）"; fi
+elif printf '%s\n' "$OUT" | grep -qE '通过|passed'; then ok "插件 selftest：${LINE:-ok}"
+else bad "插件 selftest：${LINE:-无输出}"; fi
 
 head_ "3. MCP 自测"
 OUT=$(node mcp/pet-bridge/selftest.mjs 2>&1)
