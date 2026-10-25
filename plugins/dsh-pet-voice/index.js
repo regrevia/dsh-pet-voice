@@ -171,13 +171,13 @@ const ASR_SCRIPT_CANDIDATES = [
 const ASR_HOST = '127.0.0.1'
 const ASR_PORT = Number(process.env.DSH_PET_ASR_PORT || 52399)
 const ASR_ENDPOINT = `http://${ASR_HOST}:${ASR_PORT}`
-const ASR_MODEL = 'base'
+const ASR_MODEL = 'large-v3-turbo'
 const ASR_LOG_PATH = join(ASR_DIR, 'worker.log')
 const ASR_PID_PATH = join(ASR_DIR, 'worker.pid')
 /** 10 s 的 16k/16bit 单声道只有 320 KB；4 MB 是给坏客户端的护栏，不是给正常请求的。 */
 const ASR_MAX_BYTES = 4 * 1024 * 1024
-/** 冷启动预算：实测 2.4 s（含 torch import），8 s 是「慢机器也够」的上限。 */
-const ASR_COLD_START_MS = 8000
+/** 冷启动预算：base 实测 2.4 s（含 torch import）；large-v3-turbo 光载权重就要 5.1 s。 */
+const ASR_COLD_START_MS = 25000
 const ASR_HEALTH_TIMEOUT = 1500
 const ASR_REQUEST_TIMEOUT = 30_000
 
@@ -204,6 +204,28 @@ const UPDATE_META_PATH = join(UPDATE_DIR, 'latest.json')
 const CLIENT_LOG_DIR = join(HOME_DIR, 'logs')
 const CLIENT_LOG_PATH = join(CLIENT_LOG_DIR, 'client.log')
 const CLIENT_LOG_MAX = 200 * 1024
+
+/**
+ * 识别链路日志：`logs/asr.log` 记每次识别（字节数/耗时/回声判定/文本），
+ * `logs/turn.log` 记每次派发的结局。手机端「乱码」「没收到回复」这类问题，
+ * 事后只能靠这两份现场记录复盘——之前只有内存里的 /api/diag，重启就没了。
+ */
+const ASR_FLOW_LOG_PATH = join(CLIENT_LOG_DIR, 'asr.log')
+const TURN_LOG_PATH = join(CLIENT_LOG_DIR, 'turn.log')
+const FLOW_LOG_MAX = 512 * 1024
+function flowLog(path, line) {
+  try {
+    const flat = String(line).replace(/[\r\n]+/g, ' ')
+    mkdirSync(CLIENT_LOG_DIR, { recursive: true })
+    appendFileSync(path, `${new Date().toISOString()} ${flat}\n`)
+    if (statSync(path).size > FLOW_LOG_MAX) {
+      writeFileSync(path, readFileSync(path, 'utf8').slice(-FLOW_LOG_MAX / 2))
+    }
+  } catch {
+    /* 写日志不许影响识别 */
+  }
+}
+
 /** 只认 update 目录里的 APK 文件名：没有 `/`、不以 `.` 开头，天然挡掉路径穿越。 */
 const APK_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.apk$/i
 const APK_MIME = 'application/vnd.android.package-archive'
@@ -232,6 +254,78 @@ function netLog(ev, extra = {}) {
   } catch {
     /* 诊断不能影响主链路 */
   }
+}
+
+/**
+ * 最近播报过的句子。
+ *
+ * 手机外放播报时，麦克风会把自己的声音录回来；识别出来就是「用户把助手刚说的话又说了一遍」，
+ * 再派发一次，助手就开始自问自答。线上真出现过整段对话都是助手台词的回音。
+ * 播报过的句子留 5 分钟，识别结果与它高度重合就当回声丢掉（回空文本，App 按「没听到」处理）。
+ */
+const RECENT_TTS = (SHARED.recentTts ||= [])
+const RECENT_TTS_MAX = 16
+const RECENT_TTS_TTL = 5 * 60 * 1000
+/** 双字重合度阈值：识别回声会有错字，完全相等判不了。 */
+const ECHO_DICE = 0.55
+/** 太短的句子不判：用户真的会说「好的」，不能当回声吞掉。 */
+const ECHO_MIN_CHARS = 6
+
+function rememberTtsText(text) {
+  const clean = String(text ?? '').trim()
+  if (!clean) return
+  RECENT_TTS.push({ text: clean, dense: speechDense(clean), at: Date.now() })
+  while (RECENT_TTS.length > RECENT_TTS_MAX) RECENT_TTS.shift()
+}
+
+const CN_DIGIT = '零一二三四五六七八九'
+
+/** 去标点、去空白，阿拉伯数字折成中文数字：识别结果和播报原文的标点、数字形态都对不上。 */
+function speechDense(text) {
+  return String(text ?? '')
+    .replace(/[\s\p{P}\p{S}_]+/gu, '')
+    .replace(/[0-9]/g, (digit) => CN_DIGIT[Number(digit)])
+}
+
+function bigramCounts(dense) {
+  const counts = new Map()
+  for (let i = 0; i + 1 < dense.length; i += 1) {
+    const gram = dense.slice(i, i + 2)
+    counts.set(gram, (counts.get(gram) || 0) + 1)
+  }
+  return counts
+}
+
+function diceSimilarity(a, b) {
+  if (!a || !b) return 0
+  if (a === b) return 1
+  const left = bigramCounts(a)
+  const right = bigramCounts(b)
+  let overlap = 0
+  let total = 0
+  for (const [gram, n] of left) {
+    total += n
+    overlap += Math.min(n, right.get(gram) || 0)
+  }
+  for (const n of right.values()) total += n
+  return total ? (2 * overlap) / total : 0
+}
+
+/** 命中就返回被回放的那句原文，否则空串。 */
+function echoOfRecentTts(text) {
+  const probe = speechDense(text)
+  if (probe.length < ECHO_MIN_CHARS) return ''
+  const now = Date.now()
+  for (let i = RECENT_TTS.length - 1; i >= 0; i -= 1) {
+    const item = RECENT_TTS[i]
+    if (now - item.at > RECENT_TTS_TTL) continue
+    if (!item.dense || item.dense.length < ECHO_MIN_CHARS) continue
+    // 只录到半句也算回声：整段都落在最近某句播报里，就算只占很小比例，也是扬声器在
+    // 喂自己（手机外放把半句话录回来是常态）。逐字重合再兜一层，挡住错字版本。
+    if (item.dense.includes(probe)) return item.text
+    if (diceSimilarity(probe, item.dense) >= ECHO_DICE) return item.text
+  }
+  return ''
 }
 
 /** 页面用到的静态文件（exact 注册用，见 apply 里的说明）。 */
@@ -2013,6 +2107,25 @@ async function sessionKnownToHost(ctx, sessionId, rowsHint) {
  * 抽出来是为了单测能不起 HTTP 覆盖「会话不存在 / 专属会话丢失」两条路径。
  */
 async function dispatchToSession(ctx, state, body, req, deps) {
+  // 「没收到回复」只有这里能复盘：手机看到的是一句提示，电脑这边必须留下
+  // 这次派发到底 404/202/200、被去重还是被中断。文本只截前 60 字。
+  const startedAt = Date.now()
+  const text = String(body?.text ?? '').trim()
+  const rid = String(body?.requestId ?? '').trim().slice(0, 12)
+  let outcome
+  try {
+    outcome = await dispatchToSessionInner(ctx, state, body, req, deps)
+    return outcome
+  } finally {
+    flowLog(
+      TURN_LOG_PATH,
+      `dispatch status=${outcome?.status ?? 'throw'} rid=${rid || '-'} chars=${text.length} ` +
+        `${outcome?.body?.deduped ? 'deduped ' : ''}${Date.now() - startedAt}ms text=${text.slice(0, 60)}`,
+    )
+  }
+}
+
+async function dispatchToSessionInner(ctx, state, body, req, deps) {
   const text = String(body?.text ?? '').trim()
   if (!text) return { status: 400, body: { ok: false, error: 'text 为空' } }
   const controller = ctx.get?.('sessionController')
@@ -3208,6 +3321,8 @@ export function apply(ctx, config) {
       })
     }
     const voice = String(url.searchParams.get('voice') ?? '').trim() || preset?.voice || TTS_DEFAULT_VOICE
+    // 记下「马上要塞进用户耳朵的话」：手机麦克风可能把它录回来（见 echoOfRecentTts）。
+    rememberTtsText(text)
     if (!TTS_VOICES.some((item) => item.id === voice)) {
       return sendJson(res, 400, {
         ok: false,
@@ -3400,10 +3515,21 @@ export function apply(ctx, config) {
     }
     const ms = Number.isFinite(result.ms) ? result.ms : 0
     const ok = result.ok !== false
+    const text = ok ? String(result.text ?? '') : ''
+    const echo = text ? echoOfRecentTts(text) : ''
+    flowLog(
+      ASR_FLOW_LOG_PATH,
+      `bytes=${body.length} ms=${ms} ${echo ? `echo=${echo.slice(0, 24)}` : 'ok'} text=${text.slice(0, 80)}`,
+    )
+    if (echo) {
+      netLog('asr-echo', { chars: text.length, heard: text.slice(0, 24) })
+      return sendJson(res, 200, { ok: true, text: '', echo: true, ms }, { 'x-asr-ms': String(ms) })
+    }
+    netLog('asr', { bytes: body.length, ms, chars: text.length })
     return sendJson(
       res,
       200,
-      { ok, text: String(result.text ?? ''), ...(ok ? {} : { error: result.error ?? '识别失败' }), ms },
+      { ok, text, ...(ok ? {} : { error: result.error ?? '识别失败' }), ms },
       { 'x-asr-ms': String(ms) },
     )
   }

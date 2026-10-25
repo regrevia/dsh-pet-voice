@@ -7,10 +7,10 @@
     所以这里把模型常驻在内存里，插件按需懒启动它，冷启动之后每个请求只剩推理时间。
 
 用法（一般由插件 spawn，不需要手动跑）：
-    python asr-worker.py [--port 52399] [--model base] [--pid-file <path>]
+    python asr-worker.py [--port 52399] [--model large-v3-turbo] [--pid-file <path>]
 
 接口：
-    GET  /health  → {"ok":true,"model":"base","pid":123,"uptimeMs":...}
+    GET  /health  → {"ok":true,"model":"large-v3-turbo","pid":123,"uptimeMs":...}
     POST /asr     body = WAV 原始字节（16kHz 单声道 s16le）
                   → {"ok":true,"text":"...","ms":123}
                   → {"ok":false,"error":"..."}（HTTP 仍然 200，别让调用方把业务错误当网络错误）
@@ -28,6 +28,7 @@ import argparse
 import io
 import json
 import os
+import re
 import signal
 import sys
 import threading
@@ -36,7 +37,13 @@ import wave
 
 # 16kHz 单声道，和 Android 侧录音参数一致；whisper 内部也按 16k 处理。
 SAMPLE_RATE = 16000
-# whisper 的 base 模型对「第一次调用」有一次性开销（权重在等），启动时先空跑一次。
+# 默认模型：base（139 MB）在中文上会稳定错字（「语音识别服务」→「余音时别服务」、「截图」→「截圖」），
+# 而且时不时吐繁体。large-v3-turbo（1.5 GB，M4 Pro 上加载 5.1 s、5–6 s 音频推理 1.6–2.9 s）
+# 实测同一批句子全对，只在超短句上偶尔错一个字，所以默认用它。
+DEFAULT_MODEL = "large-v3-turbo"
+# beam_size=5 比 1 多花 ~40% 时间换掉最后几个不确定字；一句话差半秒，认对更重要。
+BEAM_SIZE = 5
+# 第一次调用有一次性开销（权重在等、算子没编译），启动时先空跑一次。
 WARMUP_SECONDS = 1.0
 # 请求体上限：10 s 的 16k/16bit 单声道 = 320000 B，留 8 倍余量挡异常客户端。
 MAX_BODY = 8 * 1024 * 1024
@@ -47,9 +54,87 @@ SILENCE_RMS_INT16 = 90.0
 STARTED_AT = time.time()
 
 
+def iso_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+
+
 def log(message: str) -> None:
     """stderr 走日志；插件把 stdout/stderr 都重定向到 worker.log。"""
     print(f"[asr] {message}", file=sys.stderr, flush=True)
+
+
+# ---------------------------------------------------------------- 转写记录
+# 出问题（识别成乱码、把助手自己的播报当用户说话）时，唯一能复盘的就是「当时喂了什么、
+# 吐出来什么」。只记文本和耗时，不落音频：一句话几十字节，几百 KB 够查很久。
+TRANSCRIPT_LOG = os.environ.get(
+    "ASR_TRANSCRIPT_LOG",
+    os.path.join(os.path.expanduser("~"), ".dsh", "pet-voice", "asr", "transcripts.log"),
+)
+TRANSCRIPT_LOG_MAX = 512 * 1024
+
+
+def log_transcript(line: str) -> None:
+    """一行一句；写失败绝不影响识别。超过上限就砍掉前一半（老的先走）。"""
+    try:
+        os.makedirs(os.path.dirname(TRANSCRIPT_LOG), exist_ok=True)
+        with open(TRANSCRIPT_LOG, "a", encoding="utf-8") as handle:
+            handle.write(line.rstrip("\n") + "\n")
+        if os.path.getsize(TRANSCRIPT_LOG) > TRANSCRIPT_LOG_MAX:
+            with open(TRANSCRIPT_LOG, "r", encoding="utf-8", errors="replace") as handle:
+                keep = handle.read()[TRANSCRIPT_LOG_MAX // 2 :]
+            with open(TRANSCRIPT_LOG, "w", encoding="utf-8") as handle:
+                handle.write(keep)
+    except Exception:  # noqa: BLE001 - 日志永远不该拦住主流程
+        pass
+
+
+# whisper 在静音/噪声/回声上最爱编的几句套话。命中就直接当没听见。
+BOILERPLATE = (
+    "请点赞",
+    "请按赞",
+    "记得点赞",
+    "点赞转发",
+    "转发转发",
+    "点赞订阅",
+    "订阅频道",
+    "订阅转发",
+    "转发给",
+    "打赏",
+    "字幕由",
+    "字幕组",
+    "感谢观看",
+    "谢谢观看",
+    "明镜与点点",
+    "下集再见",
+    "关注我",
+    "amara.org",
+)
+# 「这句话说得太快」：中文正常语速 4–8 字/秒，超过这个数基本是复读机或幻听。
+MAX_CHARS_PER_SECOND = 11.0
+
+
+def degenerate_reason(text: str, seconds: float) -> str:
+    """识别结果像不像幻听/复读。返回理由，空串表示正常。
+
+    base 模型在杂音上会吐「请按赞、转发、转发、转发……」这种；回声音量一大，
+    光靠 avg_logprob 判不掉，用户看到的就是整段乱码。这里按「文本长得不像人话」再兜一层。
+    """
+    dense = re.sub(r"[\s\W_]+", "", text, flags=re.UNICODE)
+    if not dense:
+        return ""
+    lowered = text.lower()
+    for phrase in BOILERPLATE:
+        if phrase in lowered:
+            return f"套话「{phrase}」"
+    # 长片段连 3 次、两个字连 4 次，都是复读机；两个字的放松到 4 次，免得把「哈哈哈哈」误杀。
+    repeated = re.search(r"(.{3,8})\1{2,}", dense) or re.search(r"(.{2})\1{3,}", dense)
+    if repeated:
+        return f"复读「{repeated.group(1)}」"
+    if seconds >= 1.0:
+        rate = len(dense) / seconds
+        if rate > MAX_CHARS_PER_SECOND:
+            return f"字数太密（{rate:.0f} 字/秒）"
+    return ""
 
 
 def load_model(name: str):
@@ -139,7 +224,7 @@ class Worker:
                     np.zeros(int(SAMPLE_RATE * WARMUP_SECONDS), dtype=np.float32),
                     language="zh",
                     fp16=False,
-                    beam_size=1,
+                    beam_size=BEAM_SIZE,
                     condition_on_previous_text=False,
                     initial_prompt="以下是简体中文普通话，助手叫鲸灵。",
                 )
@@ -156,28 +241,39 @@ class Worker:
             samples = decode_wav(body)
         except Exception as error:  # noqa: BLE001
             return {"ok": False, "error": f"WAV 解析失败：{error}"}
+        seconds = len(samples) / float(SAMPLE_RATE)
         if is_silent(samples):
+            log_transcript(f"{iso_now()} {len(body)}B {seconds:.2f}s silent")
             return {"ok": True, "text": "", "ms": int((time.monotonic() - started) * 1000)}
         try:
-            # 这组参数是实测过的：beam_size=1 + 关闭上下文，3.4 s 音频约 0.17 s；
+            # 关闭上下文：一句一句独立识别，不让上一句的错字带偏这一句。
             # initial_prompt 把输出钉成简体，并且让「鲸灵」这种自造词能被正确认出来。
             with self.lock:
                 result = self.model.transcribe(
                     samples,
                     language="zh",
                     fp16=False,
-                    beam_size=1,
+                    beam_size=BEAM_SIZE,
                     condition_on_previous_text=False,
                     initial_prompt="以下是简体中文普通话，助手叫鲸灵。",
                 )
         except Exception as error:  # noqa: BLE001 - 推理异常也要回 200 + ok:false
             return {"ok": False, "error": f"识别失败：{type(error).__name__}: {error}"}
         text = str(result.get("text") or "").strip()
+        drop = ""
         if text and not keeps_any_speech(result.get("segments")):
             # 整段都被判成「没人声 + 概率低」：模型在杂音上编的套话，宁可返回空
-            log(f"丢弃疑似幻听：{text[:40]}")
-            text = ""
-        return {"ok": True, "text": text, "ms": int((time.monotonic() - started) * 1000)}
+            drop = "置信度太低"
+        elif text:
+            drop = degenerate_reason(text, seconds)
+        if drop:
+            log(f"丢弃疑似幻听（{drop}）：{text[:40]}")
+        ms = int((time.monotonic() - started) * 1000)
+        log_transcript(
+            f"{iso_now()} {len(body)}B {seconds:.2f}s {ms}ms {self.model_name} "
+            f"{'DROP:' + drop if drop else 'ok'} {text}"
+        )
+        return {"ok": True, "text": "" if drop else text, "ms": ms}
 
 
 def make_handler(worker: Worker):
@@ -246,7 +342,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="本机 whisper 识别 worker（只监听 127.0.0.1）")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=int(os.environ.get("ASR_PORT", "52399")))
-    parser.add_argument("--model", default=os.environ.get("ASR_MODEL", "base"))
+    parser.add_argument("--model", default=os.environ.get("ASR_MODEL", DEFAULT_MODEL))
     parser.add_argument("--pid-file", default=os.environ.get("ASR_PID_FILE", ""))
     args = parser.parse_args()
 

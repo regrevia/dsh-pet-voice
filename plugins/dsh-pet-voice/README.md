@@ -103,10 +103,26 @@ https://xxx-xxx.trycloudflare.com/pet-voice/?k=<token>
 | GET | `selfcheck` | 只读探针；`?prompt=<sessionId>` 时额外跑一次真实 LLM 往返（会计费） |
 | GET | `tts/voices` | `{ok, ready, default, defaultPreset, presets[], voices[], hint?}`；`presets` 是 4 个形象档位（见下）；`ready:false` 时页面回退系统语音 |
 | GET | `tts?text=&preset=` | 神经语音（Edge `edge-tts`）直出 `audio/mpeg`；`preset` 由服务端解析成 voice+rate+pitch；也可显式传 `&voice=&rate=+16%&pitch=+22Hz` 覆盖；未知档位 → 400；需先跑 `tts/setup.sh` |
-| POST | `asr` | 请求体就是 44 字节头 + 16 kHz 单声道 PCM 的 WAV；转发给常驻 worker（`asr/asr-worker.py` → `127.0.0.1:52399`）→ `{ok, text, ms}`，响应头带 `X-Asr-Ms`。空音频/坏音频 → 400，超过 4 MB → 413；worker 没装 → 503 + `hint`；worker 被杀了下次请求会自动拉起并完成本次识别 |
+| POST | `asr` | 请求体就是 44 字节头 + 16 kHz 单声道 PCM 的 WAV；转发给常驻 worker（`asr/asr-worker.py` → `127.0.0.1:52399`，默认 `large-v3-turbo` + `beam_size=5`）→ `{ok, text, ms}`，响应头带 `X-Asr-Ms`。**识别结果命中最近 5 分钟内播报过的句子时回 `{ok:true,text:"",echo:true}`**（手机外放把自己说的话录回来，不能当成用户发言，见下）。空音频/坏音频 → 400，超过 4 MB → 413；worker 没装 → 503 + `hint`；worker 被杀了下次请求会自动拉起并完成本次识别（冷启动 11 s，预算 25 s） |
 | GET | `asr` | 只读探针：`{ok, ready, running, model, pid?}`。`ready:false` 说明缺 venv 或 worker 脚本，`hint` 里给缺的路径 |
 | GET | `update` | 更新通道：读 `~/.dsh/pet-voice/update/latest.json` → `{ok, versionCode, versionName, size, sha256, file, notes, publishedAt, url}`；还没发布过 → `versionCode:0` + 可读 `hint` |
 | GET / HEAD | `../download/<file>.apk` | 下载已发布的 APK（**同样要 cookie**）；支持 `Range`（206 / 越界 416），`HEAD` 只回头，路径穿越 → 400/404，非 GET/HEAD → 405 |
+
+### 语音识别（ASR）细节
+
+`asr/asr-worker.py` 是常驻的 openai-whisper 进程，只监听回环。默认模型 `large-v3-turbo`（1.5 GB，权重缓存在
+`~/.cache/whisper/`），`beam_size=5`：base 在中文上会稳定错字（「语音识别服务」→「余音时别服务」）并偶尔吐繁体，
+turbo 用同一批句子全对，只多花半秒。
+
+两条兜底都在 worker 里做，命中就回空文本（App 侧表现是这一轮没听见，不产生假用户消息、不触发假回复）：
+
+- **幻听/套话**：`请按赞、转发、转发……`、复读、字数密度离谱的整句直接丢，日志写 `丢弃疑似幻听（原因）`。
+- **播报回声**：手机外放会把助手自己的话录回去。插件侧记最近 16 句播报（5 分钟内有效），识别结果去标点、
+  数字归一后与播报原文双字重合度 ≥ 0.55、或整段落在某句播报里，就判为回声并回 `echo:true`。
+
+每句识别的输入长度、耗时、模型、是否被丢弃都落一行 `~/.dsh/pet-voice/asr/transcripts.log`（512 KB 封顶）；
+`~/.dsh/pet-voice/logs/asr.log` 记插件侧的字节数、命中回声的原文。派发到专属会话的每一轮记
+`~/.dsh/pet-voice/logs/turn.log`（状态码、耗时、文本前 60 字），「说了却没回复」先看这两个日志。
 
 ### 发新版 + 手机自更新
 
@@ -271,7 +287,9 @@ BASE=https://xxx-xxx.trycloudflare.com node plugins/dsh-pet-voice/e2e.mjs
 | 「连不上 DSH 宿主」 | 插件没装/没重启；`/pet-voice/api/selfcheck` 看哪一步失败 |
 | 能打字、按麦没反应 | 页面不是 https；或浏览器没给麦克风权限；面板提示会写明 |
 | 有文字没声音 | 手机静音开关 / 「朗读」被关；iOS 需要先点一下页面解锁音频 |
-| 派发了没回应 | 点「宿主自检」；`?prompt=` 模式能跑通说明到模型这层是好的 |
+| 派发了没回应 | 点「宿主自检」；`?prompt=` 模式能跑通说明到模型这层是好的；`~/.dsh/pet-voice/logs/turn.log` 看这一轮是不是被 404/503/超时挡了 |
+| 识别出来是乱码、听不懂 | `~/.dsh/pet-voice/asr/transcripts.log` 最后一行是不是这一句；`GET /pet-voice/api/asr` 看 `model` 是不是 `large-v3-turbo`（改成 base 会明显变差） |
+| 助手把自己说的话当成我说的 | 宿主已按「最近播报过的句子」吞掉（`asr.log` 里 `echo=`），还出现就是 App 侧在播报期间抢了麦克风，属已知遗留 |
 | 提示「已切到长轮询」 | 说明当前隧道把 SSE 缓冲了，属于预期兜底；同一提示只出现一次 |
 
 ## 卸载
