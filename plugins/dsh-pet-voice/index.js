@@ -55,7 +55,7 @@ try {
 } catch {
   zstdDecompressSync = null
 }
-import { getPanelConfig, normalizeTransport, panelState, qrSvg, setPanelConfig, removeDevice, touchDevice } from './panel.mjs'
+import { getPanelConfig, normalizeTransport, panelState, qrSvg, setPanelConfig, removeDevice, clearDevices, touchDevice } from './panel.mjs'
 import { connectPublic, disconnectPublic, publicState, setPublicConfig, stopPublic } from './public.mjs'
 import { startLan, lanState, stopLan } from './lan.mjs'
 
@@ -3614,7 +3614,11 @@ export function apply(ctx, config) {
           } catch {
             /* 空 body = 真换 */
           }
-          if (!dry) rotateToken()
+          if (!dry) {
+            rotateToken()
+            // 旧令牌一换，表里每一台都失效了；记录一起清掉，别让面板还挂着「已连上」。
+            clearDevices()
+          }
           return sendJson(res, 200, { ...(await snapshot()), rotated: !dry })
         }
 
@@ -3631,7 +3635,11 @@ export function apply(ctx, config) {
           // 写回列表。设备表里每台设备用的都是同一枚主令牌，没有逐设备凭证，所以
           // 「移出」必须是真撤销：换掉主令牌，这台和别的设备都要重新扫码。
           // （逐设备凭证在计划里，属下一轮；先把安全性做对，代价是全体重配。）
-          if (removed) rotateToken()
+          if (removed) {
+            rotateToken()
+            // 同上：主令牌只有一枚，移出一台＝全体失效，设备表清空才和实际一致。
+            clearDevices()
+          }
           return sendJson(res, 200, { ...(await snapshot()), rotated: removed })
         }
 

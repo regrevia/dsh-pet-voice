@@ -206,6 +206,19 @@ export function listDevices() {
   return readDeviceStore().devices.sort((a, b) => b.lastSeen - a.lastSeen)
 }
 
+/**
+ * 换主令牌后调用：设备表里那几行已经没有有效凭证了，留着只会让面板声称「这几台还连着」，
+ * 还会把绑定上限的额度占满（用户移出一台仍然加不进新手机）。清空记录＝面板不再说谎。
+ */
+export function clearDevices() {
+  try {
+    writeDeviceStore([], readDeviceStore().maxDevices)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export function removeDevice(id) {
   const key = String(id ?? '').trim()
   if (!key) return false
