@@ -1,8 +1,14 @@
 #!/bin/bash
 # 鲸灵随身宠物 · 一键可复现验收
-#   用法：bash scripts/verify.sh            （全部跑）
-#         SKIP_LIVE=1 bash scripts/verify.sh（只跑离线自测）
+#   用法：bash scripts/verify.sh              （全部跑）
+#         SKIP_LIVE=1 bash scripts/verify.sh （只跑离线自测）
+#         VERIFY_SELFCHECK=1 bash scripts/verify.sh （额外验证门禁自己拦得住失败）
 # 退出码 0 = 全过；任何一项失败 = 1。不会打印任何 token/secret。
+#
+# 门禁规则（不为任何用例开文本豁免）：
+#   1) 被测命令退出码非 0 → 失败，并打印命令与退出码；
+#   2) 输出里有 "a/b 通过" 而 a != b → 同样算失败（脚本自己错误地 exit 0 也拦）；
+#   3) 失败明细只用于展示，规则用 ^[[:space:]]*- 匹配单/双前导空格都可。
 set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT=$(pwd)
@@ -13,49 +19,90 @@ ok()   { PASS=$((PASS+1)); printf '  \033[32m✓\033[0m %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  \033[31m✗\033[0m %s\n' "$1"; }
 head_() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
+LAST_OUT=""
+LAST_RC=0
+run_capture() { LAST_OUT=$("$@" 2>&1); LAST_RC=$?; }
+
+failure_lines() {
+  local lines
+  lines=$(printf '%s\n' "$LAST_OUT" | grep -E '^[[:space:]]*- ' | head -3)
+  [ -n "$lines" ] && { printf '%s' "$lines"; return; }
+  printf '%s\n' "$LAST_OUT" | grep -E '✗' | head -3
+}
+failure_total() { printf '%s\n' "$LAST_OUT" | grep -cE '^[[:space:]]*- '; }
+summary_line()  { printf '%s\n' "$LAST_OUT" | grep -oE '[0-9]+/[0-9]+ 通过' | tail -1; }
+# 有 "a/b 通过" 且 a != b 时回显 "a/b"，否则空
+count_mismatch() {
+  local sum a b
+  # 脚本自报的失败数 >0 就算失败（哪怕它 exit 0）
+  if printf '%s\n' "$LAST_OUT" | grep -qE '(^|[^0-9])[1-9][0-9]* FAIL'; then
+    printf 'FAIL>0'; return
+  fi
+  # 明确写了 "0 FAIL" 的（含 SKIP 的）按它自己报的失败数为准
+  printf '%s\n' "$LAST_OUT" | grep -qE '0 FAIL' && return 0
+  sum=$(summary_line)
+  [ -n "$sum" ] || return 0
+  sum=${sum%% *}
+  a=${sum%%/*}; b=${sum##*/}
+  [ "$a" = "$b" ] || printf '%s' "$sum"
+}
+
+# 统一门禁：$1 名称，其余为命令
+run() {
+  local name=$1; shift
+  run_capture "$@"
+  if [ "$LAST_RC" -ne 0 ]; then
+    bad "${name}（退出码 ${LAST_RC}）：$*"
+    local lines; lines=$(failure_lines)
+    [ -n "$lines" ] && printf '%s\n' "$lines" | sed 's/^/      /'
+    local total; total=$(failure_total)
+    [ "$total" -gt 3 ] && printf '      ……另有 %d 条失败明细\n' "$((total-3))"
+    return
+  fi
+  # 退出码 0，但输出里带了失败明细（例如往输出里追加一条失败记录）也判失败；
+  # 脚本自己标了 "0 FAIL" 的（SKIP 不算失败）按它自报的为准。
+  local lines; lines=$(failure_lines)
+  if [ -n "$lines" ] && ! printf '%s\n' "$LAST_OUT" | grep -qE '0 FAIL'; then
+    bad "${name}（退出码 0，但输出含失败明细）：$*"
+    printf '%s\n' "$lines" | sed 's/^/      /'
+    return
+  fi
+  local mm; mm=$(count_mismatch)
+  if [ -n "$mm" ]; then
+    bad "${name}（通过计数 ${mm}，命令却以退出码 0 结束）：$*"
+    local lines; lines=$(failure_lines)
+    [ -n "$lines" ] && printf '%s\n' "$lines" | sed 's/^/      /'
+    return
+  fi
+  local sum; sum=$(summary_line)
+  ok "$name${sum:+（${sum}）}"
+}
+
 head_ "1. 语法检查"
 for f in plugins/dsh-pet-voice/index.js mcp/pet-bridge/xiaoai.mjs mcp/pet-bridge/server.mjs mcp/pet-bridge/xiaoai-selftest.mjs mcp/pet-bridge/selftest.mjs scripts/cf-creds.mjs scripts/cf-creds.test.mjs; do
-  if node --check "$f" >/dev/null 2>&1; then ok "node --check $f"; else bad "node --check $f"; fi
+  run "node --check $f" node --check "$f"
 done
 
 head_ "2. 插件自测（模拟 HOME，不碰真实配置）"
 # selftest 要求干净 HOME：上次跑剩的面板文件会让它以为在真机上，直接退出 2
 rm -rf /tmp/pvtest && mkdir -p /tmp/pvtest
-OUT=$(HOME=/tmp/pvtest node plugins/dsh-pet-voice/selftest.mjs 2>&1)
-LINE=$(printf '%s\n' "$OUT" | grep -oE 'selftest: [0-9]+/[0-9]+ 通过' | tail -1)
-# 已知基线：老用例「显式 sessionId 不存在 → 404，不乱派」在模拟 HOME 下恒失败，只认这一条，别的都算回归
-KNOWN="显式 sessionId 不存在"
-if printf '%s\n' "$OUT" | grep -qE "${KNOWN}"; then
-  REST=$(printf '%s\n' "$OUT" | grep -oE '  - .*' | grep -v "${KNOWN}" | head -1)
-  if [ -z "$REST" ]; then ok "插件 selftest：${LINE:-ok}（已知基线：${KNOWN}）"
-  else bad "插件 selftest：${LINE:-无输出}（另有：$REST）"; fi
-elif printf '%s\n' "$OUT" | grep -qE '通过|passed'; then ok "插件 selftest：${LINE:-ok}"
-else bad "插件 selftest：${LINE:-无输出}"; fi
+run "插件 selftest" env HOME=/tmp/pvtest node plugins/dsh-pet-voice/selftest.mjs
 
 head_ "3. MCP 自测"
-OUT=$(node mcp/pet-bridge/selftest.mjs 2>&1)
-LINE=$(printf '%s\n' "$OUT" | grep -oE '[0-9]+/[0-9]+ 通过' | tail -1)
-if printf '%s\n' "$OUT" | grep -qE '[0-9]+/[0-9]+ 通过' && ! printf '%s\n' "$OUT" | grep -q '✗'; then ok "MCP selftest：${LINE}"; else bad "MCP selftest：${LINE:-无 N/N 通过}"; fi
+run "MCP selftest" node mcp/pet-bridge/selftest.mjs
 
 head_ "4. 小爱协议自测"
-OUT=$(node mcp/pet-bridge/xiaoai-selftest.mjs 2>&1)
-LINE=$(printf '%s\n' "$OUT" | grep -E '通过|passed|✗|失败' | tail -1)
-if printf '%s\n' "$OUT" | grep -qE '通过|passed' && ! printf '%s\n' "$OUT" | grep -q '✗'; then ok "xiaoai selftest：${LINE:-ok}"; else bad "xiaoai selftest：${LINE:-无输出}"; fi
+run "xiaoai selftest" node mcp/pet-bridge/xiaoai-selftest.mjs
 
 head_ "4b. Cloudflare 凭证脚本自测（离线，不碰真凭证）"
-OUT=$(node scripts/cf-creds.test.mjs 2>&1)
-LINE=$(printf '%s\n' "$OUT" | grep -oE '[0-9]+/[0-9]+ 通过' | tail -1)
-if printf '%s\n' "$OUT" | grep -qE '[0-9]+/[0-9]+ 通过' && ! printf '%s\n' "$OUT" | grep -q '✗'; then ok "cf-creds selftest：${LINE}"; else bad "cf-creds selftest：${LINE:-无 N/N 通过}"; fi
+run "cf-creds selftest" node scripts/cf-creds.test.mjs
 
 head_ "4c. Tunnel token 落盘脚本自测（离线，假 token）"
-OUT=$(node scripts/cf-tunnel-token.test.mjs 2>&1)
-LINE=$(printf '%s\n' "$OUT" | grep -oE '[0-9]+/[0-9]+ 通过' | tail -1)
-if printf '%s\n' "$OUT" | grep -qE '[0-9]+/[0-9]+ 通过' && ! printf '%s\n' "$OUT" | grep -q '✗'; then ok "cf-tunnel-token selftest：${LINE}"; else bad "cf-tunnel-token selftest：${LINE:-无 N/N 通过}"; fi
+run "cf-tunnel-token selftest" node scripts/cf-tunnel-token.test.mjs
 
 head_ "4d. 自签证书（没生成过就 SKIP）"
 if [ -f "$HOME/.dsh/pet-voice/tls/pet-ca.pem" ]; then
-  OUT=$(bash scripts/tls-ca.sh --check 2>&1)
-  if printf '%s\n' "$OUT" | grep -q '全部通过'; then ok "tls-ca --check：链/SAN/权限/App 内置一致"; else bad "tls-ca --check：$(printf '%s\n' "$OUT" | grep '✗' | head -3 | tr '\n' ' ')"; fi
+  run "tls-ca --check" bash scripts/tls-ca.sh --check
 else
   echo "  SKIP  还没生成自签证书（需要时跑 bash scripts/tls-ca.sh --ip 你的IP）"
 fi
@@ -113,6 +160,32 @@ else
     if [ "$sc" = "401" ] || [ "$sc" = "200" ]; then ok "/api/say 已上线（无鉴权探测 → ${sc}）"; else ok "/api/say 尚未上线（${sc}），pet_say 会如实失败"; fi
   else
     bad "缺少 ${XJ}（小爱端点未配置）"
+  fi
+fi
+
+# 门禁自检：默认不进日常路径，VERIFY_SELFCHECK=1 时证明「失败一定被拦住」
+if [ "${VERIFY_SELFCHECK:-0}" = "1" ]; then
+  head_ "6. 门禁自检（构造失败，必须判失败）"
+  if ( FAIL=0; PASS=0; run "假命令（非 0 退出）" node -e 'process.exit(3)' >/dev/null 2>&1; [ "$FAIL" -eq 1 ] ); then
+    ok "自检：退出码 3 的命令被判失败"
+  else
+    bad "自检：退出码 3 的命令没有把门禁打红"
+  fi
+  if ( FAIL=0; PASS=0; run "假 selftest（退出码 0 但 3/4）" node -e 'console.log("selftest: 3/4 通过")' >/dev/null 2>&1; [ "$FAIL" -eq 1 ] ); then
+    ok "自检：退出码 0 但计数 3/4 也算失败"
+  else
+    bad "自检：计数不一致没被拦住"
+  fi
+  if ( FAIL=0; PASS=0; run "假 selftest（退出码 0 但追加失败行）" node -e 'console.log("selftest: 2/2 通过"); console.log("  - 追加的失败记录")' >/dev/null 2>&1; [ "$FAIL" -eq 1 ] ); then
+    ok "自检：退出码 0 但输出含失败明细也算失败"
+  else
+    bad "自检：输出里的失败明细没被拦住"
+  fi
+  LAST_OUT=$(printf 'selftest: 3/4 通过\n失败项：\n - 单前导空格失败项\n')
+  if [ "$(failure_lines)" = " - 单前导空格失败项" ]; then
+    ok "自检：失败明细解析认单前导空格"
+  else
+    bad "自检：失败明细解析没认单前导空格"
   fi
 fi
 

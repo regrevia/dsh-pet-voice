@@ -3,7 +3,7 @@
 把「鲸灵」在 **DSH** 里的能力（切项目、派任务、看状态、停回合）包装成标准
 **MCP（Model Context Protocol, JSON-RPC 2.0）** 工具，任何 MCP 客户端都能调用。
 
-零第三方依赖，Node ≥ 20（本机 Node 24 实测）。写作用域：`mcp/pet-bridge/`。
+零第三方依赖，Node ≥ 22.15.0（与仓库插件的运行时要求一致；本机 Node 24.16.0 实测）。写作用域：`mcp/pet-bridge/`。
 
 ```
 mcp/pet-bridge/

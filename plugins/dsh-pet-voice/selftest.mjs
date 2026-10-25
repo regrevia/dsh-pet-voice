@@ -9,7 +9,7 @@
  *   HOME=/tmp/pvtest node plugins/dsh-pet-voice/selftest.mjs
  */
 
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
@@ -81,6 +81,10 @@ const services = {
               type: 'assistant/message',
               data: { message: { content: [{ type: 'text', text: '收到' }] } },
             })
+            // 真宿主一轮的终止信号是 turn/end，不是 assistant/message
+            setTimeout(() => {
+              fire('session/event', { header: { id: sessionId } }, { type: 'turn/end', data: { turn: 1 } })
+            }, 60)
           }, 120)
         }, 30)
       }
@@ -418,13 +422,21 @@ async function main() {
     agent: { id: firstId },
     frame: { type: 'chunk', index: 1, time: 0, chunk: { type: 'finish', reason: { kind: 'stop' } } },
   })
-  check('finish 帧被转成 end 事件', await readUntil('"reason":"stop"'), JSON.stringify(received.slice(-200)))
+  // 审阅的 P1：以前 finish 一到就 2.5s 后发 end，工具任务跑十几秒 → 手机在
+  // 「我查一下」那一步就判结束，后半段全丢。现在 end 只跟 turn/end 走。
+  check('finish 不提前发 end（要等 turn/end）', !(await readUntil('"reason":"stop"', 400)), 'end 来早了')
 
   fire('session/event', { header: { id: firstId } }, {
     type: 'assistant/message',
     data: { message: { content: [{ type: 'text', text: '整段兜底文本' }] } },
   })
-  check('assistant/message 兜底成 final 事件', await readUntil('整段兜底文本'), JSON.stringify(received.slice(-200)))
+  check('assistant/message 发非终止的 message 帧', await readUntil('event: message'), JSON.stringify(received.slice(-200)))
+  check('message 帧带正文，但先不判 final', received.includes('整段兜底文本') && !received.includes('event: final'), 'message/final 混了')
+
+  fire('session/event', { header: { id: firstId } }, { type: 'turn/end', data: { turn: 3 } })
+  check('turn/end 才发 final（正文取这一轮最后一条）', await readUntil('event: final'), JSON.stringify(received.slice(-300)))
+  check('final 之后紧跟 end', await readUntil('event: end'), JSON.stringify(received.slice(-200)))
+  check('turn 号来自 data.turn', received.includes('"turn":3'), JSON.stringify(received.slice(-200)))
 
   fire('agent/assistant-stream', {
     agent: { id: 'other-session' },
@@ -1115,8 +1127,38 @@ async function main() {
   check('非法传输方式 → 400 且说明可选值', badTransport.status === 400 && String(badTransportJson.error).includes('传输方式'), `${badTransport.status} ${badTransportJson.error}`)
   const backAuto = await postPanel({ transport: 'auto' })
   check('传输方式可切回自动', backAuto.transport === 'auto', JSON.stringify({ transport: backAuto.transport }))
-  const panelNoLoop = await fetch(`${origin}/pet-voice/panel/state`, { headers: { 'x-forwarded-for': '203.0.113.9' } })
-  check('面板路由带外网转发头也照样可用（门禁看 socket 不看 header）或 403', panelNoLoop.status === 200 || panelNoLoop.status === 403, panelNoLoop.status)
+  // 审阅实测：公网反代把请求转给 127.0.0.1 后，只看 socket 来源等于「匿名即本机」。
+  // 现在三层一起要求：回环 socket + 无转发头 + Host 是本机。
+  const panelForwarded = await fetch(`${origin}/pet-voice/panel/state`, { headers: { 'x-forwarded-for': '203.0.113.9' } })
+  check('面板带转发头一律 403（反代不再等于本机）', panelForwarded.status === 403, panelForwarded.status)
+  const panelForwardedHost = await fetch(`${origin}/pet-voice/panel/state`, { headers: { 'x-forwarded-host': 'pet.example.com' } })
+  check('面板带 X-Forwarded-Host 也 403', panelForwardedHost.status === 403, panelForwardedHost.status)
+  // fetch 会自己算 Host，改了不生效；这里必须用原生 http 请求才能真的改 Host 头。
+  const panelHostStatus = await new Promise((resolve, reject) => {
+    const url = new URL('/pet-voice/panel/state', origin)
+    const request = httpRequest(
+      { hostname: url.hostname, port: url.port, path: url.pathname, headers: { host: 'pet.example.com' } },
+      (res) => {
+        res.resume()
+        resolve(res.statusCode)
+      },
+    )
+    request.on('error', reject)
+    request.end()
+  })
+  check('面板 Host 不是本机 → 403（反代改写 Host 也进不来）', panelHostStatus === 403, panelHostStatus)
+  // 用 dry 只在路由层探活：真换会让已经配好的手机立刻掉线，不能每跑一次自检就换。
+  const rotated = await fetch(`${origin}/pet-voice/panel/rotate-token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ dry: true }),
+  })
+  const rotatedJson = await rotated.json()
+  check(
+    '面板「换新链接」路由已注册（POST /panel/rotate-token 不再是 404）',
+    rotated.status === 200 && rotatedJson.ok === true && rotatedJson.rotated === false && typeof rotatedJson.pairingUrl === 'string',
+    `${rotated.status} ${String(rotatedJson.error ?? '').slice(0, 40)}`,
+  )
 
   /* 18. 卸载要干净 */
   server.close()

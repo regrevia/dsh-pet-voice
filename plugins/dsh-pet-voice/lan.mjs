@@ -13,6 +13,7 @@ import { mkdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs'
 import { connect } from 'node:net'
 import { homedir, networkInterfaces } from 'node:os'
 import { join } from 'node:path'
+import { normalizeTarget, isProtectedPath, forwardPath } from './guardPath.mjs'
 
 const DIR = join(homedir(), '.dsh/pet-voice')
 const CONFIG_PATH = join(DIR, 'lan.json')
@@ -75,11 +76,28 @@ function isPrivate(addr) {
   return false
 }
 
-/** App 用得到的路径才转；面板和下载一律不转。 */
-function allowedPath(url) {
-  const path = String(url ?? '/').split('?')[0]
-  if (path === '/pet-voice' || path === '/pet-voice/') return true
-  return path.startsWith('/pet-voice/api/') || path.startsWith('/pet-voice/asset/')
+/**
+ * App 用得到的路径才转。判定用 guardPath 的规范形，转发也用同一份结果：
+ * 官方 DSH 用 new URL(...).pathname 规范化后路由，这里如果拿原始 URL 判断，
+ * `/pet-voice/api/../panel/state`、`%2e%2e` 就能骗过白名单被转成面板请求。
+ * 下载（/pet-voice/download/*）要放行：宿主侧 downloadHandler 自己校验文件名，
+ * 手机更新 APK 走的就是这条，之前默认模式把它误拒成 403。
+ */
+export function lanAllowedPath(path) {
+  if (path === '/pet-voice') return true
+  return path.startsWith('/pet-voice/api/')
+    || path.startsWith('/pet-voice/asset/')
+    || path === '/pet-voice/download'
+    || path.startsWith('/pet-voice/download/')
+}
+
+/** 返回 {status:0, target} 表示转发；否则 {status, reason} 表示本地拒绝。 */
+export function classifyLanPath(raw) {
+  const target = normalizeTarget(raw)
+  if (!target) return { status: 400, reason: 'bad path' }
+  if (isProtectedPath(target.path)) return { status: 403, reason: 'only lan' }
+  if (!lanAllowedPath(target.path)) return { status: 403, reason: 'not found' }
+  return { status: 0, target }
 }
 
 function plain(res, code, text) {
@@ -92,13 +110,14 @@ function handler(req, res) {
     state.lastError = `拒绝了非局域网来源 ${req.socket.remoteAddress ?? '?'}`
     return plain(res, 403, 'only lan')
   }
-  if (!allowedPath(req.url)) return plain(res, 403, 'not found')
+  const verdict = classifyLanPath(req.url ?? '/')
+  if (verdict.status) return plain(res, verdict.status, verdict.reason === 'only lan' ? 'forbidden' : verdict.reason)
   const target = httpRequest(
     {
       host: '127.0.0.1',
       port: state.hostPort,
       method: req.method,
-      path: req.url,
+      path: forwardPath(verdict.target),
       headers: { ...req.headers, host: `127.0.0.1:${state.hostPort}` },
       timeout: 120000,
     },

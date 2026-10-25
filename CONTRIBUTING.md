@@ -7,7 +7,7 @@
 
 | 依赖 | 版本 | 说明 |
 | --- | --- | --- |
-| Node.js | ≥ 20 | 插件、脚本、MCP 桥 |
+| Node.js | ≥ 22.15.0 | 插件、脚本、MCP 桥（插件静态引用 `zstdDecompressSync`，该 API 自 22.15.0 起才有；Node 20 加载即报错） |
 | JDK | 17 | 只用来编 Android；别用 JDK 21+，Gradle 8.13 会报 unsupported class file |
 | Android SDK | build-tools 35 + platform 35 | 编译 APK，`minSdk 26` |
 

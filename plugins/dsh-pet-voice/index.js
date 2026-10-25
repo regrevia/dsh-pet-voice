@@ -42,7 +42,19 @@ import { request as httpsRequest } from 'node:https'
 import { homedir, networkInterfaces } from 'node:os'
 import { dirname, extname, join, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { zstdDecompressSync } from 'node:zlib'
+/** zstd 解压：Node 22.15 / 23.8 才加了 zstdDecompressSync。
+ *
+ * 这里不用静态 import：Node 20 上静态导入会在**加载插件时**直接抛
+ * `SyntaxError: The requested module 'node:zlib' does not provide an export named
+ * 'zstdDecompressSync'`，整个插件都装不上，面板/语音一起没了。改成可选加载后，
+ * 老 Node 上插件照常工作，只是「读会话转录」这类功能降级（面板会提示）。
+ */
+let zstdDecompressSync = null
+try {
+  ;({ zstdDecompressSync } = await import('node:zlib'))
+} catch {
+  zstdDecompressSync = null
+}
 import { getPanelConfig, normalizeTransport, panelState, qrSvg, setPanelConfig, removeDevice, touchDevice } from './panel.mjs'
 import { connectPublic, disconnectPublic, publicState, setPublicConfig, stopPublic } from './public.mjs'
 import { startLan, lanState, stopLan } from './lan.mjs'
@@ -415,6 +427,63 @@ function isLoopback(req) {
 }
 
 /**
+ * 请求是不是「反代从别处接进来再转给本机」的。
+ *
+ * 公网反代（Cloudflare / nginx / frp / ssh -R）把外部请求转给 127.0.0.1 之后，
+ * 宿主看到的 `req.socket.remoteAddress` 永远是回环地址——只查它等于「谁接进来
+ * 都算本机主人」。审阅实测：外部匿名请求经公网入口转发一次，就能从
+ * `/pet-voice/panel/state` 拿到带 `?k=` 的完整配对令牌。
+ *
+ * 这里把「带着任何转发痕迹」的请求一律当外部：转发头只要出现一个就拒绝。
+ * 不是猜来源，是拒绝一切不满足「直连本机」形状的请求。
+ */
+const PROXY_HEADERS = [
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
+  'x-forwarded-port',
+  'x-forwarded-server',
+  'x-real-ip',
+  'forwarded',
+  'via',
+  'cf-connecting-ip',
+  'cf-ray',
+  'true-client-ip',
+  'x-client-ip',
+  'x-original-forwarded-for',
+  'x-cluster-client-ip',
+  'x-arr-log-id',
+  'x-proxyuser-ip',
+]
+function isProxied(req) {
+  const headers = req?.headers ?? {}
+  for (const name of PROXY_HEADERS) {
+    if (headers[name] !== undefined) return true
+  }
+  return false
+}
+
+/** 面板请求的 Host 必须是本机名字：反代把 Host 改成公网域名的一律不认。 */
+const LOOPBACK_HOST_RE = /^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i
+function isLoopbackHost(req) {
+  const host = String(req?.headers?.host ?? '').trim()
+  return Boolean(host) && LOOPBACK_HOST_RE.test(host)
+}
+
+/**
+ * 面板门禁：回环来源 + 没有转发痕迹 + Host 是本机。
+ *
+ * 三层同时成立才放行。常见公网反代配置（nginx 默认带 X-Forwarded-*、
+ * Cloudflare 带 CF-Connecting-IP、隧道会改写 Host）都过不去。
+ *
+ * 残余风险（如实记）：本机进程、或刻意伪造成「直连形状」的反代仍可进；面板没有
+ * 口令式登录，靠的是「本机直连」这一网络事实。要更硬需要用户口令，属下一轮。
+ */
+function panelRequestAllowed(req) {
+  return isLoopback(req) && !isProxied(req) && isLoopbackHost(req)
+}
+
+/**
  * 响应还写不写得进去。
  *
  * 客户端在宠物面板点「新对话」后会立刻重载页面，服务端慢半拍再 writeHead 就会抛
@@ -709,6 +778,7 @@ function asrStartWorker() {
       fd = 'ignore'
     }
     let child
+    let spawnError = null
     try {
       child = spawn(
         ASR_PYTHON,
@@ -731,9 +801,19 @@ function asrStartWorker() {
         }
       }
     }
+    // spawn 失败（ENOENT / EACCES）是**异步** emit 的 error 事件：不接住就会升级成
+    // uncaughtException，宿主 fail-loud 直接 exit(1)（审阅实测：python 路径写错，
+    // 整个 DSH 陪葬）。接住之后冷启动循环立刻带着可读原因返回。
+    child.on('error', (error) => {
+      spawnError = error
+      LOG(`ASR worker 启动失败：${error?.message ?? error}`)
+    })
     LOG(`ASR worker 已拉起：pid ${child.pid}，日志 ${ASR_LOG_PATH}`)
     const deadline = Date.now() + ASR_COLD_START_MS
     while (Date.now() < deadline) {
+      if (spawnError) {
+        return { ok: false, error: `拉起 ASR worker 失败：${spawnError?.message ?? spawnError}`, hint: `检查 ${ASR_PYTHON} 是否存在` }
+      }
       const health = await asrHealth(800)
       if (health?.ok) {
         LOG(`ASR worker 就绪（${health.model ?? ASR_MODEL}，pid ${health.pid ?? child.pid}）`)
@@ -1070,6 +1150,11 @@ function transcriptPathOf(id) {
  * `zstdDecompressSync` 只解第一帧，所以要按帧魔数切段逐帧解。
  * 压缩数据里偶尔也会出现魔数（假阳性），该段解压会失败，跳过即可（不会丢真实帧）。
  */
+/** 没有 zstd 时（Node < 22.15）一律返回空，调用方按「读不到转录」处理。 */
+function hasZstd() {
+  return typeof zstdDecompressSync === 'function'
+}
+
 function zstdFrameOffsets(buf) {
   const offsets = []
   for (let i = 0; i + 4 <= buf.length; i += 1) {
@@ -1084,6 +1169,8 @@ function zstdFrameOffsets(buf) {
  * 超大文件只读尾部：比 TRANSCRIPT_READ_LIMIT 更老的内容按「没有更多」处理。
  */
 function decodeTranscriptTail(file, needLines) {
+  // 没有 zstd（Node < 22.15）时不用去读 26 MB 文件再逐帧失败，直接按「读不到」返回。
+  if (!hasZstd()) return { text: '', headText: '', truncated: false, frames: 0, decodedFrames: 0 }
   let stat
   try {
     stat = statSync(file)
@@ -1940,6 +2027,13 @@ async function dispatchToSession(ctx, state, body, req, deps) {
     return { status: 503, body: { ok: false, error: '专属会话不可用' } }
   }
 
+  // 手机钉了一只已经不存在的会话：机械地 404，让 App 清掉本地指针。不要把
+  // 「存不存在」寄托在 prompt 的报错文案上——宿主各版本说法不一致，猜不中就变成
+  // 「假成功」：界面上已受理，实际上永远没有回复。
+  if (String(body?.sessionId ?? '').trim() && !(await sessionKnownToHost(ctx, sessionId))) {
+    return { status: 404, body: { ok: false, error: `会话不存在：${sessionId}` } }
+  }
+
   // 切网重发：同一个 requestId 只落一轮，避免电脑端出现两条相同提问。
   const rid = String(body?.requestId ?? '').trim()
   netLog('dispatch', { sessionId, chars: text.length, rid: rid.slice(0, 12) })
@@ -1957,16 +2051,33 @@ async function dispatchToSession(ctx, state, body, req, deps) {
 
   // 会话里的提问是排队的：上一轮还在跑（或已经卡住）时，手机这一句会一直等。
   // 桌宠要的是「说完就有回应」，所以新一句直接掐掉上一轮。
+  //
+  // 两种 id 写法都按同一轮算（宿主有的地方带 `session-` 前缀、有的不带），
+  // 只认一种写法的话状态对不上，掐不掉。
   const liveTurns = deps.liveTurns
   const liveAbort = deps.liveAbort
-  const prevAbort = liveAbort.get(sessionId)
-  if (prevAbort && liveTurns.has(sessionId)) {
-    netLog('dispatch-interrupt', { sessionId })
-    try { prevAbort.abort() } catch { /* 已经结束 */ }
+  const turnKeys = [...new Set([sessionId, bareSessionId(sessionId)].filter(Boolean))]
+  const prevAbort = turnKeys.map((key) => liveAbort.get(key)).find(Boolean)
+  const prevRunning = turnKeys.some((key) => liveTurns.has(key))
+  if (prevRunning) {
+    if (prevAbort) {
+      netLog('dispatch-interrupt', { sessionId })
+      try { prevAbort.abort() } catch { /* 已经结束 */ }
+    } else {
+      // 上一轮不是我们派的（用户在电脑上直接发的）：没有我们自己的 abort，就请
+      // 宿主取消这条会话的当前轮，否则手机会一直排在后面等。
+      netLog('dispatch-cancel', { sessionId })
+      try {
+        const cancelled = controller.cancel?.({ sessionId }, AbortSignal.timeout(4000))
+        Promise.resolve(cancelled).catch((error) => LOG('上一轮取消失败：', error?.message ?? error))
+      } catch (error) {
+        LOG('上一轮取消失败：', error?.message ?? error)
+      }
+    }
   }
   const ac = new AbortController()
   const acTimer = setTimeout(() => { try { ac.abort() } catch { /* ignore */ } }, 120_000)
-  liveAbort.set(sessionId, ac)
+  for (const key of turnKeys) liveAbort.set(key, ac)
   // 人设/长度档挂进这条会话的 system prompt：只有模型看得见，不进对话记录。
   await syncHiddenPrompt(ctx, sessionId, getPanelConfig())
   const prompt = controller.prompt(
@@ -1980,7 +2091,9 @@ async function dispatchToSession(ctx, state, body, req, deps) {
     ac.signal,
   ).finally(() => {
     clearTimeout(acTimer)
-    if (liveAbort.get(sessionId) === ac) liveAbort.delete(sessionId)
+    for (const key of turnKeys) {
+      if (liveAbort.get(key) === ac) liveAbort.delete(key)
+    }
   })
 
   // 立刻回执，别让手机等整轮；若 1.2s 内就报错则如实返回，方便现场定位契约问题。
@@ -2412,26 +2525,24 @@ export function buildHiddenPrompt(config = {}) {
 }
 
 /**
- * sessionId -> { text, dispose }：这条会话现在挂着哪段隐藏提示。
+ * sessionId -> { text, agent, dispose }：这条会话现在挂着哪段隐藏提示。
  *
- * `systemPrompt.section()` 按「调用方作用域」注册。拿宠物那条会话的 agent 作用域
- * 去注册，只有它看得见；本机主会话、别的项目会话都不受影响。同名同层重复注册会
- * 抛错，所以人设一变就先摘掉再重挂。
+ * 作用域的关键：`systemPrompt.section()` 按**服务实例自己的 ctx** 分层
+ * （dsh-system-prompt 里 `this.layers.effect(this.ctx, …)`），而 `ctx.get()` 返回的是
+ * 绑在**访问方** ctx 上的代理。所以 `agent.ctx.get('systemPrompt').section()` 落在这
+ * 只 agent 的层上：别的会话、别的项目都看不见，agent 卸载时效果自动摘掉。
+ *
+ * 别改用 `agentPresets.serviceFor(agent,'systemPrompt')`：它返回预设挂载作用域里的
+ * **裸实例**，`this.ctx` 不是这只 agent；一旦某个预设自己提供 systemPrompt，这段就会
+ * 挂到同一预设版本的全部会话上（`serviceForMount` 只看 fiber 归属，不做 per-agent 隔离）。
  */
 const hiddenSections = new Map()
 
 export async function syncHiddenPrompt(ctx, sessionId, config) {
   if (!sessionId) return false
   const text = buildHiddenPrompt(config)
-  const current = hiddenSections.get(sessionId)
-  if (current?.text === text) return true
-  if (current) {
-    try { current.dispose() } catch { /* 已经摘掉了 */ }
-    hiddenSections.delete(sessionId)
-  }
   const controller = ctx?.get?.('sessionController')
-  const presets = ctx?.get?.('agentPresets')
-  if (!controller?.resolveAgent || typeof presets?.serviceFor !== 'function') {
+  if (!controller?.resolveAgent) {
     netLog('hidden-skip', { reason: 'no-scope-api' })
     return false
   }
@@ -2442,30 +2553,28 @@ export async function syncHiddenPrompt(ctx, sessionId, config) {
       netLog('hidden-skip', { reason: resolved?.error?.kind ?? 'no-agent' })
       return false
     }
-    // 优先从 agent 的隔离预设组里取（真正「只有这条会话看得见」）；
-    // 取不到再退回 agent 自己 ctx 上的实例，并把走的是哪条路记进诊断。
+    // 文本没变**且还是同一只 agent** 才是真的已经挂好了。只比文本会漏一种情况：
+    // 宿主重开会话/重建 agent 后效果已随旧 agent 摘掉，映射却还留着旧 dispose，
+    // 之后便一直“早就挂好了”，人设静默丢失。
+    const current = hiddenSections.get(sessionId)
+    if (current?.text === text && current.agent === agent) return true
+    if (current) {
+      try { current.dispose() } catch { /* 已经摘掉了 */ }
+      hiddenSections.delete(sessionId)
+    }
     let service
-    let via = 'preset'
     try {
-      service = presets.serviceFor(agent, 'systemPrompt')
+      service = agent.ctx?.get?.('systemPrompt')
     } catch {
       service = undefined
-    }
-    if (!service?.section) {
-      via = 'agent-ctx'
-      try {
-        service = agent.ctx?.get?.('systemPrompt')
-      } catch {
-        service = undefined
-      }
     }
     if (!service?.section) {
       netLog('hidden-skip', { reason: 'no-system-prompt' })
       return false
     }
     const dispose = service.section({ name: 'pet-persona', order: 100, text })
-    hiddenSections.set(sessionId, { text, dispose })
-    netLog('hidden-section', { sessionId, via, chars: text.length })
+    hiddenSections.set(sessionId, { text, agent, dispose })
+    netLog('hidden-section', { sessionId, via: 'agent-ctx', chars: text.length })
     return true
   } catch (error) {
     netLog('hidden-failed', { error: String(error?.message ?? error) })
@@ -2505,7 +2614,22 @@ export function apply(ctx, config) {
    * 正文（报错/中断）时由定时器兜底发。
    */
   const pendingEnd = new Map()
-  const END_GRACE_MS = 2500
+  /**
+   * sessionId -> { text, turn }：这一轮最后一条 assistant 正文。
+   *
+   * 官方语义里一轮可能有多条 `assistant/message`（说了「我查一下」→ 调工具 → 再
+   * 说话），终止信号**只有** `turn/end`。所以中间消息只发非终止的 `message` 帧，
+   * 正文记在这里，等 `turn/end` 到了才当 `final` 发出去。
+   */
+  const turnText = new Map()
+  /**
+   * 等 `turn/end` 的兜底窗口。
+   *
+   * 以前是 2.5 秒：工具任务要跑十几秒，兜底先到 → 手机判「这一轮结束」，后半段
+   * 全丢。这不是「等正文的宽限」，而是「turn/end 根本没来」时的最后保险，所以必须
+   * 长到能覆盖正常工具调用（实测本机工具任务多在 30s 内），取 90s。
+   */
+  const END_GRACE_MS = 90_000
   /** sessionId -> Set<ServerResponse>：SSE 订阅者。 */
   const streams = SHARED.streams
   /** 本实例开的 SSE 响应：卸载时只收自己的，别把新实例的也 end 了。 */
@@ -2657,25 +2781,38 @@ export function apply(ctx, config) {
       // waitFinal 的 started 判断饿死 → 小爱每次干等成占位语；重复帧的根因是同一条
       // SSE 连接被逐键写两遍，已在 emit 里修掉。end 交给 assistant-stream 的 finish。
       if (event?.type === 'turn/start') {
-        liveTurns.set(sessionId, Date.now())
-        emit(sessionId, 'start', { turn: event.turn ?? null, step: event.step ?? null })
+        for (const key of new Set([sessionId, bareSessionId(sessionId)].filter(Boolean))) {
+          liveTurns.set(key, Date.now())
+        }
+        turnText.delete(sessionId)
+        // 官方事件的 turn 在 `data.turn` 里，旧代码读 `event.turn` 永远是 null：
+        // App 拿不到轮次号，就没法把「这一轮的 end」和上一轮的迟到帧区分开。
+        emit(sessionId, 'start', { turn: event.data?.turn ?? event.turn ?? null, step: event.data?.step ?? event.step ?? null })
         return
       }
       if (event?.type === 'turn/end') {
-        liveTurns.delete(sessionId)
-        // 一轮真正收尾：final 已经先发过了，这里才补 end
-        const pend = pendingEnd.get(sessionId)
-        if (pend) {
-          if (pend.timer) clearTimeout(pend.timer)
-          pendingEnd.delete(sessionId)
-          emit(sessionId, 'end', { reason: pend.reason, turn: event.turn ?? null })
+        for (const key of new Set([sessionId, bareSessionId(sessionId)].filter(Boolean))) {
+          liveTurns.delete(key)
         }
+        const turn = event.data?.turn ?? event.turn ?? null
+        const pend = pendingEnd.get(sessionId)
+        if (pend?.timer) clearTimeout(pend.timer)
+        pendingEnd.delete(sessionId)
+        const last = turnText.get(sessionId)
+        turnText.delete(sessionId)
+        // `turn/end` 是一轮**唯一**的终止信号：先把这一轮最后一条正文当 final 发，
+        // 再发 end。工具任务因此不会在「我查一下」那一句就被判结束。
+        if (last?.text) emit(sessionId, 'final', { text: last.text, turn: last.turn ?? turn })
+        emit(sessionId, 'end', { reason: pend?.reason ?? 'stop', turn })
         return
       }
       if (event?.type !== 'assistant/message') return
       const text = textOfMessage(event.data)
-      // 带上 turn：会话里的提问是排队的，手机上必须能认出哪条 final 属于自己那一轮
-      if (text) emit(sessionId, 'final', { text, turn: event.data?.turn ?? event.turn ?? null })
+      if (!text) return
+      const turn = event.data?.turn ?? event.turn ?? null
+      turnText.set(sessionId, { text, turn })
+      // 中间消息发 `message`：可以展示，但**不是**终止。只有 `end` 才是。
+      emit(sessionId, 'message', { text, turn })
     }),
   )
 
@@ -3411,7 +3548,8 @@ export function apply(ctx, config) {
   // 面板路由独立于 apiHandler：网页侧走 /pet-voice/panel/*，不是 /pet-voice/api/*。
   // 门禁是回环地址——网页没有也不该有手机令牌，公网侧永远 403。
   const panelHandler = async (req, res) => {
-    if (!isLoopback(req)) return sendJson(res, 403, { ok: false, error: 'forbidden' })
+    // 只认「真·直连本机」：回环来源 + 无转发头 + Host 是本机（见 panelRequestAllowed）。
+    if (!panelRequestAllowed(req)) return sendJson(res, 403, { ok: false, error: 'forbidden' })
     const reqUrl = new URL(req.url ?? '/', 'http://localhost')
     const route = reqUrl.pathname.slice(PANEL.length + 1).replace(/\/+$/, '')
     const method = String(req.method ?? 'GET').toUpperCase()
@@ -3467,8 +3605,17 @@ export function apply(ctx, config) {
         }
 
         if (route === 'rotate-token' && method === 'POST') {
-          rotateToken()
-          return sendJson(res, 200, await snapshot())
+          // body 里 `{dry:true}` 只回当前快照、不换令牌：自检/排障要能确认这条路由
+          // 真的接上了，又不能每跑一次自检就把用户已经配好的手机踢下线。
+          let dry = false
+          try {
+            const raw = String((await readBody(req, 1024)) ?? '')
+            dry = JSON.parse(raw || '{}')?.dry === true
+          } catch {
+            /* 空 body = 真换 */
+          }
+          if (!dry) rotateToken()
+          return sendJson(res, 200, { ...(await snapshot()), rotated: !dry })
         }
 
         if (route === 'unbind' && method === 'POST') {
@@ -3479,8 +3626,13 @@ export function apply(ctx, config) {
           } catch {
             /* 没有 id 就当没这个设备 */
           }
-          removeDevice(id)
-          return sendJson(res, 200, await snapshot())
+          const removed = removeDevice(id)
+          // 只删一行记录是假撤销：审阅实测旧令牌照样 200，那台手机下次请求又把自己
+          // 写回列表。设备表里每台设备用的都是同一枚主令牌，没有逐设备凭证，所以
+          // 「移出」必须是真撤销：换掉主令牌，这台和别的设备都要重新扫码。
+          // （逐设备凭证在计划里，属下一轮；先把安全性做对，代价是全体重配。）
+          if (removed) rotateToken()
+          return sendJson(res, 200, { ...(await snapshot()), rotated: removed })
         }
 
         if (route === 'qr.svg' && method === 'GET') {
@@ -3523,8 +3675,17 @@ export function apply(ctx, config) {
     }
 
     if (!authed(req)) return sendJson(res, 401, { ok: false, error: 'unauthorized' })
-    // 通过令牌的请求都算这台设备还活着，列表里按最近活跃排。
-    touchDevice(req)
+    // 通过令牌的请求都算这台设备还活着，列表里按最近活跃排；超出绑定上限就回收
+    // 凭据（以前上限只存在面板里，不执行，等于没设）。
+    const deviceTouch = touchDevice(req)
+    if (deviceTouch?.reason === 'limit') {
+      return sendJson(res, 429, {
+        ok: false,
+        code: 'device-limit',
+        maxDevices: deviceTouch.maxDevices,
+        error: `这台电脑最多连 ${deviceTouch.maxDevices} 台设备，先在面板里移出一台`,
+      })
+    }
 
     try {
       // 手机端回传诊断（安装失败原因、启动自检）。这条也要 cookie，公网上不留匿名写入口。
@@ -3776,14 +3937,28 @@ export function apply(ctx, config) {
           })
           pending = since()
         }
-        netLog('poll', { sessionId, cursor, got: pending.length })
+        // 游标必须指向**这一批实际发出去的最后一帧**。以前按 pending 的最后一帧
+        // 推进：一次积压超过 200 帧时，第 201..N 帧永远读不到，而 done 已经被置成
+        // true——审阅用 300 帧积压实测，客户端拿到「完成」却丢了 100 帧。
+        const batch = pending.slice(0, 200)
+        const nextCursor = batch.length ? batch[batch.length - 1].seq : cursor
+        // 缓冲里最早的帧都比游标新 → 中间至少有一帧被 400 帧环形缓冲挤掉了，
+        // 明确告诉客户端「你漏了」，别让它以为对话就是断的。
+        const oldest = buf.frames.length ? buf.frames[0].seq : 0
+        const gap = Boolean(oldest && cursor > 0 && oldest > cursor + 1)
+        netLog('poll', { sessionId, cursor, got: pending.length, sent: batch.length, gap })
         return sendJson(res, 200, {
           ok: true,
           sessionId,
           transport,
-          frames: pending.slice(0, 200),
-          cursor: pending.length ? pending[pending.length - 1].seq : cursor,
-          done: pending.some((f) => f.event === 'end' || f.event === 'final'),
+          frames: batch,
+          cursor: nextCursor,
+          // 还有没发完的帧：客户端应该立刻再拉一次，不要等到下一轮空转。
+          more: pending.length > batch.length,
+          gap,
+          // 只有真的把 end 发出去了才算这一轮结束。final 现在是「这一轮的最后一句
+          // 话」，不是终止信号（工具任务里它后面还可能有 tool/end 帧）。
+          done: batch.some((f) => f.event === 'end'),
         })
       }
 
@@ -4186,7 +4361,7 @@ export function apply(ctx, config) {
       ...API_ROUTES.map((route) =>
         ctx.webServer.register({ kind: 'exact', path: `${API}/${route}`, handler: safeHandler(apiHandler) }),
       ),
-      ...['state', 'unbind', 'qr.svg', 'public', 'public/connect', 'public/disconnect'].map((route2) =>
+      ...['state', 'rotate-token', 'unbind', 'qr.svg', 'public', 'public/connect', 'public/disconnect'].map((route2) =>
         ctx.webServer.register({ kind: 'exact', path: `${PANEL}/${route2}`, handler: safeHandler(panelHandler) }),
       ),
       // 下载路由：裸路径明确 404；文件名的 exact 由 ensureDownloadRoute 慢慢补。
@@ -4255,6 +4430,11 @@ export function apply(ctx, config) {
       }
       // 先收定时器：插件被热重载时这些 interval 还活着，对着已经 end 的响应写
       // 就会在下一个 tick 抛 uncaughtException，把宿主整个带走（0.9.24 前的事故）。
+      //
+      // 顺序陷阱：cleanup() 自己会 `myStreams.delete(res)`，所以必须在收定时器
+      // **之前**拍快照；否则循环时集合已经空了，一条 res.end() 都不会发
+      // （实测 0 次、对端 writableEnded=false，一直挂到超时）。
+      const leftoverStreams = [...myStreams]
       for (const cleanup of [...streamGuards.values()]) {
         try {
           cleanup()
@@ -4263,14 +4443,19 @@ export function apply(ctx, config) {
         }
       }
       streamGuards.clear()
-      for (const res of [...myStreams]) {
+      let ended = 0
+      for (const res of leftoverStreams) {
         try {
-          if (!resGone(res)) res.end()
+          if (!resGone(res)) {
+            res.end()
+            ended += 1
+          }
         } catch {
           /* 忽略 */
         }
       }
       myStreams.clear()
+      netLog('unload-streams', { snapshot: leftoverStreams.length, ended })
       LOG('路由已卸载')
     }
   })

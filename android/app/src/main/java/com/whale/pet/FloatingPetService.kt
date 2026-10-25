@@ -83,6 +83,12 @@ class FloatingPetService : Service() {
     private var turnActive = false
     private var speaking = false
 
+    /**
+     * 服务已销毁：晚到的 TTS/ASR/派发回调一律作废。
+     * 不能只看类上的 `alive`——它会在新服务实例起来时又变 true，旧实例的迟到回调会打到新实例的窗口上。
+     */
+    @Volatile private var destroyed = false
+
     /* ---------------- 「说到停」连续对话 ---------------- */
     /** 悬浮窗这条路上，一轮说完自动回 listening；连续两轮没听清/被拖动/熄屏/后台超时才退出。 */
     private var continuous = false
@@ -185,7 +191,7 @@ class FloatingPetService : Service() {
         asr = NativeAsr(this)
         wake = WakeWordEngines.create(this)
         wake.setListener { hit -> main.post { onWake(hit) } }
-        tts = TtsPlayer(this, client, { cfg }, ::onSpeakingChanged, ::onTtsError)
+        tts = TtsPlayer(this, client, { cfg }, ::onSpeakingChanged, ::onTtsError, ::onTtsDrained)
         tts.prewarm(FILLERS) // 口头填充句先合成好，宿主一句要 0.9s+，不能让用户干等
         createChannel()
         AppForeground.onChange = { on -> main.post { applyAppForeground(on) } }
@@ -320,6 +326,7 @@ class FloatingPetService : Service() {
     }
 
     override fun onDestroy() {
+        destroyed = true
         alive = false
         if (AppForeground.onChange != null) AppForeground.onChange = null
         stopContinuous("服务结束")
@@ -476,7 +483,7 @@ class FloatingPetService : Service() {
         if (tokenChanged) {
             client = PetClient { cfg }
             tts.release()
-            tts = TtsPlayer(this, client, { cfg }, ::onSpeakingChanged, ::onTtsError)
+            tts = TtsPlayer(this, client, { cfg }, ::onSpeakingChanged, ::onTtsError, ::onTtsDrained)
         tts.prewarm(FILLERS)
         }
         if (lookChanged) applyWindowSize()
@@ -975,6 +982,7 @@ class FloatingPetService : Service() {
             val ok = res != null && res.ok
             Log.i("PetVoice", "asr http=${res?.code ?: -1} textLen=${text.length} err=${err ?: "-"}")
             main.post {
+                if (destroyed) return@post
                 when {
                     ok && text.isNotBlank() && rejectAsNoise(text) -> {
                         logVad(listenedMs, heard, 0, false)
@@ -1018,6 +1026,7 @@ class FloatingPetService : Service() {
             override fun onPartial(text: String) = Unit
 
             override fun onFinal(text: String) {
+                if (destroyed) return
                 pttActive = false
                 if (text.isBlank() || rejectAsNoise(text)) {
                     emptyRound()
@@ -1027,6 +1036,7 @@ class FloatingPetService : Service() {
             }
 
             override fun onError(message: String, code: Int) {
+                if (destroyed) return
                 if (!pttActive) return
                 pttActive = false
                 val soft = code == SpeechRecognizer.ERROR_NO_MATCH ||
@@ -1118,6 +1128,7 @@ class FloatingPetService : Service() {
     }
 
     private fun onWake(hit: WakeHit) {
+        if (destroyed) return
         if (!cfg.wakeEnabled) return
         if (turnActive || pttActive || speaking || tts.busy) return
         wake.stop() // 呼出后立刻停引擎：别把自己 TTS 的声音当唤醒词（回声自激）
@@ -1130,6 +1141,8 @@ class FloatingPetService : Service() {
 
     private fun beginTurn(text: String) {
         tts.stopAll()
+        // 打断旧轮时队列可能刚刚排空并排了一次「重开麦」：这一轮马上要说话，取消它
+        main.removeCallbacks(resumeListen)
         wake.stop()
         // 连续对话里麦可能还开着（唤醒词带内容直接进对话）：先收干净，播报期间绝不留录音
         if (pttActive) {
@@ -1186,6 +1199,7 @@ class FloatingPetService : Service() {
             }
         }
         main.post {
+            if (destroyed) return@post
             if (gen != commandGen || !turnActive) return@post
             if (cmd == null || cmd.isChat) {
                 startChatTurn(text)
@@ -1200,17 +1214,20 @@ class FloatingPetService : Service() {
         Log.i(PetCommand.TAG, "→ /api/dispatch（仅 chat 路径，指令分支不走这里）")
         turn = PetTurn(client, text, object : PetTurn.Callback {
             override fun onUser(text: String) {
+                if (destroyed) return
                 PetHistory.append(this@FloatingPetService, PetHistory.ROLE_ME, text)
             }
 
             override fun onStatus(text: String) = Unit
 
             override fun onAssistant(fullText: String, isFinal: Boolean) {
+                if (destroyed) return
                 if (!isFinal || fullText.isBlank()) return
                 PetHistory.append(this@FloatingPetService, PetHistory.ROLE_PET, fullText)
             }
 
             override fun onSentence(sentence: String) {
+                if (destroyed) return
                 if (sentence.isBlank()) return
                 if (firstSentenceAt == 0L) {
                     firstSentenceAt = SystemClock.elapsedRealtime()
@@ -1222,13 +1239,17 @@ class FloatingPetService : Service() {
             }
 
             override fun onDone() {
+                if (destroyed) return
                 turnActive = false
-                if (!speaking) afterReply()
+                // 不能只看 speaking：最后一句可能还在下载/准备，那时开麦会把自己的下一句录进去；
+                // afterReply 用「队列彻底排空」判断，没排空就等 onTtsDrained 再收尾
+                afterReply()
             }
 
             override fun onError(message: String) {
+                if (destroyed) return
                 turnActive = false
-                if (!speaking) flashHappy()
+                if (!speaking && !tts.busy) flashHappy()
             }
         }).also { it.start() }
     }
@@ -1255,13 +1276,18 @@ class FloatingPetService : Service() {
             },
         )
         tts.enqueue(line)
-        // TTS 不可用时也要收尾，别卡在 talking
+        // TTS 不可用时也要收尾，别卡在 talking；还在下载/准备时不算收尾完成
         main.postDelayed({
-            if (!pttActive && !turnActive && !speaking && currentMode == "talking") afterReply()
+            if (!destroyed && !pttActive && !turnActive && !speaking && !tts.busy &&
+                currentMode == "talking"
+            ) {
+                afterReply()
+            }
         }, 4000)
     }
 
     private fun onSpeakingChanged(value: Boolean) {
+        if (destroyed) return
         speaking = value
         if (value) {
             if (turnStartAt > 0L) {
@@ -1295,6 +1321,12 @@ class FloatingPetService : Service() {
 
     /** 一轮结束：连续对话就稍等再开麦，否则回待机。 */
     private fun afterReply() {
+        if (destroyed) return
+        // 还没排空就不能收尾：下载中/等着出声的句子还没响，此刻开麦会把它录回来
+        if (tts.busy || speaking) {
+            scheduleResume(150)
+            return
+        }
         if (continuous && cfg.ready) {
             scheduleResume(200)
         } else {
@@ -1302,7 +1334,20 @@ class FloatingPetService : Service() {
         }
     }
 
+    /**
+     * TTS 真正排空（含下载、准备和上一轮迟到的回包）时回调。
+     *
+     * 「上一句放完了」不等于「说完了」：最后一句可能还在下载，服务以前就在这个缝里开麦，
+     * 把自己的下一句录进去再发给模型，于是自问自答。排空信号是唯一可靠的开麦时机。
+     */
+    private fun onTtsDrained() {
+        if (destroyed) return
+        if (pttActive || turnActive) return
+        afterReply()
+    }
+
     private val resumeListen = Runnable {
+        if (destroyed) return@Runnable
         if (!continuous || !cfg.ready) {
             continuous = false
             toIdle()
@@ -1422,6 +1467,7 @@ class FloatingPetService : Service() {
     }
 
     private fun onTtsError(message: String) {
+        if (destroyed) return
         updateNotification("语音不可用 · ${message.take(20)}")
     }
 

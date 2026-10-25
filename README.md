@@ -6,15 +6,20 @@
 
 手机端是一个 30 MB 的 Android App：桌面悬浮着会呼吸、会说话的小鲸鱼，点一下就能说话，
 它把你这句话派给电脑上的专属会话，边生成边把回复念出来、把动作放出来。电脑关机，它就不在——
-**没有云、没有账号、不经过任何第三方服务器。**
+**项目不运营任何服务器，也不用注册任何账号，会话和记忆都在你自己电脑上。**
+
+要说清楚的两条外部依赖：默认语音合成走微软 Edge 的在线语音接口（`edge-tts`，免 key），
+手机端的唤醒与识别走 Android 系统的语音服务（`SpeechRecognizer`，是否上传音频由系统/厂商决定）。
+换个音色或换成本地 TTS 也能用，但这两条链路本身不是纯离线的；选隧道/自建域名时还多一层你自己的服务器或隧道商。
 
 ## 现在能用吗
 
 | 项 | 状态 |
 | --- | --- |
-| APK | `0.9.27`（versionCode 97），Android 8.0+（API 26），targetSdk 35 |
+| APK | `0.9.28`（versionCode 98），Android 8.0+（API 26），targetSdk 35 |
 | 验证环境 | Android 11 模拟器（1080×2340）跑通全链路：配对、语音、回复、动作、历史、检查更新 |
 | 真机 | 厂商权限跳转与硬件麦克风只在 AOSP 页面验证过，各家 ROM 仍可能不同，欢迎回报 |
+| Android 14/15 | 未做实机验证：后台恢复、麦克风前台服务在收紧后的行为【需真机确认】，见 [docs/android-app.md](docs/android-app.md) 的兼容边界一节 |
 | iOS | 不支持（悬浮窗与常听麦克风是 Android 特性） |
 
 安装包在 [Releases](../../releases/latest)。这是维护者自签名的构建，签名指纹写在
@@ -96,6 +101,8 @@ https://<你的地址>/pet-voice/?k=<一次性配对码>
 手机端实现与限制见 [docs/android-app.md](docs/android-app.md)。
 
 ## 开发与构建
+
+前置：**Node.js ≥ 22.15.0**（插件静态引用 `node:zlib` 的 `zstdDecompressSync`，Node 20 加载即报错）、JDK 17、Android SDK。
 
 ```bash
 # 自测（离线部分不碰真实配置）

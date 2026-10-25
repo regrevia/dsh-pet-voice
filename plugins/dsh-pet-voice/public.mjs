@@ -11,6 +11,7 @@ import { request as httpRequest } from 'node:http'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, chmodSync, openSync, closeSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { normalizeTarget, isPetVoicePath, isProtectedPath, forwardPath } from './guardPath.mjs'
 
 export const PUBLIC_DIR = join(homedir(), '.dsh/pet-voice')
 const CONFIG_PATH = join(PUBLIC_DIR, 'public.json')
@@ -157,23 +158,36 @@ function note(line) {
   } else if (/Host key verification failed/i.test(text)) state.lastError = '服务器指纹变了'
 }
 
+/**
+ * 入口判定：判定与转发都用 normalizeTarget 的同一个结果。
+ * 公网请求是从服务器隧道回环进来的，宿主侧会把来源看成 127.0.0.1，
+ * 面板门禁（只查 remoteAddress）在这里已经不起作用——所以面板必须在入口就拒掉。
+ */
+export function classifyPublicPath(raw) {
+  const target = normalizeTarget(raw)
+  if (!target) return { status: 400, reason: '路径不合法' }
+  if (!isPetVoicePath(target.path)) return { status: 404, reason: '只有 /pet-voice/* 会被转发' }
+  if (isProtectedPath(target.path)) return { status: 403, reason: '面板只在这台电脑上打开' }
+  return { status: 0, target }
+}
+
 function startTls(upstream) {
   const key = readFileSync(LEAF_KEY_PATH)
   const cert = readFileSync(LEAF_PATH)
   const port = readConfig().tlsPort
   const server = createServer({ key, cert })
   server.on('request', (req, res) => {
-    const url = req.url ?? '/'
-    if (!url.startsWith('/pet-voice/') && url !== '/pet-voice') {
-      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
-      return res.end('not found')
+    const verdict = classifyPublicPath(req.url ?? '/')
+    if (verdict.status) {
+      res.writeHead(verdict.status, { 'content-type': 'text/plain; charset=utf-8' })
+      return res.end(verdict.status === 403 ? 'forbidden' : 'not found')
     }
     const target = httpRequest(
       {
         host: upstream.host,
         port: upstream.port,
         method: req.method,
-        path: url,
+        path: forwardPath(verdict.target),
         headers: { ...req.headers, host: req.headers.host ?? `${upstream.host}:${upstream.port}` },
         timeout: 120000,
       },
@@ -244,6 +258,17 @@ export async function connectPublic({ upstream } = {}) {
     const lines = errBuf.split('\n')
     errBuf = lines.pop() ?? ''
     for (const line of lines) note(line)
+  })
+  // ssh 不在 PATH（ENOENT）时，不注册 error 监听会让整个 Node 进程 exit(1)。
+  // 这里只让「公网转发」这一个功能失败，并把原因留给 connectPublic 抛出。
+  child.on('error', (error) => {
+    if (state.child !== child) return
+    state.child = null
+    const code = String(error?.code ?? '')
+    state.lastError = code === 'ENOENT'
+      ? '这台电脑没有 ssh，先在终端装好再连'
+      : `ssh 起不来（${code || error?.message || '未知原因'}）`
+    note(state.lastError)
   })
   child.on('exit', (code) => {
     if (state.child === child) {

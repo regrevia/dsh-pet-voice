@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""edge-tts 流式合成器：把 mp3 字节直接写到 stdout，供宿主端点直通给浏览器。
+"""edge-tts 整句合成器：收到完整音频后一次写到 stdout。
 
 用法：
     stream.py <voice> <text> [rate] [pitch]
@@ -8,6 +8,14 @@
 - rate/pitch 形如 `+8%` / `-4%`、`+2Hz` / `-2Hz`
 - stdout 只有音频字节；stderr 只打一行统计，方便宿主日志排查
 - 任何失败都以非 0 退出码结束，并往 stderr 打中文原因
+
+注意两点（别按「本地 TTS / 边合成边播」理解）：
+1. edge_tts.Communicate 用的是微软的在线语音服务，这一段必须能出网；音频在
+   `communicate.stream()` 里分块到达，但本脚本**收完整句**才写 stdout ——
+   因为要先做掐头去尾/压停顿，整句才处理得对。App 侧本来也是下完整个 mp3 再播，
+   所以这里没有做逐块转发，`vendor_first_chunk_ms` 只是厂商第一块到达的时间点，
+   不是用户听到声音的时间。
+2. 真正播放前还有下载、丢弃/排队；首字延迟以端到端实测为准，别引用这个数。
 """
 
 from __future__ import annotations
@@ -66,7 +74,7 @@ async def _run(voice: str, text: str, rate: str, pitch: str) -> int:
     elapsed = time.monotonic() - started
     print(
         f"[tts] voice={voice} rate={rate} pitch={pitch} chunks={chunks} bytes={len(trimmed)} "
-        f"raw={total} first_ms={int((first_at or 0) * 1000)} total_ms={int(elapsed * 1000)}",
+        f"raw={total} vendor_first_chunk_ms={int((first_at or 0) * 1000)} total_ms={int(elapsed * 1000)}",
         file=sys.stderr,
         flush=True,
     )

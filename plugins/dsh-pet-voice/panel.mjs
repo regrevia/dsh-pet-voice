@@ -166,6 +166,11 @@ export function touchDevice(req) {
       : createHash('sha1').update(`${ua}${ip}`).digest('hex').slice(0, 12)
     const store = readDeviceStore()
     const existing = store.devices.find((item) => item.id === id)
+    // 绑定上限以前只是面板上的一个数字：不执行就等于没设。新设备超限不再记录，
+    // 由调用方回 429（旧设备继续用不受影响，否则自己把自己锁在门外）。
+    if (!existing && store.devices.length >= store.maxDevices) {
+      return { ok: false, reason: 'limit', maxDevices: store.maxDevices }
+    }
     if (existing) {
       existing.lastSeen = now
       existing.ip = ip
@@ -190,8 +195,10 @@ export function touchDevice(req) {
         .splice(0, store.devices.length - 50)
     }
     writeDeviceStore(store.devices, store.maxDevices)
+    return { ok: true, id }
   } catch {
     /* 设备记录失败不影响请求本身 */
+    return { ok: true, skipped: true }
   }
 }
 

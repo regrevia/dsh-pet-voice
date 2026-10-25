@@ -48,11 +48,19 @@ class PetTurn(
     /** SSE 最后一次收到字节的时刻：轮询据此决定「让位」还是接管。 */
     @Volatile private var sseLastAt = 0L
 
-    /** 跨通道去重：宿主把 seq 带进帧里时按它去重；没带就退化成「让位」策略。 */
-    private val seenSeq = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+    /**
+     * 跨通道去重：同一帧会从 SSE 和轮询各来一次。
+     *
+     * 键必须是「会话 + seq」：不同会话的 seq 各自从 1 开始，只按 seq 去重时，
+     * 别的会话的 seq=7 会把本会话刚收到的 seq=7 当成重复丢掉（表现是一整句凭空消失）。
+     */
+    private val seenSeq = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     @Volatile
     private var endSeenAt = 0L
+
+    /** 是否收到过 end（新协议里它是唯一的终止信号）。 */
+    private val endSeen = AtomicBoolean(false)
 
     private val assistant = StringBuilder()
     private val sentenceBuf = StringBuilder()
@@ -252,7 +260,7 @@ class PetTurn(
         while (!cancelled.get() && !ended.get() && System.currentTimeMillis() < deadline) {
             Thread.sleep(120)
         }
-        if (!cancelled.get() && !ended.get()) postError("等待回复超时（180s 未收到 end/final）")
+        if (!cancelled.get() && !ended.get()) postError(TIMEOUT_TEXT)
     }
 
     private fun pollTurn() {
@@ -311,26 +319,28 @@ class PetTurn(
             }
             if (j.optBoolean("done", false)) return
         }
-        if (!cancelled.get() && !ended.get()) postError("等待回复超时（轮询）")
+        if (!cancelled.get() && !ended.get()) postError(TIMEOUT_TEXT)
     }
 
 
     private fun handleEvent(event: String, data: JSONObject) {
         if (cancelled.get()) return
         if (event != "delta") dbg("event $event seq=${data.optInt("seq", -1)} sid=${data.optString("sessionId")} want=$expectedSession feeder=${feeder.get()}")
-        // 同一帧可能从 SSE 和轮询各来一次：带 seq 就按 seq 去重
-        val seq = data.optInt("seq", -1)
-        if (seq >= 0) {
-            NetLog.seq(seq)
-            if (!seenSeq.add(seq)) return
-        }
         // 宿主会把所有会话的事件广播过来：别的会话（比如电脑上正在用的那只）的 delta 不能串进手机字幕
         val evSession = data.optString("sessionId")
         // 宿主的流同时挂在 '*' 上（谁派发的都往所有连接推），所以这里必须严格按会话过滤：
         // 别人的 start/end/final/delta 混进来就会把这一轮提前收尾（真机「想 4 秒就没输出」）。
+        // 顺序要紧：**先按会话过滤，再按 seq 去重**——反过来的话，别的会话的 seq=7
+        // 会先把本会话还没到的 seq=7 记成「已收」，本会话那一帧就被当成重复丢掉。
         if (event != "hello" && event != "say" && expectedSession.isNotBlank() && evSession != expectedSession) return
         // 还没派发时不知道目标会话：广播流里别人的 start/end/final 一律不算
         if (expectedSession.isBlank() && event != "hello" && event != "delta") return
+        // 同一帧可能从 SSE 和轮询各来一次：带 seq 就按「会话+seq」去重
+        val seq = data.optInt("seq", -1)
+        if (seq >= 0) {
+            NetLog.seq(seq)
+            if (!seenSeq.add(evSession.ifBlank { expectedSession } + "|" + seq)) return
+        }
         if (staleTurn(event, data)) return
         when (event) {
             "hello" -> {
@@ -350,6 +360,16 @@ class PetTurn(
                 feedSentences(d)
                 val full = assistant.toString()
                 post { cb.onAssistant(full, false) }
+            }
+
+            "message" -> {
+                // 一条完整的模型消息：可以显示、可以播，但**不是**这一轮的结束，后面还可能续。
+                val t = data.optString("text").ifBlank { assistant.toString() }
+                if (t.isBlank()) return
+                assistant.setLength(0)
+                assistant.append(t)
+                post { cb.onAssistant(t, false) }
+                flushSentences()
             }
 
             "final" -> {
@@ -373,25 +393,38 @@ class PetTurn(
                 } else {
                     flushSentences()
                 }
-                ended.set(true)
+                // 新协议里 final 只是「一条完整的模型消息」，一轮要等 end 才算结束，这里不置 ended。
+                // 兼容旧宿主：老版本只发 final、不发 end，1.5s 没等到 end 就按旧式收尾——
+                // 否则对旧宿主每一轮都会卡到 180s 判超时。end 一到就由 end 分支立即结束。
+                main.postDelayed({
+                    if (!cancelled.get() && !ended.get() && !endSeen.get()) {
+                        dbg("final 后 ${FINAL_COMPAT_MS}ms 未收到 end，按旧宿主行为收尾")
+                        ended.set(true)
+                    }
+                }, FINAL_COMPAT_MS)
             }
 
             "end" -> {
-                // 一轮结束。宿主现在保证 final 先于 end，但隧道可能把两个事件拆到不同的
-                // 包/批次里：end 到了、final 还在路上时不能直接归零——那正是 0.8.4 真机
-                // 「思考 4s 然后什么都没有」的样子。宽限期内等 final；等不到就把已经收到的
-                // 增量当整段收尾；一个字都没有才算失败（由上层提示重试）。
+                // 这一轮真正的终止信号。宿主保证 final 先于 end，但隧道可能把两个事件拆到不同
+                // 批次：end 到了、final 还在路上时给同样长的宽限；等不到就把已收到的增量收尾。
+                if (endSeen.get()) return
+                endSeen.set(true)
                 endSeenAt = System.currentTimeMillis()
-                main.postDelayed({
-                    if (finalSeen.get() || cancelled.get()) return@postDelayed
-                    val pendingText = assistant.toString()
-                    if (pendingText.isNotBlank()) {
-                        finalSeen.set(true)
-                        post { cb.onAssistant(pendingText, true) }
-                        flushSentences()
-                    }
+                if (finalSeen.get()) {
+                    flushSentences()
                     ended.set(true)
-                }, 4000)
+                } else {
+                    main.postDelayed({
+                        if (cancelled.get() || ended.get()) return@postDelayed
+                        finalSeen.set(true)
+                        val pendingText = assistant.toString()
+                        if (pendingText.isNotBlank()) {
+                            post { cb.onAssistant(pendingText, true) }
+                            flushSentences()
+                        }
+                        ended.set(true)
+                    }, FINAL_COMPAT_MS)
+                }
             }
 
             "error" -> {
@@ -535,6 +568,15 @@ class PetTurn(
                                 feedSentences(d)
                                 post { cb.onAssistant(assistant.toString(), false) }
                             }
+                            "message" -> {
+                                val t = data.optString("text").ifBlank { assistant.toString() }
+                                if (t.isBlank()) continue
+                                feeder.set("poll")
+                                assistant.setLength(0)
+                                assistant.append(t)
+                                post { cb.onAssistant(t, false) }
+                                flushSentences()
+                            }
                             "final" -> {
                                 val t = data.optString("text").ifBlank { assistant.toString() }
                                 if (t.isNotBlank()) {
@@ -549,7 +591,9 @@ class PetTurn(
                                         flushSentences()
                                     }
                                 }
-                                end = true
+                                // final 不是终止：等 end。只发 final 的旧宿主由下面的
+                                // endSeenAtPoll 宽限兜底（3s 后收尾）
+                                if (endSeenAtPoll == 0L) endSeenAtPoll = System.currentTimeMillis()
                             }
                             // end 只是「这一轮结束了」：final 可能还没进这批帧，
                             // 没正文就不能收工，否则回复永远取不回来；最多再多等 3s
@@ -619,5 +663,11 @@ class PetTurn(
 
         /** 连上之后至少再等这么久，避免慢网络下「连接耗时」把 hello 预算吃光。 */
         const val SSE_FALLBACK_FLOOR_MS = 300L
+
+        /** end 与 final 之间的宽限：新协议等 end；旧宿主只发 final，等不到就按旧式收尾。 */
+        const val FINAL_COMPAT_MS = 1_500L
+
+        /** 超过这个时间还没收到结束信号：只给用户一句能懂的提示，不报内部帧名。 */
+        const val TIMEOUT_TEXT = "等待回复超时"
     }
 }

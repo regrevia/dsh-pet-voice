@@ -16,6 +16,7 @@ import { request } from 'node:http'
 import { readFileSync, existsSync, appendFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { normalizeTarget, isProtectedPath, forwardPath } from '../plugins/dsh-pet-voice/guardPath.mjs'
 
 const args = process.argv.slice(2)
 const val = (name, def) => {
@@ -99,11 +100,23 @@ const [upHost, upPortRaw] = upstream.split(':')
 const upPort = Number(upPortRaw || 80)
 
 const server = createServer({ cert: readFileSync(certPath), key: readFileSync(keyPath), minVersion: 'TLSv1.2' }, (req, res) => {
-  const url = req.url || '/'
-  const path = url.split('?')[0]
+  const verdict = normalizeTarget(req.url || '/')
+  if (!verdict) {
+    res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' })
+    res.end('路径不合法\n')
+    return
+  }
+  // 判定和转发都用规范化后的 path：原始 URL 里的 ../、%2e%2e、双斜杠
+  // 会被宿主当面板路径路由，而宿主的面板门禁只看回环地址，这里不拦就漏。
+  const path = verdict.path
   if (!(path === prefix || path.startsWith(prefix + '/'))) {
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
     res.end(`只有 ${prefix}/* 会被转发\n`)
+    return
+  }
+  if (isProtectedPath(path)) {
+    res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+    res.end('面板只在这台电脑上打开\n')
     return
   }
   // 访问日志：只记方法/路径/状态/字节，用于核对「检查更新」有没有重复下载
@@ -121,7 +134,7 @@ const server = createServer({ cert: readFileSync(certPath), key: readFileSync(ke
   })
   const headers = { ...req.headers, host: upstream, 'x-forwarded-proto': 'https', 'x-forwarded-for': req.socket.remoteAddress || '' }
   delete headers['content-length'] // 让上游按 chunked/流式处理
-  const up = request({ host: upHost, port: upPort, method: req.method, path: url, headers }, (upRes) => {
+  const up = request({ host: upHost, port: upPort, method: req.method, path: forwardPath(verdict), headers }, (upRes) => {
     res.writeHead(upRes.statusCode || 502, upRes.headers)
     if (typeof res.flushHeaders === 'function') res.flushHeaders() // SSE 要尽快把响应头发出去
     upRes.pipe(res)

@@ -51,7 +51,7 @@ E: service (line=53)
                 └─ PetTurn.start()（后台线程 pet-turn）
                      ├─ 先开 SSE：GET /pet-voice/api/stream?sessionId=（≤5s 等 hello）
                      │     hello 到了才 POST /pet-voice/api/dispatch {"text": ...}   ← 纯原文，不加人设前缀，避免污染会话历史
-                     │     SSE 事件：start / delta / end / final / say / error（`: hb` 15s 心跳，retry:1500）
+                     │     SSE 事件：start / delta / message / tool / final / end / error / say（`: hb` 15s 心跳，retry:1500）
                      │     隧道掐掉 SSE → 立刻退回 GET /api/poll?sessionId=&cursor=-1&wait=（先取基线再派发，不丢帧）
                      ├─ 累积 assistant 文本 → onAssistant → 悬浮窗字幕（150ms 节流；final 强制刷）
                      ├─ 句子切分：。！？!?；;\n，长句 > 90 字按逗号再切 → onSentence
@@ -59,6 +59,7 @@ E: service (line=53)
                      │           音频缓存 cacheDir/tts/<ts>_<seq>.mp3（audio/mpeg，24kHz 48kbps）
                      │           ArrayDeque 排队 → 单线程下载 → 主线程顺序 MediaPlayer（一句播完再下一句，不叠音）
                      └─ end 后 1.5s 宽限 或 final 立即收尾 → onDone → 回「待机 · 双击说话」
+                        （判定本轮结束只看 end；message 是过程消息，final/end 只在官方 turn/end 发）
 ```
 
 关键约束：
@@ -605,6 +606,7 @@ SERIAL=emulator-5554 PET_HOST=https://pet.example.com/pet-voice/ bash scripts/ve
 | 0.9.25 | 95 | 28.56 MB | `e163353888c4117a` | 说话不再自己接自己：句与句之间不再开麦，出声期间与收声后 600 ms 内不上送；悬浮窗连续对话都说「说到停」再上送，不再固定 6 s |
 | 0.9.26 | 96 | 28.56 MB | `1ef6137ed9b21c6f` | 一只宠物只钉一个会话：并发取会话只允许一条在飞，抢输的那只不再收手机的消息（自己跟自己聊的根因）；本地 ASR 换脚本后自动重启 |
 | 0.9.27 | 97 | 28.56 MB | `afb93e816406f8ee` | 会话列表按项目收拢：标题是当前项目、只列本项目的会话、空壳不再显示「未命名」；首行「新建对话」开新会话并清掉上一只的旧消息；ASR 进程刚换掉时会重试一句而不是直接报错 |
+| 0.9.28 | 98 | 28.57 MB | `7ea0e2d07cef8fcc` | 语音严格按句序出声（下载并行、出声串行）；同一句只留一个在途合成、临时文件名唯一，后台不再因并发改名闪退；打断后槽位照还、队列不再卡死；最后一句下载完并播完才重新开麦，不再录到自己的声音；跨会话不再把本会话的句当重复丢掉；新协议只在 end 收尾（final 不再提前结束），旧宿主 1.5 s 兼容 |
 | 0.9.24 | 94 | 28.56 MB | `ceff8243c7f15552` | 新装第一条就能绑定：把面板给的配对链接整条粘进「电脑地址」，地址和令牌一起拆出来；局域网连法由插件在电脑上另起一层监听（`0.0.0.0`，只放行私有网段与 api 路径） |
 | 0.9.23 | 93 | 28.56 MB | `f8522e9e4552d791` | 打开 App 时悬浮窗收起、不再压住对话页且不再吃掉点击；退回桌面/别的应用时悬浮窗照常出现（模拟器两种状态实测） |
 | 0.9.22 | 92 | 28.56 MB | `b402b52ce24b214b` | 「立即对话」图标与文字一起居中；扫码/重新扫码走通（含相机授权）；经自有公网服务器 8443 实测发出并收到回复 | 对话页输入栏加表情按钮（24 个常用表情）；表情不进 TTS；模拟器实测发 ❤️/🎉 都收到顺着情绪的回应 |
@@ -660,3 +662,33 @@ adb logcat -d | grep "PetSprite: sprite" | tail -3
 
 正确顺序：`push` 到 `/data/local/tmp/` → 设备内 `cp` 到位 → `chown <uid>:<gid>` → `chmod 660` → `restorecon -R shared_prefs`。
 验证方式：`ls -lZ` 比对文件与目录的 category，再看首页是否「已连接」。**重装后 uid 会变**，别用记死的 uid。
+
+## 22. Android 14/15 与真机兼容边界（2026-10-25）
+
+目前所有运行证据都来自 **AVD `nr1`（Pixel 5 / Android 11 / API 30）模拟器**：配对、语音、回复、动作、历史、
+检查更新、文字兜底通道都在这一个环境跑通。**没有一台真机**跑过，所以下面这些「能不能用」不能按模拟器结果外推。
+
+实现侧已经按新版本要求铺好的部分：
+
+| 项 | 现状 |
+|---|---|
+| targetSdk | 35（API 35） |
+| 麦克风前台服务 | `FloatingPetService` 以 `foregroundServiceType="microphone|specialUse"` 启动，manifest 已声明 `FOREGROUND_SERVICE`、`FOREGROUND_SERVICE_MICROPHONE`、`FOREGROUND_SERVICE_SPECIAL_USE`（`AndroidManifest.xml:18-21,142`） |
+| 运行时权限 | `RECORD_AUDIO` 首次使用时申请；Android 13+ 通知权限单独申请 |
+| 常听唤醒 | 循环 `SpeechRecognizer`；识别器不可用时有兜底分支（`FloatingPetService.kt:1006` 起） |
+
+以下行为【需真机确认】，模拟器给不出结论：
+
+1. **后台恢复**：Android 14/15 对后台启动前台服务、`BOOT_COMPLETED` 拉起麦克风类 FGS 都收紧了。
+   手机被杀进程、重启、或用户从最近任务划掉后，悬浮窗能否自动回来、回来时麦克风是否仍然可用——未验证。
+   当前预期是**用户重新点开 App** 才能恢复常听；做不到「划掉也常驻」，也不该写成能。
+2. **麦克风 FGS 在厂商 ROM 上的存活**：MIUI/HyperOS、ColorOS 等对 `microphone` 类型前台服务有额外的省电与
+   「后台录音」拦截；`docs/real-device-install.md` 里的白名单步骤是给用户的建议，没有实测数据支撑。
+3. **唤醒成功率与误唤醒**：模拟器识别器只有 en-US 且常 `ERROR_NO_MATCH`，唤醒命中的真实比例、安静/电视人声
+   各 1 小时的误唤醒率都没有数据。
+4. **系统识别器是否上传音频**：`SpeechRecognizer` 可能走厂商/Google 的在线识别，是否上传、传到哪由系统决定，
+   本仓库无法保证「音频不出手机」。
+
+在真机上至少要手工过一遍：装 APK → 授权麦克风/通知/悬浮窗 → 锁屏 30 分钟后再点悬浮窗 → 杀进程后重开 →
+重启手机后重开 → 切到其他 App 后说话还能不能被唤醒。任何一条失败，都属于「该机型未通过」，
+不要只贴模拟器截图当兼容性证明。
