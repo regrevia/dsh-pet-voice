@@ -1,4 +1,4 @@
-# 手机安装与接线（鲸灵 0.9.6）
+# 手机安装与接线（鲸灵 0.9.7）
 
 > 本文只写「把 APK 装到真机、让手机安全地连回这台 Mac」这一件事。
 > 功能清单见 [`docs/android-app.md`](android-app.md)，插件接口见 [`docs/pet-contract.md`](pet-contract.md)。
@@ -7,10 +7,10 @@
 
 | 项 | 值 |
 | --- | --- |
-| 安装包 | `dist/jingling-0.9.6.apk`（= `android/app/build/outputs/apk/release/app-release.apk`） |
-| 大小 | 29,935,234 B |
-| SHA-256 | `750f993f901acaf5fdf98b350795d961483a8ea9c557653904cec611c7eabfbb` |
-| 版本 | `versionCode=76`，`versionName=0.9.6`，applicationId `com.whale.pet` |
+| 安装包 | `dist/jingling-0.9.7.apk`（= `android/app/build/outputs/apk/release/app-release.apk`） |
+| 大小 | 29,936,778 B |
+| SHA-256 | `3503a903752c028e4261ac1f3793971ea8a63c80b0a9f2e4de5ceff3df7a88dd` |
+| 版本 | `versionCode=77`，`versionName=0.9.7`，applicationId `com.whale.pet` |
 | 签名 | 自签名（CN=Jingling Pet，证书 SHA-256 `8a2cc532abadd8f0e63bdfe02ade2f528de2fd9b2d02231f192cd698197127ef`），release 构建、未开混淆 |
 | 最低系统 | Android 8.0（API 26），targetSdk 35 |
 
@@ -29,7 +29,7 @@
 校验（可选）：
 
 ```bash
-shasum -a 256 dist/jingling-0.9.6.apk   # 应等于上表
+shasum -a 256 dist/jingling-0.9.7.apk   # 应等于上表
 ```
 
 ## 2. 装到手机
@@ -37,7 +37,7 @@ shasum -a 256 dist/jingling-0.9.6.apk   # 应等于上表
 **方式 A · 数据线（推荐）**
 
 ```bash
-adb install dist/jingling-0.9.6.apk
+adb install dist/jingling-0.9.7.apk
 adb shell am start -n com.whale.pet/.MainActivity
 ```
 

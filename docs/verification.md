@@ -5,18 +5,23 @@
 
 ## 1. 只用轮询时能不能收到回复
 
-面板把传输方式锁成 `只用轮询` 后，发一句话，在 logcat 里应该看到这四行（`adb logcat | grep -E "PetTurn|PetLatency"`）：
+面板把传输方式锁成 `只用轮询` 后，发一句话，在 logcat 里应该看到这几行（`adb logcat | grep -E "PetTurn|PetLatency"`）：
 
 ```
-PetLatency: +460ms transport panel=poll
+PetLatency: +842ms transport panel=poll
 PetTurn : transport forced poll by panel
-PetLatency: +460ms pollSent baseline cursor=-1
-PetLatency: +963ms pollReturned http=200 cursor=0
+PetLatency: +843ms pollSent baseline cursor=-1
+PetLatency: +1498ms pollReturned http=200 cursor=26
+PetTurn : event start seq=27 … feeder=
+PetLatency: +2630ms sentence src=delta chars=5
+PetTurn : event final seq=34 … feeder=poll
 ```
 
-合格标准：`pollReturned http=200`，随后出现 `event start` / `event final`，屏幕上气泡出全文。
+合格标准：`pollReturned http=200`，随后 `event start` / `event final`，`feeder=poll`（纯轮询轮次就该是 `poll`），屏幕上气泡出全文。
 
-> 附带一句：`event final … feeder=sse` 在纯轮询轮次里也会打印。那是诊断标签写错（delta 分支两条通道共用，先跑到的会把自己标成 `sse`），不代表真开了 SSE。纯轮询这条分支在 `PetTurn.kt` 里于 `client.openStream()` 之前就 return 了。
+> 纯轮询这条分支在 `PetTurn.kt` 里于 `client.openStream()` 之前就 return 了，压根没开流；`feeder` 只为「SSE 与轮询抢同一段文本」提供去重依据。0.9.7 起纯轮询轮次标 `poll`，接管后才到的 SSE 增量才被丢弃。
+
+> 模拟器上点「发送」的一个坑：键盘弹出时「发送」按钮正好压在悬浮窗的宠物区域下面，点它会被悬浮窗吃掉，得先按返回收起键盘再点（或点 `(948,2100)`）。
 
 ## 2. 说完多久收尾（尾静音 1s）
 
