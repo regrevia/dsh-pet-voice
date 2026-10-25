@@ -151,7 +151,8 @@ class ChatRender(
                     ViewGroup.LayoutParams.MATCH_PARENT.let { android.view.View.MeasureSpec.makeMeasureSpec(widthOf(), android.view.View.MeasureSpec.EXACTLY) },
                     android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED),
                 )
-                val h = view.measuredHeight.coerceAtLeast((view.contentHeight * density).toInt())
+                // contentHeight 本身就是设备像素，别再乘 density，否则气泡会撑高一大片空白
+                val h = view.measuredHeight.coerceAtLeast(view.contentHeight)
                 if (h > 0) {
                     view.layoutParams = (view.layoutParams ?: ViewGroup.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,

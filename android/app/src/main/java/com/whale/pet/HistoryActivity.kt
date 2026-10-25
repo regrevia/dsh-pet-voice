@@ -124,6 +124,10 @@ class HistoryActivity : Activity() {
         pickerClose = findViewById(R.id.pickerClose)
 
         list.adapter = adapter
+        // 新回复、历史翻页都会重排列表，每次数据变化都重新贴底
+        adapter.registerDataSetObserver(object : android.database.DataSetObserver() {
+            override fun onChanged() = scrollToBottom()
+        })
         pickerList.adapter = pickerAdapter
         list.dividerHeight = 0
 
@@ -233,8 +237,29 @@ class HistoryActivity : Activity() {
         scrollToBottom()
     }
 
+    private val pinJump = Runnable {
+        if (adapter.count == 0 || list.height == 0) return@Runnable
+        // 回复气泡先占位、随后富文本渲染回来才长高，setSelection 类接口在长高后不再下走，
+        // 所以直接按像素往下滚，滚到底为止
+        var guard = 0
+        while (guard++ < 40 && list.canScrollVertically(1)) {
+            val before = list.firstVisiblePosition
+            list.scrollListBy(list.height / 2)
+            if (list.firstVisiblePosition == before && !list.canScrollVertically(1)) break
+        }
+        android.util.Log.i(
+            "PetChat",
+            "pin count=${adapter.count} h=${list.height} last=${list.lastVisiblePosition} can=${list.canScrollVertically(1)}"
+        )
+    }
+
     private fun scrollToBottom() {
-        ui.post { list.setSelection(adapter.count - 1) }
+        if (adapter.count == 0) return
+        // 行高会在随后几秒里变几次（富文本换掉 TextView、气泡折行），
+        // 所以不是贴一次就完，要让位几次，最终停在真正的底部
+        list.removeCallbacks(pinJump)
+        list.post(pinJump)
+        for (d in longArrayOf(150, 400, 900, 1600, 2600, 4000)) list.postDelayed(pinJump, d)
     }
 
     /* ---------------- 发送 / 中断 ---------------- */
