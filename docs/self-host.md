@@ -96,6 +96,27 @@ curl -s "$BASE/pet-voice/api/state?k=$(cat ~/.dsh/pet-voice/token)" | head -c 20
 - 证书（caddy 自动签，nginx 用 certbot）。
 - 宿主端口 `$PV_PORT` 只监听本机或内网，**不要直接暴露到公网**。
 
+### 反代在云服务器、DSH 在本机（`ssh -R`，适合已有公网服务器）
+
+反向代理装在你的 VPS 上、DSH 却跑在笔记本上时，反代连不到 `127.0.0.1:$PV_PORT`——
+先开一条反向隧道，把 VPS 的端口牵到本机：
+
+```
+手机 ──https──▶ VPS:8443 ──ssh -R──▶ 本机 tls-proxy:8443 ──▶ DSH $PV_PORT
+```
+
+本机执行（一条命令起两段，配置读 `local/server.env` 或环境变量）：
+
+```bash
+scripts/pv-public.sh start      # 打印 https://<公网IP>:8443
+scripts/pv-public.sh status     # 公网 401 = 通且鉴权生效
+scripts/pv-public.sh restart    # DSH 换端口或隧道断了之后
+```
+
+服务器侧只要求两条：`sshd_config` 里 `GatewayPorts clientspecified`、安全组放行该端口。
+细节、证书和排错见 [tls-self-signed.md](tls-self-signed.md) 的 §2/§3/§9。
+插件里选「自建域名」，填 `https://<公网IP>:8443`（有域名就填域名，走 443 也行）。
+
 ### caddy（最省事，自动 TLS + 默认不缓冲 SSE）
 `/etc/caddy/Caddyfile`：
 ```
@@ -189,12 +210,13 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:$PV_PORT/pet-voice/api
 ### 常见失败
 - **手机打不开、电脑能开**：路由器 AP 隔离；或电脑有多张网卡（VMware/utun），面板挑了错的那张。看 `ifconfig` 里手机同网段的 `inet`。
 - **换 WiFi / 重启后 IP 变了**：`局域网` 档的地址是实时算的，回面板重新扫码即可。
+- **电脑重启后连不上了**：DSH 每次启动的端口可能不一样（`$PV_PORT` 要重新算），手机里存的是旧端口。不用解绑，App 「更多 → 重新扫码」扫一次就行；想彻底免掉这一步，用方案 A 或 B，地址是固定的。
 - **HTTP 被浏览器拦截（语音/麦克风需要安全上下文）**：`http://<内网IP>` 在部分浏览器里麦克风权限受限。要语音唤醒就用方案 A/B 的 https，或 `lan` 下用 Chrome 的 `chrome://flags/#unsafely-treat-insecure-origin-as-secure` 把该地址加白（仅调试）。
 
 ## 安全须知（三种方案都适用）
 
 - 配对靠 `?k=<token>` 换 cookie；token 在 `~/.dsh/pet-voice/token`，**当密码对待**。泄露就删掉该文件，插件会重新生成。
-- 面板里点「换新令牌」等价于删掉该文件：旧 cookie、旧配对链接立刻作废，所有手机都要重新扫一次。
+- 面板里点「换新链接」等价于删掉该文件：旧 cookie、旧配对链接立刻作废，所有手机都要重新扫一次。
 - 公网暴露后，`/pet-voice/api/*` 除了页面/静态资源全部要鉴权；面板路由（`/pet-voice/panel/*`）只放行回环地址，公网永远是 403。
-- 设备有上限（默认 2 台）。「移出列表」只是把那一行从面板划掉，不会让手机失效；要真正断开某台手机就用「换新令牌」。
+- 设备有上限（默认 2 台）。「移出列表」只是把那一行从面板划掉，不会让手机失效；要真正断开某台手机就用「换新链接」。
 - 不要在公网反代上加「免鉴权白名单」：页面免鉴权是设计（靠 `?k=` 换 cookie），接口不是。

@@ -141,3 +141,33 @@ open local/pair-qr.png     # 手机 App → 扫码
 - token 在 `~/.dsh/pet-voice/token`（48 位），怀疑泄露就轮换 → 重启宿主 → 重新生成二维码；
 - 隧道进程：`bash scripts/tunnel-ssh.sh --daemon` 起、`--stop` 停、`local/tunnel.log` 看日志；
   断线不会自动重连（没装 autossh），实测建议 `brew install autossh` 后脚本会自动用它。
+
+## 9. 一条命令起停（2026-10-25 实测）
+
+拓扑 A 需要本机两段常驻：`tls-proxy`（8443 终止 TLS）+ `ssh -R`（把公网 8443 牵回本机）。
+`scripts/pv-public.sh` 把这两段一起管起来，配置读环境变量或 `~/.dsh/pet-voice/public.env`
+（也会退回读 `local/server.env` 里的 `SERVER_HOST` / `SERVER_USER` / `SERVER_KEY`，`local/` 已 gitignore）。
+
+```bash
+scripts/pv-public.sh start     # 起两段，已经在跑就跳过；结尾打印公网地址
+scripts/pv-public.sh status    # 端口 / 两段进程 / 公网探测（401 = 通且鉴权生效）
+scripts/pv-public.sh restart   # DSH 换了端口、或隧道断了之后跑这个
+scripts/pv-public.sh stop
+```
+
+然后把打印出来的地址填进面板「连上手机 → 自建域名」（裸 IP 也认：`https://<公网IP>:8443`），
+二维码就出来，手机扫码即可。
+
+验证（2026-10-25 20:40 +0800，用户自己的腾讯云轻量 `134.175.47.91`，ubuntu）：
+
+| 检查 | 结果 |
+|---|---|
+| `scripts/pv-public.sh status` | 8443 反代在跑、ssh -R 在跑、公网 HTTP **401** 【实测】 |
+| 公网 `GET /pet-voice/api/state`（带内置 CA） | **401**，鉴权生效 【实测】 |
+| 公网 `GET /pet-voice/?k=<token>` | **303**（下发 cookie 后跳转）【实测】 |
+| App 设成 `https://134.175.47.91:8443/pet-voice/` | 首页 **已连接** 【实测】 |
+| 对话页发一句 | 收到回复「主人，我在呢~ 有什么想让我帮你做的？」【实测】 |
+| 公网 `GET /pet-voice/api/update?versionCode=92` | 返回 0.9.22（29947050 B，sha256 `b402b52c…`）【实测】 |
+
+注意：`tls-proxy` 在**启动时**探一次 DSH 端口。DSH 重启换了端口后，跑
+`scripts/pv-public.sh restart`（不重启就还是往旧端口转发，手机表现为连不上）。

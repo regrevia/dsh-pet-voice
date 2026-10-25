@@ -183,25 +183,42 @@
             android:layout_marginTop="20dp"
             android:background="@drawable/bg_btn_primary"
             android:stateListAnimator="@null"
-            android:text="📷  扫码绑定大肥鱼"
+            android:text="扫码绑定大肥鱼"
             android:textAllCaps="false"
             android:textColor="@color/pet_bg"
             android:textSize="16sp"
             android:textStyle="bold" />
 
-        <Button
+        <LinearLayout
             android:id="@+id/launchBtn"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-                android:minHeight="56dp"
             android:layout_marginTop="12dp"
             android:background="@drawable/bg_btn_outline"
-            android:stateListAnimator="@null"
-            android:text="💬  立即对话"
-            android:textAllCaps="false"
-            android:textColor="@color/pet_accent"
-            android:textSize="16sp"
-            android:textStyle="bold" />
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:minHeight="56dp"
+            android:orientation="horizontal"
+            android:paddingLeft="18dp"
+            android:paddingRight="18dp">
+
+            <ImageView
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:contentDescription="@null"
+                android:src="@drawable/ic_chat"
+                android:tint="@color/pet_accent" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="立即对话"
+                android:textColor="@color/pet_accent"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+        </LinearLayout>
 
         <!-- ③ 设置（默认收起） -->
         <LinearLayout
@@ -517,6 +534,19 @@
                 android:background="@drawable/bg_btn_ghost"
                 android:stateListAnimator="@null"
                 android:text="诊断"
+                android:textAllCaps="false"
+                android:textColor="@color/pet_accent"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/scanAgainBtn"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_btn_ghost"
+                android:minHeight="44dp"
+                android:stateListAnimator="@null"
+                android:text="重新扫码"
                 android:textAllCaps="false"
                 android:textColor="@color/pet_accent"
                 android:textSize="13sp" />

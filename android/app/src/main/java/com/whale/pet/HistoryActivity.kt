@@ -43,6 +43,12 @@ import java.util.Locale
  */
 class HistoryActivity : Activity() {
 
+    private companion object {
+        /** 扫码页的请求码（首页用的是 42，这里错开）。 */
+        const val REQ_SCAN = 43
+    }
+
+
     private lateinit var list: ListView
     private lateinit var empty: TextView
     private lateinit var typing: TextView
@@ -351,6 +357,7 @@ class HistoryActivity : Activity() {
         val text = lastSent
         if (text.isBlank()) return
         adapter.error = ""
+        adapter.errorAction = null
         if (turn != null) return
         send(text)
     }
@@ -358,6 +365,7 @@ class HistoryActivity : Activity() {
     private fun send(text: String) {
         lastSent = text
         adapter.error = ""
+        adapter.errorAction = null
         adapter.live = ""
         turnStart = System.currentTimeMillis()
         PetHistory.append(this, PetHistory.ROLE_ME, text)
@@ -409,17 +417,42 @@ class HistoryActivity : Activity() {
         runBar.visibility = View.GONE
         val finalText = adapter.live
         adapter.live = ""
-        if (error == null && finalText.isNotBlank()) {
-            PetHistory.append(this, PetHistory.ROLE_PET, finalText)
-        } else if (error == null && !userStopped) {
+        // 连不上电脑（多半是电脑换了端口、地址失效）和「这轮没出字」是两种病，
+        // 前者重发多少次都没用，得先换地址：那一行的动作就直接给扫码。
+        val offline = error != null && (error.contains("连不上") || error.contains("超时") || error.contains("断开"))
+        when {
+            error == null && finalText.isNotBlank() -> PetHistory.append(this, PetHistory.ROLE_PET, finalText)
             // 一轮走完了却一个字都没有：不能就这么静默收工，用户只会以为 App 坏了
-            adapter.error = "没收到回复，重试"
-        } else {
+            error == null && !userStopped -> showRetry("没收到回复，重试", null)
+            offline -> showRetry("连不上电脑，重新扫码", { startScan() })
             // 失败给一行可点的动作，不砸对话框：点了就用同一句话再发一次
-            adapter.error = "没收到回复，重试"
+            else -> showRetry("没收到回复，重试", null)
         }
         reload()
         userStopped = false
+    }
+
+    private fun showRetry(text: String, action: (() -> Unit)?) {
+        adapter.error = text
+        adapter.errorAction = action
+    }
+
+    private fun startScan() {
+        try {
+            startActivityForResult(Intent(this, ScanActivity::class.java), REQ_SCAN)
+        } catch (e: Exception) {
+            toast("打不开扫码页：${e.javaClass.simpleName}，可用粘贴链接")
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_SCAN) return
+        if (resultCode == RESULT_OK) {
+            adapter.error = ""
+            adapter.errorAction = null
+            reload()
+        }
     }
 
     private val ticker = object : Runnable {
@@ -743,6 +776,7 @@ class HistoryActivity : Activity() {
         var rows: List<ChatRow> = emptyList()
         var live: String = ""
         var error: String = ""
+        var errorAction: (() -> Unit)? = null
         var onRetry: () -> Unit = {}
 
         override fun getCount(): Int = rows.size + (if (error.isNotBlank()) 1 else 0)
@@ -760,7 +794,7 @@ class HistoryActivity : Activity() {
                 (v as android.widget.LinearLayout).gravity = Gravity.START
                 bubble.background = null
                 bubble.setPadding(0, 0, 0, 0)
-                v.setOnClickListener { onRetry() }
+                v.setOnClickListener { (errorAction ?: onRetry)() }
                 return v
             }
             val row = rows[position]

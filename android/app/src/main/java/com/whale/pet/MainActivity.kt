@@ -211,12 +211,13 @@ class MainActivity : Activity() {
         }
         findViewById<LinearLayout>(R.id.displayModeRow).setOnClickListener { pickDisplayMode() }
         findViewById<Button>(R.id.scanBtn).setOnClickListener { startScan() }
-        findViewById<Button>(R.id.launchBtn).setOnClickListener { chatClicked() }
+        findViewById<View>(R.id.launchBtn).setOnClickListener { chatClicked() }
         findViewById<Button>(R.id.saveBtn).setOnClickListener { save() }
         findViewById<Button>(R.id.stopBtn).setOnClickListener { quitAll() }
         findViewById<LinearLayout>(R.id.updateRow).setOnClickListener { checkNow() }
         findViewById<Button>(R.id.checkUpdateBtn).setOnClickListener { checkNow() }
         findViewById<Button>(R.id.diagBtn).setOnClickListener { NetLog.send(this) }
+        findViewById<Button>(R.id.scanAgainBtn).setOnClickListener { startScan() }
         findViewById<Button>(R.id.permBtn).setOnClickListener { permissionChooser() }
         findViewById<TextView>(R.id.permOverlay).setOnClickListener { openOverlayPermission() }
         findViewById<TextView>(R.id.permMic).setOnClickListener {
@@ -426,7 +427,7 @@ class MainActivity : Activity() {
         statusDot.background = dot
 
         val scan = findViewById<Button>(R.id.scanBtn)
-        val launch = findViewById<Button>(R.id.launchBtn)
+        val launch = findViewById<View>(R.id.launchBtn)
         if (!cfg.ready) {
             statusTitle.text = "${PetSettings.load(this).wakeName} · 未绑定"
             statusHost.visibility = View.VISIBLE
