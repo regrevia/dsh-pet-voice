@@ -523,12 +523,23 @@ class MainActivity : Activity() {
     private fun save() {
         val old = PetSettings.load(this)
         val rawHost = hostInput.text.toString().trim()
-        val base = if (rawHost.isBlank()) old.baseUrl else PetSettings.normalizeBase(rawHost)
+        // 新装第一条就是配对：把面板给的那条链接整条粘进地址栏，地址和令牌一起拆出来。
+        // 拆不出来再按普通地址处理，两个字段都手填的老路不变。
+        val paired = if (rawHost.contains("://") && (rawHost.contains("k=") || rawHost.contains("token="))) {
+            PetConfig.parsePairPayload(rawHost, old.baseUrl)
+        } else {
+            null
+        }
+        val base = when {
+            paired != null -> paired.first
+            rawHost.isBlank() -> old.baseUrl
+            else -> PetSettings.normalizeBase(rawHost)
+        }
         if (base.isBlank()) {
             toast("地址无效：公网必须 https://，只有本机/局域网可用 http://")
             return
         }
-        val token = old.token
+        val token = paired?.second?.takeIf { it.isNotBlank() } ?: old.token
         if (token.isBlank()) {
             toast("请填访问令牌")
             return

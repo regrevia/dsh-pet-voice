@@ -16,7 +16,8 @@
 
 import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { homedir, networkInterfaces } from 'node:os'
+import { homedir } from 'node:os'
+import { lanState } from './lan.mjs'
 import { join } from 'node:path'
 
 export const PANEL_DIR = join(homedir(), '.dsh/pet-voice')
@@ -288,22 +289,13 @@ export function setPanelConfig(patch) {
 /* 配对面板                                                            */
 /* ------------------------------------------------------------------ */
 
-/** 本机非回环 IPv4 + 宿主端口；手机只有同一个 WiFi 才打得开。 */
-function lanBase(origin) {
-  let port = ''
-  try {
-    port = new URL(String(origin ?? '')).port
-  } catch {
-    port = ''
-  }
-  for (const list of Object.values(networkInterfaces())) {
-    for (const item of list ?? []) {
-      if ((item.family === 'IPv4' || item.family === 4) && !item.internal) {
-        return `http://${item.address}${port ? `:${port}` : ''}/pet-voice/`
-      }
-    }
-  }
-  return ''
+/**
+ * 纯局域网地址：宿主只听 127.0.0.1，手机得走 lan.mjs 起的那层明文监听。
+ * 监听没起来（端口全被占）就给空串，面板显示「现在用不了」而不是给个打不开的地址。
+ */
+function lanBase() {
+  const info = lanState()
+  return info.running && info.url ? info.url : ''
 }
 
 /** 不管用户填的是域名根还是已经带路径，最后都要落到插件挂载的 /pet-voice/。 */

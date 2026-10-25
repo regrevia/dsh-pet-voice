@@ -45,6 +45,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { zstdDecompressSync } from 'node:zlib'
 import { getPanelConfig, normalizeTransport, panelState, qrSvg, setPanelConfig, removeDevice, touchDevice } from './panel.mjs'
 import { connectPublic, disconnectPublic, publicState, setPublicConfig, stopPublic } from './public.mjs'
+import { startLan, lanState, stopLan } from './lan.mjs'
 
 /** 插件名，必须等于 bundle patch 里的插入 id。 */
 export const name = 'dsh-pet-voice'
@@ -4075,6 +4076,16 @@ export function apply(ctx, config) {
     } catch {
       /* 没配过 */
     }
+    // 纯局域网连法：宿主只听回环，本机再起一层 0.0.0.0 明文监听给同一 WiFi 的手机用。
+    // 起不来不影响别的连法，面板里「局域网」那行会显示「现在用不了」。
+    try {
+      const originUrl = new URL(ctx.webServer.getOrigin?.() ?? '')
+      startLan({ hostPort: originUrl.port || '80' }).catch((e) => {
+        LOG(`局域网监听没起来：${e?.message ?? e}`)
+      })
+    } catch {
+      /* 拿不到宿主端口 */
+    }
 
     LOG(`路由已挂载：${BASE}/（token 文件 ${TOKEN_PATH}）`)
     return () => {
@@ -4082,6 +4093,11 @@ export function apply(ctx, config) {
         stopPublic()
       } catch {
         /* 没起过隧道 */
+      }
+      try {
+        stopLan()
+      } catch {
+        /* 没起过监听 */
       }
       for (const dispose of disposers) {
         try {

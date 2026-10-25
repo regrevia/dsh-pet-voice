@@ -12,7 +12,7 @@
 
 | 项 | 状态 |
 | --- | --- |
-| APK | `0.9.23`（versionCode 93），Android 8.0+（API 26），targetSdk 35 |
+| APK | `0.9.24`（versionCode 94），Android 8.0+（API 26），targetSdk 35 |
 | 验证环境 | Android 11 模拟器（1080×2340）跑通全链路：配对、语音、回复、动作、历史、检查更新 |
 | 真机 | 厂商权限跳转与硬件麦克风只在 AOSP 页面验证过，各家 ROM 仍可能不同，欢迎回报 |
 | iOS | 不支持（悬浮窗与常听麦克风是 Android 特性） |
@@ -23,6 +23,8 @@
 > 内置信任锚：APK 里带了一张**示例自签 CA 的公钥证书**（`res/raw/pet_ca.pem`，无私钥），
 > 让「不买域名、机器上跑自签 https」的人开箱能连。换成自己的 CA 请跑 `scripts/tls-ca.sh` 再重新出包；
 > 只用系统 CA 的部署不受影响。别人的 CA 不要信，也不要装来路不明的 APK。
+
+**第一次用、什么都没有？** 照 [docs/quickstart.md](docs/quickstart.md) 走一遍：装 APK、选连法、扫码或粘链接、说话。
 
 ## 三步用起来
 
