@@ -190,6 +190,13 @@ window.__ModuleLoader__.load({
       bubble: s.bubble !== false,
     })
 
+    /** 服务器转发的三个字段：账号、公网地址、私钥。 */
+    const pubDraftOf = (p) => ({
+      account: p?.user && p?.host ? `${p.user}@${p.host}${p.sshPort && Number(p.sshPort) !== 22 ? `:${p.sshPort}` : ''}` : '',
+      addr: p?.url ?? '',
+      keyPath: p?.keyPath ?? '',
+    })
+
     /** 选中的连法还没有地址时，二维码位置说什么。 */
     const MODE_HINT = {
       server: '内网穿透还没连上，开了再回来。',
@@ -246,6 +253,10 @@ window.__ModuleLoader__.load({
       const [error, setError] = React.useState('')
       const [copied, setCopied] = React.useState(false)
       const [confirmRotate, setConfirmRotate] = React.useState(false)
+      const [pub, setPub] = React.useState(null)
+      const [pubDraft, setPubDraft] = React.useState(null)
+      const [pubBusy, setPubBusy] = React.useState(false)
+      const [pubError, setPubError] = React.useState('')
 
       const load = React.useCallback(async () => {
         try {
@@ -267,6 +278,20 @@ window.__ModuleLoader__.load({
           alive = false
         }
       }, [load])
+
+      const loadPub = React.useCallback(async () => {
+        try {
+          const data = await request('/public')
+          setPub(data)
+          setPubDraft(pubDraftOf(data))
+        } catch {
+          /* 拿不到就把这块留空 */
+        }
+      }, [])
+
+      React.useEffect(() => {
+        loadPub()
+      }, [loadPub])
 
       // 二维码只跟「已经能用的地址」走：面板不给还没填好的连法画码。
       const pairingUrl = state?.pairingUrl ?? ''
@@ -548,11 +573,148 @@ window.__ModuleLoader__.load({
         ),
       )
 
+      /* ---------------- 经自己的服务器转发 ---------------- */
+
+      const pubField = (key) => (value) => setPubDraft((d) => ({ ...(d ?? {}), [key]: value }))
+
+      const postPub = async (patch) => {
+        try {
+          const data = await request('/public', patch)
+          setPub(data)
+          setPubDraft(pubDraftOf(data))
+          setPubError('')
+        } catch (e) {
+          setPubError(String(e?.message || '存不进去'))
+        }
+      }
+
+      const commitAccount = async () => {
+        const raw = String(pubDraft?.account ?? '').trim()
+        const m = /^([^@\s]+)@([A-Za-z0-9._:\-[\]]+?)(?::(\d{1,5}))?$/.exec(raw)
+        if (!m) return setPubError('写成 账号@服务器')
+        await postPub({ user: m[1], host: m[2], sshPort: m[3] ?? 22 })
+      }
+
+      const commitAddr = async () => {
+        const raw = String(pubDraft?.addr ?? '').trim()
+        if (!raw) return
+        let parsed
+        try {
+          parsed = new URL(raw)
+        } catch {
+          return setPubError('写成 https://服务器:8443')
+        }
+        if (parsed.protocol !== 'https:') return setPubError('要以 https:// 开头')
+        await postPub({ host: parsed.hostname, remotePort: parsed.port || 443 })
+      }
+
+      const connectPub = async () => {
+        setPubBusy(true)
+        setPubError('')
+        try {
+          const data = await request('/public/connect', {})
+          setPub(data)
+          setPubDraft(pubDraftOf(data))
+          await load()
+        } catch (e) {
+          setPubError(String(e?.message || '连不上服务器'))
+          await loadPub()
+        } finally {
+          setPubBusy(false)
+        }
+      }
+
+      const disconnectPub = async () => {
+        setPubBusy(true)
+        try {
+          setPub(await request('/public/disconnect', {}))
+          setPubError('')
+        } catch {
+          setPubError('断开失败，再点一次')
+        } finally {
+          setPubBusy(false)
+        }
+      }
+
+      const pubFixHint = pub?.running || pubBusy ? '' : pubError || pub?.lastError ? '服务器要允许端口转发，并放行这个公网地址。' : ''
+
+      const pubStatus = !pub
+        ? ''
+        : pub.running
+          ? `在用 ${pub.url}`
+          : pub.lastError
+            ? `${pub.lastError}，改好再连`
+            : pub.configured
+              ? '没在跑'
+              : '填好再连'
+
+      const pubRow = (label, control) =>
+        h(
+          'div',
+          { style: { ...S.row, ...S.rowBorder } },
+          h('span', { style: S.label }, label),
+          h('div', { style: { flex: 1, minWidth: 0, display: 'flex' } }, control),
+        )
+
+      const pubSection = h(
+        Section,
+        { title: '经自己的服务器转发' },
+        h(
+          'div',
+          { style: S.card },
+          pubRow(
+            '账号',
+            h(Input, {
+              value: pubDraft?.account ?? '',
+              onChange: pubField('account'),
+              onCommit: commitAccount,
+              placeholder: 'ubuntu@服务器',
+              width: '100%',
+            }),
+          ),
+          pubRow(
+            '公网地址',
+            h(Input, {
+              value: pubDraft?.addr ?? '',
+              onChange: pubField('addr'),
+              onCommit: commitAddr,
+              placeholder: 'https://服务器:8443',
+              width: '100%',
+            }),
+          ),
+          pubRow(
+            '私钥',
+            h(Input, {
+              value: pubDraft?.keyPath ?? '',
+              onChange: pubField('keyPath'),
+              onCommit: () => postPub({ keyPath: String(pubDraft?.keyPath ?? '') }),
+              placeholder: '~/.ssh/id_ed25519',
+              width: '100%',
+            }),
+          ),
+          h(
+            'div',
+            { style: { ...S.row, ...S.rowBorder, justifyContent: 'space-between', gap: 8 } },
+            h('span', { style: { ...S.hint, flex: 1, minWidth: 0 } }, pubStatus),
+            pub?.running
+              ? h('button', { style: S.button, disabled: pubBusy, onClick: disconnectPub }, '断开')
+              : h('button', { style: S.button, disabled: pubBusy, onClick: connectPub }, pubBusy ? '正在连…' : '连接'),
+          ),
+          pubError ? h('div', { style: S.hint }, pubError) : null,
+          pub && !pub.cert?.ok
+            ? h('div', { style: S.hint }, '还没有证书，先跑 scripts/tls-ca.sh')
+            : null,
+          pubFixHint ? h('div', { style: S.hint }, pubFixHint) : null,
+        ),
+        h('div', { style: S.hint }, '只存在这台电脑，别人装的时候填自己的。'),
+      )
+
       return h(
         'div',
         { style: S.view, 'data-dsh-panel': PANEL_ID },
         error ? h('div', { style: S.error }, error) : null,
         pairSection,
+        pubSection,
         deviceSection,
         paramsSection,
       )

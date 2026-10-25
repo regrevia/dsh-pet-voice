@@ -44,6 +44,7 @@ import { dirname, extname, join, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { zstdDecompressSync } from 'node:zlib'
 import { getPanelConfig, normalizeTransport, panelState, qrSvg, setPanelConfig, removeDevice, touchDevice } from './panel.mjs'
+import { connectPublic, disconnectPublic, publicState, setPublicConfig, stopPublic } from './public.mjs'
 
 /** 插件名，必须等于 bundle patch 里的插入 id。 */
 export const name = 'dsh-pet-voice'
@@ -3289,6 +3290,37 @@ export function apply(ctx, config) {
     // 面板：DSH 网页里那一页（配对码 / 设备 / 参数）。网页既没有也不该有手机令牌,
     // 门禁换成回环地址——只有本机打得开，公网侧永远 403。
         try {
+        // 「经自己的服务器转发」：配置只存这台电脑，仓库里没有任何默认服务器。
+        if (route === 'public' && method === 'GET') return sendJson(res, 200, publicState())
+
+        if (route === 'public' && method === 'POST') {
+          const raw = String((await readBody(req, 16 * 1024)) ?? '')
+          let patch = {}
+          try {
+            patch = JSON.parse(raw || '{}')
+          } catch {
+            return sendJson(res, 400, { ok: false, error: 'bad json' })
+          }
+          setPublicConfig(patch)
+          return sendJson(res, 200, publicState())
+        }
+
+        if (route === 'public/connect' && method === 'POST') {
+          const originUrl = new URL(origin || 'http://127.0.0.1:1')
+          const upstream = { host: originUrl.hostname, port: originUrl.port || (originUrl.protocol === 'https:' ? 443 : 80) }
+          const got = await connectPublic({ upstream })
+          try {
+            setPanelConfig({ mode: 'domain', customUrl: got.url })
+          } catch {
+            /* 地址写不进去也让隧道保持连着，面板会显示状态 */
+          }
+          return sendJson(res, 200, { ...publicState(), url: got.url })
+        }
+
+        if (route === 'public/disconnect' && method === 'POST') {
+          return sendJson(res, 200, await disconnectPublic())
+        }
+
         if (route === 'state' && method === 'GET') return sendJson(res, 200, await snapshot())
 
         if (route === 'state' && method === 'POST') {
@@ -4019,7 +4051,7 @@ export function apply(ctx, config) {
       ...API_ROUTES.map((route) =>
         ctx.webServer.register({ kind: 'exact', path: `${API}/${route}`, handler: safeHandler(apiHandler) }),
       ),
-      ...['state', 'unbind', 'qr.svg'].map((route2) =>
+      ...['state', 'unbind', 'qr.svg', 'public', 'public/connect', 'public/disconnect'].map((route2) =>
         ctx.webServer.register({ kind: 'exact', path: `${PANEL}/${route2}`, handler: safeHandler(panelHandler) }),
       ),
       // 下载路由：裸路径明确 404；文件名的 exact 由 ensureDownloadRoute 慢慢补。
@@ -4031,8 +4063,26 @@ export function apply(ctx, config) {
       ctx.webServer.register({ kind: 'prefix', path: API, handler: safeHandler(apiHandler) }),
       ctx.webServer.register({ kind: 'prefix', path: `${API}/`, handler: safeHandler(apiHandler) }),
     ]
+    // 配过就自己接上，省得每次重开都要点一次。
+    try {
+      const cfg = publicState()
+      if (cfg.configured) {
+        const originUrl = new URL(ctx.webServer.getOrigin?.() ?? '')
+        connectPublic({ upstream: { host: originUrl.hostname, port: originUrl.port || '80' } }).catch((e) => {
+          LOG(`服务器转发没连上：${e?.message ?? e}`)
+        })
+      }
+    } catch {
+      /* 没配过 */
+    }
+
     LOG(`路由已挂载：${BASE}/（token 文件 ${TOKEN_PATH}）`)
     return () => {
+      try {
+        stopPublic()
+      } catch {
+        /* 没起过隧道 */
+      }
       for (const dispose of disposers) {
         try {
           dispose()

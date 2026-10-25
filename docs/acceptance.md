@@ -9,6 +9,7 @@
 | --- | --- | --- | --- |
 | 手机打开 DSH Web GUI | 0.2.1 首页「打开 DSH Web GUI」把 `…/pet-voice/` 退回站点根交给系统浏览器；模拟器无浏览器时降级复制地址（截图 + toast） | `adb install -r dist/jingling-0.2.1.apk`，点该行；细节 [android-app.md](android-app.md) §18 | 【实测】模拟器；真机跳转【未核实】 |
 | 经 Cloudflare 隧道连回本机 | 命名隧道脚本读 `cloudflared.token/.host`（0600），token 只进子进程环境变量；`--check` 深校验三组（好 token→0、trycloudflare 主机→1、截断→1） | `bash scripts/tunnel.sh --check --named` | 【实测】脚本层；**线上隧道【未核实】**（缺域名/token，cloudflared 未安装） |
+| 经自己的服务器转发（面板配置） | 面板「经自己的服务器转发」填账号、公网地址、私钥，点「连接」→ 插件进程内起本机 HTTPS 反代 + `ssh -R 0.0.0.0:公网端口:127.0.0.1:本机端口`；插件重载后自动重连；配置只写本机 `~/.dsh/pet-voice/public.json`（0600） | 公网访问 `https://<你的服务器>:8443/pet-voice/` 应 401，带 `?k=` 应 303 + `Set-Cookie`；面板状态见 `GET /pet-voice/panel/public` | 【实测】2026-10-25 模拟器经公网隧道发出并收到回复；断网/重载自愈【未核实】 |
 | 语音唤醒「鲸灵」 | 常驻 `SpeechRecognizer`，`ERROR_NO_MATCH`/`SPEECH_TIMEOUT` 自动重启；唤醒词可改 | 真机说「鲸灵」 | 【未核实】模拟器 ASR 恒 no-match，无法测 |
 | 按住说话 / 语音对话（复用会话人设与工具） | `beginTurn` → `/api/command` 分流 → `/api/dispatch` 落专属会话；失败静默回退，不重复派发 | `bash scripts/verify-commands.sh` | 【实测】13/13 |
 | 语音播报（TTS） | `/api/tts` + 客户端磁盘缓存 60 条 + 宿主 LRU 48 条 | 见 [android-app.md](android-app.md) 延迟表 | 【实测】缓存命中 0.6 ms / 磁盘 0 ms / 新句 1.9–2.0 s |
