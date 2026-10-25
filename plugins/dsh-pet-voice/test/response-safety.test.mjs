@@ -65,6 +65,64 @@ test('① 已结束/已销毁/写到一半抛错的 res：sendJson 不抛，返�
   assert.equal(N.sendJson(headersOnly.res, 200, { ok: true }), true)
 })
 
+test('② SSE 心跳：响应 end 之后不再写，也不把 write-after-end 升级成 uncaught', async () => {
+  const uncaught = []
+  const onUncaught = (error) => uncaught.push(error)
+  process.on('uncaughtException', onUncaught)
+  try {
+    // 复刻 Node 的真实语义：write 打到已结束的响应上，不是同步抛，而是下个 tick
+    // 在 res 上 emit('error')。没人监听就是 uncaughtException → 宿主 exit(1)。
+    const res = Object.assign(new EventEmitter(), {
+      writableEnded: false,
+      destroyed: false,
+      closed: false,
+      writes: 0,
+      write(chunk) {
+        if (this.writableEnded || this.destroyed) {
+          const error = Object.assign(new Error('write after end'), { code: 'ERR_STREAM_WRITE_AFTER_END' })
+          process.nextTick(() => this.emit('error', error))
+          return false
+        }
+        this.writes += 1
+        this.last = chunk
+        return true
+      },
+    })
+
+    let cleaned = 0
+    const cleanup = () => { cleaned += 1 }
+    res.on('error', cleanup)
+    // 插件里那套心跳：写不出去就当场收摊
+    const timer = setInterval(() => {
+      if (!N.safeWrite(res, ': hb\n\n')) {
+        clearInterval(timer)
+        cleanup()
+      }
+    }, 5)
+    await new Promise((r) => setTimeout(r, 30))
+    const before = res.writes
+    assert.ok(before >= 1, '活着的时候要正常写心跳')
+
+    // 别处把响应 end 掉（热重载时卸载逻辑会做这件事）
+    res.writableEnded = true
+    await new Promise((r) => setTimeout(r, 40))
+
+    assert.equal(res.writes, before, 'end 之后一次都不许再写')
+    assert.equal(cleaned, 1, '写失败时只清理一次')
+    assert.deepEqual(uncaught.map((e) => e.code), [], '不许有 uncaughtException')
+  } finally {
+    process.removeListener('uncaughtException', onUncaught)
+  }
+})
+
+test('② safeWrite 直接验：状态判定先于写，假 res 不抛', () => {
+  const { res } = fakeRes({ writableEnded: true })
+  assert.equal(N.safeWrite(res, 'x'), false)
+  const live = fakeRes({ write() { this.wrote = true; return true } })
+  assert.equal(N.safeWrite(live.res, 'x'), true)
+  assert.equal(live.res.wrote, true)
+})
+
 test('② safeHandler：async await 抛错不产生 unhandledRejection，只回一次 500', async () => {
   let unhandled = 0
   const onUnhandled = () => { unhandled += 1 }

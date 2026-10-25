@@ -441,6 +441,34 @@ function writeHead(res, status, headers) {
   }
 }
 
+/**
+ * 写一段流数据，但绝不把「对端已经走了」变成 uncaughtException。
+ *
+ * `res.write()` 发现响应已 end/destroy 时**不是同步抛**：Node 走
+ * `onError()` → `process.nextTick(emitErrorNt)` → `res.emit('error', err)`，
+ * 没人监听就在下个 tick 升级成 uncaughtException；宿主对 uncaughtException
+ * 是 fail-loud（直接 exit(1)），外壳报 host exited with 1。所以外面的
+ * try/catch 挡不住这类错——必须先看状态，再挂 error 监听兜底。
+ *
+ * @returns {boolean} false 表示这条响应已经死了，调用方该把自己的定时器清掉
+ */
+function safeWrite(res, chunk) {
+  if (resGone(res)) return false
+  try {
+    if (typeof res.once === 'function' && !res[WROTE_GUARD]) {
+      // 只挂一次：多挂会热重载时堆积监听器。
+      res[WROTE_GUARD] = true
+      res.once('error', () => {})
+    }
+    res.write(chunk)
+    return true
+  } catch {
+    return false
+  }
+}
+
+const WROTE_GUARD = Symbol.for('dsh.pet-voice.res-guard')
+
 /** 路由里 await 抛错不许变成 unhandledRejection：兜住、记一行、能回就回 500。 */
 function onHandlerError(error, res) {
   const code = String(error?.code ?? '')
@@ -1422,6 +1450,7 @@ export const __netInternals = {
   resGone,
   writeHead,
   sendJson,
+  safeWrite,
   sendHtml,
   sendFile,
   safeHandler,
@@ -2379,6 +2408,10 @@ export function apply(ctx, config) {
   const END_GRACE_MS = 2500
   /** sessionId -> Set<ServerResponse>：SSE 订阅者。 */
   const streams = SHARED.streams
+  /** 本实例开的 SSE 响应：卸载时只收自己的，别把新实例的也 end 了。 */
+  const myStreams = new Set()
+  /** res -> cleanup：拿到响应就能把它的心跳定时器一起清掉。 */
+  const streamGuards = new Map()
   /**
    * sessionId -> { frames: [{seq,event,data}], seq, waiters: Set<fn> }
    *
@@ -2438,11 +2471,11 @@ export function apply(ctx, config) {
       for (const res of set) targets.add(res)
     }
     for (const res of targets) {
-      try {
-        res.write(frame)
-      } catch {
-        for (const key of new Set([sessionId, '', '*'])) streams.get(key)?.delete(res)
-      }
+      if (safeWrite(res, frame)) continue
+      for (const key of new Set([sessionId, '', '*'])) streams.get(key)?.delete(res)
+      // 这条连接已经死了：连带把它的心跳定时器收掉，别再对着尸体写
+      streamGuards.get(res)?.()
+      streamGuards.delete(res)
     }
   }
 
@@ -2466,11 +2499,10 @@ export function apply(ctx, config) {
     const frame = `event: say\ndata: ${JSON.stringify(sayItem(item))}\n\n`
     for (const set of streams.values()) {
       for (const res of set) {
-        try {
-          res.write(frame)
-        } catch {
-          set.delete(res)
-        }
+        if (safeWrite(res, frame)) continue
+        set.delete(res)
+        streamGuards.get(res)?.()
+        streamGuards.delete(res)
       }
     }
   }
@@ -3036,11 +3068,7 @@ export function apply(ctx, config) {
         }
         try { res.flushHeaders?.() } catch { /* 已断开 */ }
       }
-      try {
-        res.write(chunk)
-      } catch {
-        kill()
-      }
+      if (!safeWrite(res, chunk)) kill()
     })
     child.on('close', (code) => {
       if (!started) {
@@ -3568,10 +3596,8 @@ export function apply(ctx, config) {
         // cloudflared 之类的前置代理会先攒够一小段字节才往下游吐（实测公网隧道里
         // 连 hello 都收不到），先塞一条 2 KiB 的 SSE 注释把缓冲打穿；注释行按协议
         // 必须被客户端忽略，不影响解析。
-        try {
-          res.write(`: ${' '.repeat(2048)}\n\nretry: 1500\n\n`)
-          res.write(`event: hello\ndata: ${JSON.stringify({ sessionId })}\n\n`)
-        } catch { /* 客户端在写头之后立刻断开 */ return }
+        if (!safeWrite(res, `: ${' '.repeat(2048)}\n\nretry: 1500\n\n`)) return
+        if (!safeWrite(res, `event: hello\ndata: ${JSON.stringify({ sessionId })}\n\n`)) return
         const set = streams.get(sessionId) ?? new Set()
         streams.set(sessionId, set)
         set.add(res)
@@ -3584,17 +3610,12 @@ export function apply(ctx, config) {
           streams.set('*', all)
           all.add(res)
         }
-        const heartbeat = setInterval(() => {
-          try {
-            res.write(': hb\n\n')
-          } catch {
-            /* 客户端已断 */
-          }
-        }, 15_000)
         const cleanup = () => {
           if (!cleanup.done) netLog('stream-close', { sessionId, ms: Date.now() - openedAt })
           cleanup.done = true
           clearInterval(heartbeat)
+          streamGuards.delete(res)
+          myStreams.delete(res)
           set.delete(res)
           if (!set.size) streams.delete(sessionId)
           const all = streams.get('*')
@@ -3603,8 +3624,18 @@ export function apply(ctx, config) {
             if (!all.size) streams.delete('*')
           }
         }
+        // 心跳和写入都必须过 safeWrite：响应被别处 end 掉之后再写，会在下个 tick
+        // 变成 uncaughtException，把整个宿主带走。写不出去就当场收摊。
+        const heartbeat = setInterval(() => {
+          if (!safeWrite(res, ': hb\n\n')) cleanup()
+        }, 15_000)
+        heartbeat.unref?.()
+        streamGuards.set(res, cleanup)
+        myStreams.add(res)
         req.on('close', cleanup)
         req.on('error', cleanup)
+        res.on('close', cleanup)
+        res.on('error', cleanup)
         return undefined
       }
 
@@ -4119,16 +4150,24 @@ export function apply(ctx, config) {
       } catch {
         /* 已经卸载 */
       }
-      for (const set of streams.values()) {
-        for (const res of set) {
-          try {
-            res.end()
-          } catch {
-            /* 忽略 */
-          }
+      // 先收定时器：插件被热重载时这些 interval 还活着，对着已经 end 的响应写
+      // 就会在下一个 tick 抛 uncaughtException，把宿主整个带走（0.9.24 前的事故）。
+      for (const cleanup of [...streamGuards.values()]) {
+        try {
+          cleanup()
+        } catch {
+          /* 已经收过 */
         }
       }
-      streams.clear()
+      streamGuards.clear()
+      for (const res of [...myStreams]) {
+        try {
+          if (!resGone(res)) res.end()
+        } catch {
+          /* 忽略 */
+        }
+      }
+      myStreams.clear()
       LOG('路由已卸载')
     }
   })
