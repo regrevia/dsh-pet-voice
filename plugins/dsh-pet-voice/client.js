@@ -317,7 +317,7 @@ window.__ModuleLoader__.load({
                         }
                       },
                     },
-                    '解绑',
+                    '移出列表',
                   ),
                 ),
               ),
