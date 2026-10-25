@@ -62,6 +62,8 @@ class MainActivity : Activity() {
     private lateinit var updateState: TextView
     private var updater: UpdateManager? = null
     private var installReceiver: BroadcastReceiver? = null
+    /** 选了「只在桌面显示」但还没授权时先记下，回到界面再落 */
+    private var pendingDisplayMode: String? = null
 
     private lateinit var statusDot: View
     private lateinit var statusTitle: TextView
@@ -284,6 +286,14 @@ class MainActivity : Activity() {
         super.onResume()
         petWindow(show = false)
         refreshStatus()
+        pendingDisplayMode?.let { pending ->
+            pendingDisplayMode = null
+            if (UsageAccess.granted(this)) {
+                applyDisplayMode(pending)
+            } else {
+                toast("没允许查看使用情况，先保持一直显示")
+            }
+        }
         if (awaitingOverlay && Settings.canDrawOverlays(this)) {
             awaitingOverlay = false
             launchPet(askPermissions = true)
@@ -405,7 +415,7 @@ class MainActivity : Activity() {
         )
         val homeMode = cfg.displayMode == "home"
         displayModeValue.text = when {
-            homeMode && !UsageAccess.granted(this) -> "先在系统里允许查看使用情况"
+            homeMode && !UsageAccess.granted(this) -> "一直显示（授权后生效）"
             homeMode -> "在桌面时出现"
             else -> "一直显示"
         }
@@ -577,15 +587,11 @@ class MainActivity : Activity() {
     }
 
     /**
-     * 显示方式二选一。选「只在桌面显示」要先有「查看使用情况」权限，
-     * 没授权就直接把系统开关打开，授权回来再选。
+     * 显示方式二选一。先给选项；只有选「只在桌面显示」才需要「查看使用情况」权限，
+     * 缺权限就跳系统开关并记住这次选择，授权回来自动生效。
      */
     private fun pickDisplayMode() {
         val cfg = PetSettings.load(this)
-        if (!UsageAccess.granted(this)) {
-            UsageAccess.open(this)
-            return
-        }
         val labels = PetConfig.DISPLAY_MODES.map { it.second }
         val checked = PetConfig.DISPLAY_MODES.indexOfFirst { it.first == cfg.displayMode }.coerceAtLeast(0)
         AlertDialog.Builder(this)
@@ -593,13 +599,23 @@ class MainActivity : Activity() {
             .setSingleChoiceItems(labels.toTypedArray(), checked) { dialog, which ->
                 dialog.dismiss()
                 val key = PetConfig.DISPLAY_MODES[which].first
+                // 缺权限时先要权限（哪怕设置里已经是 home，也可能被用户撤回了）
+                if (key == "home" && !UsageAccess.granted(this)) {
+                    pendingDisplayMode = key
+                    UsageAccess.open(this)
+                    return@setSingleChoiceItems
+                }
                 if (key == cfg.displayMode) return@setSingleChoiceItems
-                PetSettings.save(this, cfg.copy(displayMode = key))
-                refreshStatus()
-                notifyPetService()
+                applyDisplayMode(key)
             }
             .setNegativeButton("取消", null)
             .show()
+    }
+
+    private fun applyDisplayMode(key: String) {
+        PetSettings.save(this, PetSettings.load(this).copy(displayMode = key))
+        refreshStatus()
+        notifyPetService()
     }
 
     private fun openHistory() {
