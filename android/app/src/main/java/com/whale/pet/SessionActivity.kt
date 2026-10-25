@@ -191,7 +191,7 @@ class SessionActivity : Activity() {
         hideKeyboard()
         errorLine = ""
         sending = true
-        findViewById<TextView>(R.id.chatSend).isEnabled = false
+        findViewById<android.widget.ImageView>(R.id.chatSend).isEnabled = false
         appendEcho(raw)
         val sid = sessionId
         io.execute {
@@ -257,7 +257,7 @@ class SessionActivity : Activity() {
     private fun finishSending(error: String) {
         sending = false
         errorLine = error
-        findViewById<TextView>(R.id.chatSend).isEnabled = true
+        findViewById<android.widget.ImageView>(R.id.chatSend).isEnabled = true
         adapter.notifyDataSetChanged()
     }
 
@@ -349,7 +349,7 @@ class SessionActivity : Activity() {
         if (sending) return
         errorLine = ""
         sending = true
-        findViewById<TextView>(R.id.chatSend).isEnabled = false
+        findViewById<android.widget.ImageView>(R.id.chatSend).isEnabled = false
         adapter.notifyDataSetChanged()
         val sid = sessionId
         io.execute {

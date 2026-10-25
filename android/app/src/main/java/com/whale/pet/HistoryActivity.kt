@@ -46,17 +46,17 @@ class HistoryActivity : Activity() {
     private lateinit var runText: TextView
     private lateinit var runStop: TextView
     private lateinit var input: EditText
-    private lateinit var sendBtn: TextView
-    private lateinit var micBtn: TextView
+    private lateinit var sendBtn: android.widget.ImageView
+    private lateinit var micBtn: android.widget.ImageView
     private lateinit var projectBtn: TextView
-    private lateinit var sessionsBtn: TextView
+    private lateinit var sessionsBtn: android.widget.ImageView
 
     private lateinit var pickerScrim: View
     private lateinit var pickerSheet: View
-    private lateinit var pickerBack: TextView
+    private lateinit var pickerBack: android.widget.ImageView
     private lateinit var pickerTitle: TextView
     private lateinit var pickerList: ListView
-    private lateinit var pickerClose: TextView
+    private lateinit var pickerClose: android.widget.ImageView
 
     private val ui = Handler(Looper.getMainLooper())
     private val adapter = ChatAdapter()
@@ -568,7 +568,7 @@ class HistoryActivity : Activity() {
         sendServiceAction(FloatingPetService.ACTION_WAKE_PAUSE)
         micBusy = true
         micBtn.alpha = 0.55f
-        micBtn.text = "松手发送"
+        micBtn.setColorFilter(getColor(R.color.pet_accent))
         runBar.visibility = View.VISIBLE
         runText.text = "听着"
         val r = recorder ?: VoiceRecorder().also { recorder = it }
@@ -577,7 +577,7 @@ class HistoryActivity : Activity() {
         if (!ok) {
             micBusy = false
             micBtn.alpha = 1f
-            micBtn.text = "说话"
+            micBtn.clearColorFilter()
             runBar.visibility = View.GONE
             sendServiceAction(FloatingPetService.ACTION_WAKE_RESUME)
             toast("麦克风不可用")
@@ -588,7 +588,7 @@ class HistoryActivity : Activity() {
         if (!micBusy) return
         micBusy = false
         micBtn.alpha = 1f
-        micBtn.text = "说话"
+        micBtn.clearColorFilter()
         val r = recorder ?: return
         val wav = try { r.stop() } catch (_: Exception) { null }
         sendServiceAction(FloatingPetService.ACTION_WAKE_RESUME)
@@ -673,7 +673,9 @@ class HistoryActivity : Activity() {
                 val text = v.findViewById<TextView>(R.id.itemText)
                 text.text = error
                 text.setTextColor(getColor(R.color.pet_accent))
+                (v as android.widget.LinearLayout).gravity = Gravity.START
                 bubble.background = null
+                bubble.setPadding(0, 0, 0, 0)
                 v.setOnClickListener { onRetry() }
                 return v
             }
@@ -691,12 +693,19 @@ class HistoryActivity : Activity() {
             val text = v.findViewById<TextView>(R.id.itemText)
             text.visibility = View.VISIBLE
             text.text = if (mine) raw else MdPlain.of(raw)
-            text.setTextColor(getColor(if (mine) R.color.pet_bg else R.color.pet_text))
-            bubble.background = bubble(
-                if (mine) getColor(R.color.pet_accent) else getColor(R.color.pet_hint_bg),
-                0,
-            )
-            bubble.setPadding(dp(12), dp(9), dp(12), dp(9))
+            // 复刻桌面端：我说的靠右、短气泡；鱼回的不带气泡、占满整行
+            (v as android.widget.LinearLayout).gravity = if (mine) Gravity.END else Gravity.START
+            val full = resources.displayMetrics.widthPixels - dp(24)
+            text.maxWidth = if (mine) (full * 0.78f).toInt() else full
+            if (mine) {
+                text.setTextColor(getColor(R.color.pet_bg))
+                bubble.background = bubble(getColor(R.color.pet_accent), 0)
+                bubble.setPadding(dp(12), dp(9), dp(12), dp(9))
+            } else {
+                text.setTextColor(getColor(R.color.pet_text))
+                bubble.background = null
+                bubble.setPadding(0, 0, 0, 0)
+            }
             // 列表复用：先把可能挂在上面的渲染器摘掉，别让 WebView 跟着旧行跑
             if (bubble.childCount > 1) bubble.removeViews(1, bubble.childCount - 1)
             text.setOnLongClickListener { copy(raw); true }

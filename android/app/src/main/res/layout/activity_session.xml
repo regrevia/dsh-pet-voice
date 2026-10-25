@@ -18,15 +18,15 @@
             android:paddingStart="12dp"
             android:paddingEnd="8dp">
 
-            <TextView
+            <ImageView
                 android:id="@+id/chatBack"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:background="?android:attr/selectableItemBackground"
-                android:padding="8dp"
-                android:text="‹ 返回"
-                android:textColor="@color/pet_text_dim"
-                android:textSize="15sp" />
+                android:contentDescription="返回"
+                android:padding="9dp"
+                android:src="@drawable/ic_back"
+                android:tint="@color/pet_text_dim" />
 
             <TextView
                 android:id="@+id/chatTitle"
@@ -58,7 +58,8 @@
                 android:listSelector="@android:color/transparent"
                 android:paddingTop="6dp"
                 android:paddingBottom="12dp"
-                android:scrollbars="none" />
+                android:scrollbars="none"
+                android:transcriptMode="alwaysScroll" />
 
             <TextView
                 android:id="@+id/chatEmpty"
@@ -118,21 +119,16 @@
                 android:textColorHint="@color/pet_hint"
                 android:textSize="15sp" />
 
-            <TextView
+            <ImageView
                 android:id="@+id/chatSend"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
+                android:layout_width="46dp"
+                android:layout_height="46dp"
                 android:layout_marginStart="8dp"
                 android:background="@drawable/bg_btn_primary"
-                android:minHeight="44dp"
-                android:gravity="center"
-                android:paddingStart="18dp"
-                android:paddingTop="11dp"
-                android:paddingEnd="18dp"
-                android:paddingBottom="11dp"
-                android:text="发送"
-                android:textColor="@color/pet_bg"
-                android:textSize="15sp" />
+                android:contentDescription="发送"
+                android:padding="12dp"
+                android:src="@drawable/ic_send"
+                android:tint="@color/pet_bg" />
         </LinearLayout>
     </LinearLayout>
 </FrameLayout>
