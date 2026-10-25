@@ -53,6 +53,13 @@ class HistoryActivity : Activity() {
         const val REQ_SCAN = 43
         /** 从相册挑一张图。 */
         const val REQ_PICK_IMAGE = 44
+        /** 说「拍张照」之后开的相机。 */
+        const val REQ_CAMERA = 45
+        /** 说「截个屏」之后系统收的那次授权。 */
+        const val REQ_PROJECTION = 46
+        /** 拍照前要的一次相机权限（清单里声明了相机，没授权系统就不让开相机）。 */
+        const val REQ_SNAP_PERM = 47
+
         /** 发出去之前先把长边缩到这个像素以内，再压成 JPEG。 */
         const val SEND_IMAGE_MAX_PX = 1600
         /** 页面开着时多久问一次「电脑上还是那只对话吗」。 */
@@ -115,6 +122,11 @@ class HistoryActivity : Activity() {
     private var recorder: VoiceRecorder? = null
     private var micBusy = false
     @Volatile private var micDown = false
+
+    /** 正在等相机／截屏结果：空 = 没有动作在等。 */
+    private var snapKind = ""
+    /** 相机写哪（Android 10+ 走系统相册，自己不用存储权限）。 */
+    private var snapUri: Uri? = null
 
     private data class Ws(val id: String, val title: String, val path: String, val pinned: Boolean)
     private data class Sess(val id: String, val title: String, val at: Long)
@@ -230,6 +242,7 @@ class HistoryActivity : Activity() {
         refreshHeader()
         reload()
         takeSharedImage(intent)
+        takeSnapIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -237,6 +250,16 @@ class HistoryActivity : Activity() {
         if (intent == null) return
         setIntent(intent)
         takeSharedImage(intent)
+        takeSnapIntent(intent)
+    }
+
+    /** 在悬浮窗那边说了「拍张照／截个屏」：页面被拉起来后直接办，不用再点一次。 */
+    private fun takeSnapIntent(intent: Intent?) {
+        val safe = intent ?: return
+        val kind = safe.getStringExtra(SnapCommand.EXTRA).orEmpty()
+        if (kind.isBlank()) return
+        safe.removeExtra(SnapCommand.EXTRA)
+        window.decorView.post { runSnap(kind) }
     }
 
     /** 外面「分享 → 小精灵」进来的图：直接走发图，不弹相册。 */
@@ -247,6 +270,13 @@ class HistoryActivity : Activity() {
         // 同一个 Intent 只接一次，转屏/回前台别重发
         intent.removeExtra(Intent.EXTRA_STREAM)
         window.decorView.post { sendImage(uri) }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQ_SNAP_PERM) return
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) runSnap(SnapCommand.CAMERA)
+        else toast("没相机权限，拍不了")
     }
 
     override fun onResume() {
@@ -597,6 +627,13 @@ class HistoryActivity : Activity() {
             toast("上一轮还没结束")
             return
         }
+        // 「拍张照」「截个屏」是手机自己办的事，不进对话
+        val snap = SnapCommand.parse(text)
+        if (snap != null) {
+            input.setText("")
+            runSnap(snap)
+            return
+        }
         input.setText("")
         send(text)
     }
@@ -709,6 +746,38 @@ class HistoryActivity : Activity() {
             if (resultCode == RESULT_OK && uri != null) sendImage(uri)
             return
         }
+        if (requestCode == REQ_CAMERA) {
+            snapKind = ""
+            val uri = snapUri
+            snapUri = null
+            @Suppress("DEPRECATION")
+            val thumb = data?.extras?.get("data") as? Bitmap
+            when {
+                resultCode != RESULT_OK -> toast("没拍")
+                uri != null -> sendImage(uri)
+                thumb != null -> sendShot(ScreenSnap.jpeg(thumb))
+                else -> toast("没拍成")
+            }
+            return
+        }
+        if (requestCode == REQ_PROJECTION) {
+            snapKind = ""
+            if (resultCode == RESULT_OK && data != null) {
+                runBar.visibility = View.VISIBLE
+                runText.text = "截屏"
+                ScreenSnap.capture(this, resultCode, data) { bytes ->
+                    ui.post {
+                        runBar.visibility = View.GONE
+                        if (isFinishing || isDestroyed) Unit
+                        else if (bytes == null) toast("没截到，再试一次")
+                        else sendShot(bytes)
+                    }
+                }
+            } else {
+                toast("没给截屏权限")
+            }
+            return
+        }
         if (requestCode != REQ_SCAN) return
         if (resultCode == RESULT_OK) {
             adapter.error = ""
@@ -759,19 +828,34 @@ class HistoryActivity : Activity() {
      * 输入框里有字就一起发（那句话当正文），没字就只发图。
      */
     private fun sendImage(uri: Uri) {
+        runBar.visibility = View.VISIBLE
+        runText.text = "传图片"
+        Thread({
+            val bytes = try { scaledJpeg(uri) } catch (_: Exception) { null }
+            runOnUiThread {
+                runBar.visibility = View.GONE
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (bytes == null) toast("这张图读不出来") else sendShot(bytes)
+            }
+        }, "pet-decode").apply { isDaemon = true }.start()
+    }
+
+    /**
+     * 图已经在手上（刚拍的、刚截的）：先传到电脑落盘，再把路径当这一问的附件发出去。
+     *
+     * 电脑那边只能读它自己磁盘上的路径，所以必须先 `/api/upload`，不能直接把位图塞给对话。
+     */
+    private fun sendShot(bytes: ByteArray) {
+        if (isFinishing || isDestroyed) return
+        if (bytes.isEmpty()) {
+            toast("这张图是空的")
+            return
+        }
         val caption = input.text?.toString()?.trim().orEmpty()
         val client = PetClient { PetSettings.load(this) }
         runBar.visibility = View.VISIBLE
         runText.text = "传图片"
         Thread({
-            val bytes = try { scaledJpeg(uri) } catch (_: Exception) { null }
-            if (bytes == null) {
-                runOnUiThread {
-                    runBar.visibility = View.GONE
-                    toast("这张图读不出来")
-                }
-                return@Thread
-            }
             val up = try {
                 client.uploadImage(bytes, "chat-${System.currentTimeMillis()}", "image/jpeg")
             } catch (_: Exception) {
@@ -792,6 +876,79 @@ class HistoryActivity : Activity() {
                 }
             }
         }, "pet-upload").apply { isDaemon = true }.start()
+    }
+
+    /* ---------------- 设备指令：拍一张 / 截一张 ---------------- */
+
+    private fun runSnap(kind: String) {
+        if (turn != null) {
+            toast("上一轮还没结束")
+            return
+        }
+        if (snapKind.isNotBlank()) return
+        when (kind) {
+            SnapCommand.CAMERA -> startCamera()
+            SnapCommand.SCREEN -> startScreen()
+        }
+    }
+
+    /** 开系统相机。Android 10+ 写进系统相册，这样不需要存储权限。 */
+    private fun startCamera() {
+        // 清单里声明了相机权限：没授过的话，系统连相机 App 都不让拉起来
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            snapKind = ""
+            requestPermissions(arrayOf(Manifest.permission.CAMERA), REQ_SNAP_PERM)
+            return
+        }
+        snapKind = SnapCommand.CAMERA
+        if (Build.VERSION.SDK_INT >= 29) {
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "pet-${System.currentTimeMillis()}.jpg")
+                put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Pet")
+            }
+            val target = runCatching {
+                contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            }.getOrNull()
+            snapUri = target
+            val intent = Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE)
+            if (target != null) intent.putExtra(android.provider.MediaStore.EXTRA_OUTPUT, target)
+            if (launchCamera(intent)) return
+            target?.let { runCatching { contentResolver.delete(it, null, null) } }
+            snapUri = null
+            snapKind = ""
+            return
+        }
+        // Android 8/9：没有免权限的落盘位置，退回系统给的小图
+        if (!launchCamera(Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE))) snapKind = ""
+    }
+
+    private fun launchCamera(intent: Intent): Boolean {
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        return try {
+            startActivityForResult(intent, REQ_CAMERA)
+            true
+        } catch (_: Exception) {
+            toast("这台手机没有相机")
+            false
+        }
+    }
+
+    /** 截屏：先问系统要一次授权，拿到后再截一帧。 */
+    private fun startScreen() {
+        snapKind = SnapCommand.SCREEN
+        val manager = getSystemService(android.media.projection.MediaProjectionManager::class.java)
+        if (manager == null) {
+            snapKind = ""
+            toast("这台手机不支持截屏")
+            return
+        }
+        try {
+            startActivityForResult(manager.createScreenCaptureIntent(), REQ_PROJECTION)
+        } catch (_: Exception) {
+            snapKind = ""
+            toast("打不开截屏授权")
+        }
     }
 
     /** 读图 → 摆正 → 长边缩到 1600 px 以内 → JPEG q80。 */

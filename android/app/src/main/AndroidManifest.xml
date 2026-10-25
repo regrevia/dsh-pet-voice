@@ -19,6 +19,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <!-- 开机/被系统重启时只恢复悬浮窗与通知，用 specialUse 类型起步；麦克风只在用户主动双击后申请 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- 截屏：Android 14 起拿 MediaProjection 之前必须先有这种前台服务 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -135,6 +137,12 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="floating whale pet overlay and subtitle host restored after boot or process restart; no microphone capture in this mode" />
         </service>
+
+        <!-- 截屏时临时存在的服务：截完一帧立刻停，见 SnapService -->
+        <service
+            android:name=".SnapService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
 
         <!-- 自动更新：PackageInstaller 的结果回执 -->
         <receiver

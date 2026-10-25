@@ -1140,6 +1140,21 @@ class FloatingPetService : Service() {
     }
 
     private fun beginTurn(text: String) {
+        // 「拍张照」「截个屏」是手机自己的事：先收干净，再拉页面去办，这一轮不进对话
+        val snap = SnapCommand.parse(text)
+        if (snap != null) {
+            tts.stopAll()
+            main.removeCallbacks(resumeListen)
+            wake.stop()
+            if (pttActive) {
+                pttActive = false
+                recorder.onAutoStop = null
+                recorder.onLevel = null
+                runCatching { recorder.stop() }
+            }
+            snapTurn(text, snap)
+            return
+        }
         tts.stopAll()
         // 打断旧轮时队列可能刚刚排空并排了一次「重开麦」：这一轮马上要说话，取消它
         main.removeCallbacks(resumeListen)
@@ -1168,6 +1183,36 @@ class FloatingPetService : Service() {
         tts.speakCached(FILLERS.first())
         // 先问一句「这是聊天还是指令」：只有 chat / 失败才落到 /api/dispatch。
         Thread({ resolveCommand(text, gen) }, "pet-command").apply { isDaemon = true; start() }
+    }
+
+    /**
+     * 设备指令（拍照／截屏）：念一句、把对话页拉起来，图和这句话由页面发出去。
+     *
+     * 不 dispatch：宿主在电脑上，照相机和屏幕都在手机上，宿主办不了这件事。
+     */
+    private fun snapTurn(text: String, kind: String) {
+        turnActive = false
+        firstSentenceAt = 0L
+        val line = SnapCommand.hint(kind)
+        PetHistory.append(this, PetHistory.ROLE_ME, text)
+        PetHistory.append(this, PetHistory.ROLE_PET, line)
+        setMode("talking")
+        say(line)
+        updateNotification(line)
+        tts.enqueue(line)
+        val launched = runCatching {
+            startActivity(
+                Intent(this, HistoryActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    .putExtra(SnapCommand.EXTRA, kind),
+            )
+        }.isSuccess
+        if (!launched) Log.w(PetCommand.TAG, "设备指令：页面拉不起来")
+        main.postDelayed({
+            if (!destroyed && !pttActive && !turnActive && !speaking && !tts.busy && currentMode == "talking") {
+                afterReply()
+            }
+        }, 4000)
     }
 
     /**
