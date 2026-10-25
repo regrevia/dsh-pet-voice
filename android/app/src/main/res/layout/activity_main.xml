@@ -1,0 +1,589 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  主界面三层结构：① 状态卡 ② 两个大按钮 ③ 两个折叠区（设置 / 更多）。
+  id 约束：hostInput / saveBtn / launchBtn / textInput / sendTextBtn / replyView / tokenState
+  被 scripts/android-smoke.sh 直接使用，改名要同步改脚本。
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootScroll"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/pet_bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="20dp"
+        android:paddingTop="28dp"
+        android:paddingEnd="20dp"
+        android:paddingBottom="24dp">
+
+        <!-- ① 状态卡 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_card"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="18dp">
+
+            <View
+                android:id="@+id/statusDot"
+                android:layout_width="14dp"
+                android:layout_height="14dp" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/statusTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="大肥鱼 · 未连接"
+                    android:textColor="@color/pet_text"
+                    android:textSize="20sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/statusHost"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="还没绑定 · 扫码开始"
+                    android:textColor="@color/pet_text_dim"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/statusProject"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:textColor="@color/pet_accent"
+                    android:textSize="13sp"
+                    android:visibility="gone" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- 对话记录入口：记录只在 App 里看，桌面上不显示 -->
+        <LinearLayout
+            android:id="@+id/historyRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="18dp"
+            android:paddingTop="14dp"
+            android:paddingEnd="18dp"
+            android:paddingBottom="14dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="对话"
+                android:textColor="@color/pet_text"
+                android:textSize="15sp" />
+
+            <TextView
+                android:id="@+id/historyCount"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="6dp"
+                android:textColor="@color/pet_hint"
+                android:textSize="13sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="\u203a"
+                android:textColor="@color/pet_text_dim"
+                android:textSize="20sp" />
+        </LinearLayout>
+
+        <!-- 项目入口：按项目翻会话，和「对话」页同级 -->
+        <LinearLayout
+            android:id="@+id/projectsRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/bg_card"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="18dp"
+            android:paddingTop="14dp"
+            android:paddingEnd="18dp"
+            android:paddingBottom="14dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="项目"
+                android:textColor="@color/pet_text"
+                android:textSize="15sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="\u203a"
+                android:textColor="@color/pet_text_dim"
+                android:textSize="20sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/permBox"
+            android:visibility="gone"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical">
+
+            <TextView
+            android:id="@+id/permOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:clickable="true"
+            android:focusable="true"
+            android:padding="14dp"
+            android:text="开启悬浮窗权限"
+            android:textColor="@color/pet_text"
+            android:textSize="13sp" />
+
+            <TextView
+            android:id="@+id/permMic"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:clickable="true"
+            android:focusable="true"
+            android:padding="14dp"
+            android:text="开启麦克风权限"
+            android:textColor="@color/pet_text"
+            android:textSize="13sp" />
+        </LinearLayout>
+
+        <!-- ② 两个大按钮 -->
+        <Button
+            android:id="@+id/scanBtn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+                android:minHeight="56dp"
+            android:layout_marginTop="20dp"
+            android:background="@drawable/bg_btn_primary"
+            android:stateListAnimator="@null"
+            android:text="📷  扫码绑定大肥鱼"
+            android:textAllCaps="false"
+            android:textColor="@color/pet_bg"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/launchBtn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+                android:minHeight="56dp"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_btn_outline"
+            android:stateListAnimator="@null"
+            android:text="💬  立即对话"
+            android:textAllCaps="false"
+            android:textColor="@color/pet_accent"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <!-- ③ 设置（默认收起） -->
+        <LinearLayout
+            android:id="@+id/settingsHeader"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="22dp"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingTop="12dp"
+            android:paddingBottom="12dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="设置"
+                android:textColor="@color/pet_text"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/settingsArrow"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="▸"
+                android:textColor="@color/pet_text_dim"
+                android:textSize="15sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/settingsBody"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="音色"
+                android:textColor="@color/pet_text_dim"
+                android:textSize="13sp" />
+
+            <Spinner
+                android:id="@+id/presetSpinner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:layout_marginTop="6dp"
+                android:background="@drawable/bg_input"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:text="称呼"
+                android:textColor="@color/pet_text_dim"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/wakeNameInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:layout_marginTop="6dp"
+                android:background="@drawable/bg_input"
+                android:hint="大肥鱼"
+                android:inputType="textPersonName"
+                android:maxLength="4"
+                android:maxLines="1"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:textColor="@color/pet_text"
+                android:textColorHint="@color/pet_hint"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:text="精灵大小"
+                android:textColor="@color/pet_text_dim"
+                android:textSize="13sp" />
+
+            <Spinner
+                android:id="@+id/spriteSpinner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:layout_marginTop="6dp"
+                android:background="@drawable/bg_input"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:text="形象"
+                android:textColor="@color/pet_text_dim"
+                android:textSize="13sp" />
+
+            <Spinner
+                android:id="@+id/outfitSpinner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:layout_marginTop="6dp"
+                android:background="@drawable/bg_input"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp" />
+
+            <LinearLayout
+                android:id="@+id/displayModeRow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:background="@drawable/bg_input"
+                android:clickable="true"
+                android:focusable="true"
+                android:orientation="vertical"
+                android:paddingStart="12dp"
+                android:paddingTop="10dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="10dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="显示方式"
+                    android:textColor="@color/pet_text"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/displayModeValue"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:textColor="@color/pet_hint"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:text="电脑地址"
+                android:textColor="@color/pet_text_dim"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/hostInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:layout_marginTop="6dp"
+                android:background="@drawable/bg_input"
+                android:hint="https://电脑地址:8443/"
+                android:inputType="textUri"
+                android:maxLines="1"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:textColor="@color/pet_text"
+                android:textColorHint="@color/pet_hint"
+                android:textSize="13sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text=""
+                android:visibility="gone"
+                android:textColor="@color/pet_hint"
+                android:textSize="13sp" />
+
+            <CheckBox
+                android:id="@+id/wakeCheck"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:buttonTint="@color/pet_accent"
+                android:text="常听唤醒（叫名字就应）"
+                android:textColor="@color/pet_text"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/wakeHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:layout_marginStart="12dp"
+                android:text=""
+                android:visibility="gone"
+                android:textColor="@color/pet_hint"
+                android:textSize="12sp" />
+
+
+            <Button
+                android:id="@+id/saveBtn"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_btn_primary"
+                android:stateListAnimator="@null"
+                android:text="保存设置"
+                android:textAllCaps="false"
+                android:textColor="@color/pet_bg"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- ③ 更多（默认收起） -->
+        <LinearLayout
+            android:id="@+id/moreHeader"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingTop="12dp"
+            android:paddingBottom="12dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="更多"
+                android:textColor="@color/pet_text"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/moreArrow"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="▸"
+                android:textColor="@color/pet_text_dim"
+                android:textSize="15sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/moreBody"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+                        <!-- 文字通道已并入「对话」页（历史 + 输入框同一处） -->
+
+            
+
+            <CheckBox
+                android:id="@+id/autoStartCheck"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:buttonTint="@color/pet_accent"
+                android:text="开机自启"
+                android:textColor="@color/pet_text"
+                android:textSize="13sp" />
+
+            <CheckBox
+                android:id="@+id/bubbleCheck"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:buttonTint="@color/pet_accent"
+                android:text="气泡"
+                android:textColor="@color/pet_text"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/permBtn"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:minHeight="44dp"
+                android:background="@drawable/bg_btn_ghost"
+                android:stateListAnimator="@null"
+                android:text="去授权"
+                android:textAllCaps="false"
+                android:textColor="@color/pet_accent"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/stopBtn"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="44dp"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_btn_ghost"
+                android:stateListAnimator="@null"
+                android:text="退出"
+                android:textAllCaps="false"
+                android:textColor="@color/pet_text_dim"
+                android:textSize="13sp" />
+
+            
+
+            <Button
+                android:id="@+id/diagBtn"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="44dp"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_btn_ghost"
+                android:stateListAnimator="@null"
+                android:text="诊断"
+                android:textAllCaps="false"
+                android:textColor="@color/pet_accent"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/checkUpdateBtn"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="44dp"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_btn_ghost"
+                android:stateListAnimator="@null"
+                android:text="检查更新"
+                android:textAllCaps="false"
+                android:textColor="@color/pet_accent"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/updateState"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:textColor="@color/pet_hint"
+                android:textSize="12sp" />
+
+
+            <LinearLayout
+                android:id="@+id/updateRow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_btn_outline"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="12dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/updateRowText"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="有新版本"
+                    android:textColor="@color/pet_accent"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="\u203a"
+                    android:textColor="@color/pet_accent"
+                    android:textSize="16sp" />
+            </LinearLayout>
+
+
+            <TextView
+                android:id="@+id/report"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:background="@drawable/bg_card"
+                android:padding="12dp"
+                android:textColor="@color/pet_text_dim"
+                android:textIsSelectable="true"
+                android:textSize="12sp"
+                android:visibility="gone" />
+        </LinearLayout>
+
+    </LinearLayout>
+</ScrollView>

@@ -1,0 +1,87 @@
+{
+  "env": {
+    "os": "macOS 26.5.2",
+    "machine": "arm64",
+    "python": "3.9.6",
+    "say": 184
+  },
+  "repeat": 5,
+  "rows": [
+    {
+      "case": "short_12",
+      "chars": 11,
+      "voice": "Tingting",
+      "say_ms": {
+        "min": 634.5,
+        "median": 675.2,
+        "max": 719.6,
+        "n": 5
+      },
+      "afconvert_m4a_ms": {
+        "min": 45.0,
+        "median": 46.8,
+        "max": 49.3,
+        "n": 5
+      },
+      "ffmpeg_16k_wav_ms": {
+        "min": 20.4,
+        "median": 21.0,
+        "max": 47.4,
+        "n": 5
+      },
+      "synth_audio_duration_s": 2.421224,
+      "rtf_say": 0.279
+    },
+    {
+      "case": "mid_20",
+      "chars": 17,
+      "voice": "Tingting",
+      "say_ms": {
+        "min": 636.2,
+        "median": 643.5,
+        "max": 654.4,
+        "n": 5
+      },
+      "afconvert_m4a_ms": {
+        "min": 47.6,
+        "median": 49.5,
+        "max": 53.6,
+        "n": 5
+      },
+      "ffmpeg_16k_wav_ms": {
+        "min": 21.3,
+        "median": 22.0,
+        "max": 23.1,
+        "n": 5
+      },
+      "synth_audio_duration_s": 4.232381,
+      "rtf_say": 0.152
+    },
+    {
+      "case": "long_40",
+      "chars": 46,
+      "voice": "Tingting",
+      "say_ms": {
+        "min": 658.9,
+        "median": 670.6,
+        "max": 688.8,
+        "n": 5
+      },
+      "afconvert_m4a_ms": {
+        "min": 54.3,
+        "median": 56.9,
+        "max": 59.6,
+        "n": 5
+      },
+      "ffmpeg_16k_wav_ms": {
+        "min": 22.2,
+        "median": 23.2,
+        "max": 26.5,
+        "n": 5
+      },
+      "synth_audio_duration_s": 10.873288,
+      "rtf_say": 0.062
+    }
+  ],
+  "measured_at": "2026-10-24T13:23:32+0800"
+}

@@ -1,0 +1,655 @@
+# 鲸灵 · Android 端（MVP）
+
+原生 Android 壳：悬浮窗（WebView 形象 + 原生字幕）+ 双击说话 + 语音唤醒 + 一轮对话（服务端 ASR 未上线，走本机系统识别）+ 服务端逐句 TTS。
+
+- 包名：`com.whale.pet`；minSdk 26 / targetSdk 35 / compileSdk 35
+- APK：`android/app/build/outputs/apk/debug/app-debug.apk`（944,073 B，debug 签名）
+- 构建：AGP 8.12.0 + Gradle 8.13 + Kotlin 2.0.21 + JDK 17，**零外部依赖**（只用平台 API + Kotlin stdlib）
+
+---
+
+## 1. 权限清单（AndroidManifest 实际声明）
+
+| 权限 | 用途 | 不授予的后果 |
+| --- | --- | --- |
+| `INTERNET` | 访问宿主 `/pet-voice/api/*` | 完全不可用 |
+| `RECORD_AUDIO` | 系统 `SpeechRecognizer` 采集语音 | 双击说话无输入，只能用文字通道 |
+| `SYSTEM_ALERT_WINDOW` | `TYPE_APPLICATION_OVERLAY` 悬浮窗 | 无悬浮窗（服务只能挂着通知） |
+| `FOREGROUND_SERVICE` | 常驻服务 | 无法常驻，退到后台即被杀 |
+| `FOREGROUND_SERVICE_MICROPHONE` | 用户主动启动时用 microphone 类型 | 启动时被系统拒（`startForeground` 抛异常） |
+| `FOREGROUND_SERVICE_SPECIAL_USE` | 开机/重启恢复时用 specialUse 类型（不碰麦克风） | 开机恢复失败 |
+| `POST_NOTIFICATIONS`（33+） | 「鲸灵在听」常驻通知 | 服务仍跑，但通知不可见、无法从通知停止 |
+| `RECEIVE_BOOT_COMPLETED` | 开机恢复悬浮窗 + 通知 | 重启后需手动打开 App |
+| `WAKE_LOCK` | 说话/播放期间保持唤醒 | 熄屏即断 |
+| `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | 请求「省电策略 → 无限制」 | 系统会在后台清掉服务 |
+
+`<queries>`：`android.speech.RecognitionService`、`android.speech.action.RECOGNIZE_SPEECH`（Android 11+ 包可见性，否则 `isRecognitionAvailable()` 恒为 false）。
+
+实测（`aapt2 dump xmltree`）：
+
+```
+E: service (line=53)
+  A: android:name="com.whale.pet.FloatingPetService"
+  A: android:exported=false
+  A: android:foregroundServiceType=0x40000080     # specialUse(1<<30) | microphone(0x80)
+  E: property  android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE = "floating whale pet overlay ..."
+```
+
+签名实测（`apksigner verify --print-certs`）：`C=US, O=Android, CN=Android Debug`，SHA-256 `714376ad2cccf90af6f2aafcd971201871dc661da40611ff3c4cdb14fd063840`。
+
+---
+
+## 2. 一轮对话时序（语音路径）
+
+```
+双击悬浮窗
+  └─ PetFrame.onDoubleTap（服务里注册，拖动阈值 8px，双击 ≤300ms）
+      └─ NativeAsr：SpeechRecognizer + RecognizerIntent
+            EXTRA_LANGUAGE=zh-CN, EXTRA_PARTIAL_RESULTS=true, 静音 1200ms 收尾
+            onPartial → 悬浮窗字幕实时刷新
+            onFinal   → beginTurn(text)
+                └─ PetTurn.start()（后台线程 pet-turn）
+                     ├─ 先开 SSE：GET /pet-voice/api/stream?sessionId=（≤5s 等 hello）
+                     │     hello 到了才 POST /pet-voice/api/dispatch {"text": ...}   ← 纯原文，不加人设前缀，避免污染会话历史
+                     │     SSE 事件：start / delta / end / final / say / error（`: hb` 15s 心跳，retry:1500）
+                     │     隧道掐掉 SSE → 立刻退回 GET /api/poll?sessionId=&cursor=-1&wait=（先取基线再派发，不丢帧）
+                     ├─ 累积 assistant 文本 → onAssistant → 悬浮窗字幕（150ms 节流；final 强制刷）
+                     ├─ 句子切分：。！？!?；;\n，长句 > 90 字按逗号再切 → onSentence
+                     │     └─ TtsPlayer：每句 POST /pet-voice/api/tts?text=&preset=whale|genki|gentle|cool
+                     │           音频缓存 cacheDir/tts/<ts>_<seq>.mp3（audio/mpeg，24kHz 48kbps）
+                     │           ArrayDeque 排队 → 单线程下载 → 主线程顺序 MediaPlayer（一句播完再下一句，不叠音）
+                     └─ end 后 1.5s 宽限 或 final 立即收尾 → onDone → 回「待机 · 双击说话」
+```
+
+关键约束：
+
+- **Android WebView 没有 `webkitSpeechRecognition`**（宿主页面 `public/app.js` 里那段在 Android WebView 里是 undefined）。所以 WebView 只负责形象与字幕，说话必须是原生 `SpeechRecognizer`；不能用 `evaluateJavascript` 绕过去。
+- 页面文件不改：悬浮窗注入一段 CSS（隐藏面板/聊天/输入框，只留 `#pet`/`#say`），字幕通过 `#say` 的 `textContent` 与 `data-mood` 属性驱动；页面加载失败（注入后检测不到 `#pet`/`#mic`）时退到 `ImageView` 静态形象 + 原生字幕。
+- Cookie 注入：`CookieManager.setCookie(baseUrl, "pkv_<token前8位>=<token>")` + `flush()`，页面刷新不用重新配对。
+- 宿主没有 `/api/asr`，服务端识别未上线；本机识别不可用时走**文字通道**（见 §3）。
+
+---
+
+## 3. 文字通道（识别不可用时的兜底，已实现）
+
+设置页「4. 文字通道」：`EditText` → 「发送文字并朗读回复」→ 与语音**完全同一条链路**（`PetTurn`：dispatch → stream/poll → 逐句 TTS），回复同时显示在 `replyView` 并朗读。模拟器上用真令牌实跑成功，原文见 §7.2。
+
+自检页（「测试连接 / 设备自检」）打印三行真实值：
+
+```
+系统识别 isRecognitionAvailable: false
+createSpeechRecognizer: null
+RECOGNIZE_SPEECH 命中 Activity: 0 个
+→ 这台机器没有可用的系统识别，请改用「服务端识别」（未上线）或安装语音服务；现在可以用下面第 4 节的文字框直接对话。
+```
+
+三项任一不满足都会打出这行提示，不假装能说话。
+
+---
+
+## 4. 唤醒词选型
+
+接口在 `WakeWordEngine.kt`，可替换：
+
+```kotlin
+interface WakeWordEngine {
+    val id: String
+    fun isAvailable(): Boolean
+    fun setListener(l: (WakeHit) -> Unit)
+    fun start(); fun stop()
+}
+data class WakeHit(val word: String, val rest: String)
+```
+
+当前实现 `NativeSpeechWakeWordEngine`（id `native-speech`）：循环起 `SpeechRecognizer`（zh-CN、partial），命中「鲸灵 / 小鲸」触发 `WakeHit`，其余文本当作 `rest` 直接对话。`WakeWordEngines.create()` 是唯一装配点，第二轮换成离线 KWS 时只改这一处。
+
+- **不用 Porcupine**（商业授权 + 需要 AccessKey）。
+- 第二轮候选：**sherpa-onnx** 离线 KWS（`sherpa-onnx-kws-zipformer-*`，中文唤醒词可自定义拼音 token；模型量级约 15–30 MB，需把 onnxruntime AAR 打进 APK，会显著增大包体）与 Vosk 小模型对比。要量的指标：唤醒率 / 误唤醒率（安静房间 vs 电视人声各 1 小时）/ 常驻耗电（mAh/h）/ APK 增量。
+- 这一轮的现实限制：系统识别器在后台被 HyperOS 限流时唤醒会静默失效（见 §5）；`maybeStartWake()` 已做成「非说话/非轮次中才起、权限缺失直接跳过、无识别器时显示『唤醒不可用：无识别器』」。
+
+---
+
+## 5. 各品牌手机装机必做（0.9.4 起统一入口）
+
+首页「更多 → 去授权」弹四项，点哪项就跳到**这台手机自己的系统页**。不再按品牌摆固定按钮，也不写死某家包名。
+
+| 项 | 语义 | 落到哪 | 不给的后果 |
+| --- | --- | --- | --- |
+| 悬浮窗权限 | `SYSTEM_ALERT_WINDOW` | `ACTION_MANAGE_OVERLAY_PERMISSION(package:)` → 裸 action → App 详情 | 没有悬浮窗，只剩通知 |
+| 电池不受限 | 免省电优化 | `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS(package:)` → `ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS` → App 详情 | 息屏几分钟被杀 |
+| 自启动 | 厂商启动管理 | 小米 `OP_AUTO_START` / 华为·荣耀 启动管理 / OPPO `StartupAppListActivity` / vivo `BgStartUpManager` / 三星 `BatteryActivity` / 魅族 `PermMainActivity` / 华硕 `AutoStartActivity` → App 详情 | 重启后悬浮窗不恢复 |
+| 通知 | 通知开关 | `ACTION_APP_NOTIFICATION_SETTINGS(EXTRA_APP_PACKAGE)` → App 详情 | 常驻通知不可见 |
+
+- 首页有跳转前判空（`resolveActivity`），Android 11+ 需要 `AndroidManifest.xml` 里的 `<queries>` 才能探测到厂商包，否则必然判成 null 而落到 App 详情页。
+- 麦克风不在这四项里：首次开悬浮窗说话时弹系统窗，`POST_NOTIFICATIONS` 在 Android 13+ 由 `launchPet()` 自己申请一次，拒绝不阻塞服务。
+- 状态回看：首页「诊断」逐行给出悬浮窗 / 麦克风 / 通知 / 省电策略的当前值。
+
+### HyperOS / MIUI 额外两项（跳转已覆盖，但是系统里的独立开关）
+
+| 开关 | 路径（HyperOS 4，可能微调）【需真机确认】 | 不开的后果 |
+| --- | --- | --- |
+| 后台弹出界面 | 设置 → 应用设置 → 应用管理 → 鲸灵 → 权限管理 → 后台弹出界面 | 从后台/通知拉起悬浮窗被拦，双击无反应 |
+| 省电策略 | 设置 → 应用设置 → 应用管理 → 鲸灵 → 省电策略 → 无限制 | 息屏后服务被清 |
+
+### 开机恢复策略（重要）
+
+`BootReceiver` 只发 `ACTION_RESTORE`：服务以 **specialUse** 类型 `startForeground`，恢复悬浮窗 + 常驻通知，**不申请麦克风、不启动唤醒**。
+
+原因：Android 14+ 禁止从后台（含 `BOOT_COMPLETED`）启动 microphone 类型的前台服务，硬起会 `SecurityException`，服务直接被拒；等用户自己双击悬浮窗后再走识别（`ACTION_START` 才用 microphone 类型，并在失败时降级 specialUse）。系统 `START_STICKY` 把进程拉回时 `intent == null`，同样按恢复模式处理（不碰麦克风）。
+
+---
+
+## 6. 已知限制（写给下一位，不粉饰）
+
+1. **WebView 不能在后台录音**：页面里 `webkitSpeechRecognition` 在 Android WebView 是 undefined；录音只能走原生 `SpeechRecognizer`（系统识别器进程），悬浮窗里的页面拿不到麦克风。
+2. **服务端 ASR 已上线（`/api/asr`）**：宿主侧接口齐了（`/api/dispatch`、`/api/stream`、`/api/poll`、`/api/tts`、`/api/say`、`/api/asr`、`/api/pair`、`/api/cancel`、`/api/command`、`/api/state`、`/api/diag`、`/api/update`、`/api/projects`、`/api/sessions`、`/api/session`、`/api/goals`、`/api/log`、`POST /api/new`）。文字通道是断网兜底，全链路已在模拟器跑通（见 §7.2）。
+3. **各 ROM 悬浮窗差异【未实测】**：`TYPE_APPLICATION_OVERLAY` 在 HyperOS 上可能被「后台弹出界面」二次拦截，也可能限制窗口尺寸/圆角；小米系对 `FLAG_NOT_FOCUSABLE` 的窗口触摸透传行为与 AOSP 有差异。均需真机验证。
+4. **没有用 EncryptedSharedPreferences**：`androidx.security:security-crypto` 不在离线缓存里，无法 `--offline` 构建；当前令牌存 `MODE_PRIVATE` SharedPreferences，界面上只显示掩码（`已保存 · ••••••••（长度 N，不显示明文）`，永不回显明文）。下一步补加密存储（或自行用 Android Keystore + AES-GCM，不引依赖）。
+5. **未在真机验证**：`adb devices` 无设备（只有模拟器 AVD `nr1` = Pixel 5 API 30，非 HyperOS）。HyperOS 4 的路径/开关名、后台限流强度、语音识别器可用性全部【需真机确认】。模拟器实测 `isRecognitionAvailable()=true`、`RECOGNIZE_SPEECH` 命中 1 个 Activity，但无声卡输入，双击后落在「没听清，再双击」的错误分支。
+6. **TTS 依赖宿主 edge-tts venv**：venv 缺失时 `/api/tts` 返回 503，App 只显示字幕、`onTtsError` 提示「语音不可用」。
+7. **唤醒循环耗电/误唤醒未量化**：系统识别器轮询本身有开销，第二轮换 sherpa-onnx 再测。
+
+---
+
+## 7. 构建与安装（离线）
+
+```bash
+JAVA_HOME=~/jdk17/Contents/Home ~/.gradle/wrapper/dists/gradle-8.13-bin/*/gradle-8.13/bin/gradle \
+  -p android :app:assembleDebug --offline \
+  -Pandroid.aapt2FromMavenOverride=/opt/homebrew/share/android-commandlinetools/build-tools/35.0.0/aapt2
+```
+
+- 三部分缺一不可：JDK 17（PATH 里没有 java，必须显式 `JAVA_HOME`）、`--offline` + 本地 Maven 仓库 `/tmp/m2flat`（`settings.gradle.kts` 里第一优先，1196 个标准布局软链）、`aapt2` 覆盖到 build-tools 35.0.0 真实二进制（缓存里的 aapt2 只有 `-linux.jar`）。
+- 产物：`android/app/build/outputs/apk/debug/app-debug.apk`（944,073 B）。
+- 安装（真机）：`adb install -r app-debug.apk`；无设备时仅能 `aapt2 dump badging` + `apksigner verify` 做静态校验。
+
+模拟器冒烟（已在 AVD `nr1` / Pixel 5 API 30 arm64 上实际执行）：
+
+```bash
+emulator -avd nr1 -no-window -no-audio &
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk      # Performing Streamed Install / Success
+adb shell appops set com.whale.pet SYSTEM_ALERT_WINDOW allow
+adb shell pm grant com.whale.pet android.permission.RECORD_AUDIO
+# API 30 没有 POST_NOTIFICATIONS（33+ 才有），这条会报 Unknown permission，属预期
+```
+
+### 7.1 冒烟结果（实测输出）
+
+| 项 | 实测 |
+| --- | --- |
+| 前台服务 | `isForeground=true foregroundId=4101`，`channel=pet_listen` |
+| 常驻通知 | `android.title=鲸灵在听`，`android.text=双击悬浮窗说话 · 点按设置` |
+| 悬浮窗 | `mAttrs={(552,1148)(495x660) … ty=APPLICATION_OVERLAY}`（495×660 px @2.75 = 180×240 dp） |
+| 双击 | 字幕变「再说一次」、状态「没听清，再双击」（进入 ASR 分支，无声卡输入 → 优雅失败） |
+| 自检三值 | `isRecognitionAvailable: true` / `createSpeechRecognizer: 非 null` / `RECOGNIZE_SPEECH 命中 Activity: 1 个` |
+| WebView | `com.google.android.webview` |
+| 省电策略 | `受限（可能被杀）`（模拟器默认，未做白名单） |
+| 文字通道 | 真令牌一轮成功（见下） |
+
+### 7.2 文字通道全链路（真令牌，已跑通）
+
+令牌注入方式（**令牌不进命令行、不打印**）：本地 `umask 077` 生成 `pet_prefs.xml` → `adb push` 到 `/data/local/tmp` → `adb shell run-as com.whale.pet cp` 到 `/data/data/com.whale.pet/shared_prefs/pet_prefs.xml` → 立刻删除两个临时文件 → `am force-stop` + `am start`。App 读到后只显示掩码：`tokenState → 已保存 · ••••••••（长度 48，不显示明文）`。
+
+输入 `hello-from-emulator-please-reply-in-one-short-sentence` 后点「发送文字并朗读回复」，25 秒后 `uiautomator dump` 取到的 `replyView` 原文：
+
+```
+我：hello-from-emulator-please-reply-in-one-short-sentence
+鲸灵：Hello from the emulator — the bridge is connected and working.  🔊
+```
+
+即 **App → `/api/dispatch` → SSE（`/api/stream`）→ 句子切分 → `/api/tts` → 顺序 `MediaPlayer`** 在模拟器上闭环（前提：宿主 `52356` 在跑）。末尾 🔊 是 `TtsPlayer.onSpeaking(true)` 的回调痕迹。
+
+服务端同批复验：`/api/state` → `ok=true`、`presets` 四项齐全、`current` 有值，**响应体不含 token**；`/api/tts?text=你好&preset=whale` → `http=200 bytes=7920`；`/api/pair` → `source:"tunnel"` + trycloudflare 地址。
+
+截图（本次冒烟）：`/tmp/pet-main.png`（设置页）、`/tmp/pet-overlay2.png`（悬浮窗 + 401 兜底静态形象）、`/tmp/pet-dbltap2.png`（双击后「没听清，再双击」）、`/tmp/pet-selfcheck2.png`（自检输出）。
+
+---
+
+## 8. 代码地图
+
+| 文件 | 职责 |
+| --- | --- |
+| `MainActivity.kt` | 设置页：宿主/令牌/音色、配对链接导入、自检（ASR 三值 + 连接测试）、文字通道、HyperOS 4 项跳转、启动/停止服务 |
+| `FloatingPetService.kt` | 前台服务：悬浮窗、WebView 注入与 Cookie、双击/拖动、ASR、唤醒循环、一轮对话、TTS 队列、通知；`ACTION_START/STOP/RESTORE` |
+| `PetFrame.kt` | 自定义 `FrameLayout`：双击/单击/拖动（8px 阈值，按钮区域排除） |
+| `PetTurn.kt` | 一轮对话：SSE 优先 + poll 兜底、句子切分 |
+| `PetClient.kt` | `HttpURLConnection` 客户端：state/dispatch/poll/stream/tts/cancel |
+| `TtsPlayer.kt` | 逐句 TTS：队列 + 单线程下载 + 顺序 `MediaPlayer` |
+| `NativeAsr.kt` | 单次 `SpeechRecognizer`（zh-CN、partial、静音 1200ms） |
+| `WakeWordEngine.kt` | 唤醒词接口 + 系统识别器实现（鲸灵/小鲸） |
+| `Settings.kt` | `PetConfig` / `PetSettings`（SharedPreferences，令牌掩码显示） |
+| `BootReceiver.kt` | 开机/升级 → `ACTION_RESTORE`（只恢复悬浮窗 + 通知，不碰麦克风） |
+
+## 9. 悬浮窗＝只有精灵本体（无卡片 / 无按钮 / 无底栏）
+
+- 窗口里**只有一个全透明 WebView**（`overlay_pet.xml`，`PixelFormat.TRANSLUCENT`），不画卡片、状态、按钮、底板；
+  `grep` 旧字符串（`鲸灵在呢`/`点我说话`/`minimize`）在布局里为 0 命中。
+- WindowManager 参数：`TYPE_APPLICATION_OVERLAY`、`gravity=TOP|START`、
+  `FLAG_NOT_FOCUSABLE | FLAG_NOT_TOUCH_MODAL | FLAG_LAYOUT_NO_LIMITS`、`x/y` 贴右下角（不挡状态栏）。
+- **触摸代理**（不是卡片上的按钮）：根 `FrameLayout` 与 WebView 都挂 `OnTouchListener`
+  （WebView 会自己吃掉 `DOWN`，只挂根布局会全部失效——这是本批实测踩到的坑）。
+  - 位移 ≤ 8dp 且时长 < 500ms → 点一下 = 唤醒说话；
+  - 位移 > 8dp → 拖动（16ms 合并一次 `updateViewLayout`，不重建 WebView）；
+  - 按住 500ms → 打开「对话记录」（`HistoryActivity`）；
+  - 没有双击语义，避免和「点一下唤醒」抢事件。
+- 尺寸三档（`PetConfig.SPRITE_SIZES`）：120 / 168 / 200 dp，窗口高度 = 尺寸 + 48dp 给气泡留位；
+  改尺寸走 `applyWindowSize()` → `updateViewLayout`，**WebView 只创建一次**。
+- 窗口里不出现任何文字状态（「正在听/思考」用形象动作表达，错误只做 `happy` 900ms 再回 idle）。
+
+## 10. 形象与动画（渲染层）
+
+形象**不是代码画的**：`dsh-pet` **0.3.8** 自带 **106 段**角色动画，原片 640×360 / VP9 / `ALPHA_MODE=1` / 24fps / 每段 10.04s。
+本批取 **13 段**转码成 420×465、**10fps**、带 alpha 的 webm，放 `android/app/src/main/assets/anim/`，
+由 overlay 里的两路 `<video>` 交叉淡化播放：`idle` / `thinking` / `talking` / `cheer` / `tap` / `tap_shy` /
+`tap_pout` / `tap_tickle` / `look_around` / `yawn` / `curtsy` / `wake_up` / `drag`。
+
+> 帧率先用的 15fps，模拟器软解下单核 23%；降到 **10fps** 后 15.8%，呼吸动作仍连贯。
+> 后来加了待机小动作（`look_around` / `yawn` / `curtsy`）与一次性动作，复测 **18.2%**（2026-10-24 20:44，含一次切换淡化）。
+
+### 10.1 取帧的坑（踩过，下一位别再踩）
+
+- ffmpeg 默认解码出来的 `pix_fmt` 是 **yuv420p，alpha 直接丢**；必须显式 `-c:v libvpx-vp9` 解码才能拿到 RGBA（alpha 0–255）。
+- `-vf alphaextract` 在这批文件上报 **`Requested planes not available`**（根本没有 alpha 平面可抽），不能用来查蒙版。
+- 640×360 帧里真正的角色内容只有 **(213,62)-(426,330)**，四周都是 alpha≈1 的透明；所以统一裁 **280×310 @ (180,35)** 再放大到 420×465，
+  不然 contain 之后人物会缩成一小坨。
+
+### 10.2 编码参数与体积
+
+```bash
+-c:v libvpx-vp9 -pix_fmt yuva420p -b:v 220k -deadline good -cpu-used 2 -row-mt 1 -an   # 10fps
+```
+
+13 段合计 **2,427,042 B（2.31 MB）**，最大五段：`idle` 270,345 B / `talking` 255,553 B / `cheer` 231,373 B / `tap` 230,461 B / `thinking` 180,517 B（2026-10-24 `ls` 实测）。
+APK 因此从 **1.96 MB 长到 debug 3,674,327 B / release 3,388,437 B**（0.2.0 签名包，release 略小是因为去掉了调试信息）。
+
+### 10.3 渲染与合成（关键结论）
+
+- overlay 里两路 `<video class="pet-video">` 交叉淡化，`opacity` 过渡 **0.16s**，`object-fit: contain`。
+- **视频表面在 `TYPE_APPLICATION_OVERLAY` 窗口里能正常合成**：`adb exec-out screencap` 与
+  `screenrecord` 抽帧都能拍到人物（两者均已实测）。
+- 但是 **CDP `Page.captureScreenshot` 截不到视频层，会返回 alpha 全 0 的空 PNG**（同页 `readyState=4 / paused=false / videoWidth=420` 都正常）。
+  这条曾导致误判成「overlay 没合成、形象没出来」。**验证形象一律用 `screencap` 或 `screenrecord`，不要用 CDP 截图。**
+- 单位换算：WebView 里 **1 CSS px = 1 dp**（density 2.75 自动放大）。窗口 462×594 设备 px = **168×216 dp**。
+  把 `50px` 当成设备 px 写，气泡就会变成 137dp 高、把形象压没。
+
+### 10.4 状态映射（`setMode` 一处收敛）
+
+| 状态 | 触发 | 播放 | 表现 |
+| --- | --- | --- | --- |
+| idle | 待机 / 一轮结束 | `idle.webm` | 静止；`setAutoPlay(true)` 时自己玩 |
+| listening | 点一下 / 唤醒后开识别 | `idle.webm` | 待机（气泡收起） |
+| thinking | 请求已发出、等首句 | `thinking.webm` | 思考表情，无气泡 |
+| talking | 首句 / 开始播 TTS | `talking.webm` | 播放速率随 `setMouth(0..1)` 在 **0.92–1.18** 之间变 |
+| happy | 错误兜底 900ms | `cheer.webm` | 欢呼一下再回 idle |
+| tap | 点一下的立即反馈 | `tap.webm` | 一次性，播完回当前状态，**4.5s 兜底** |
+
+### 10.5 渲染桥（`window.PetBridge`，原生只用 `evaluateJavascript` 调，`pageReady` 之后才发）
+
+| 方法 | 作用 |
+| --- | --- |
+| `setMode('idle'|'listening'|'thinking'|'talking'|'happy')` | 切状态（内部换视频源） |
+| `say(text)` | 头顶气泡；`say('')` 收起；>90 字截断 |
+| `setWho(name)` | 气泡署名 = App 里的自定义称呼 |
+| `setMouth(0..1)` | 口型 → 播放速率 0.92–1.18；`TtsPlayer.mouth()` 200ms 一次、变化 >0.15 才发 |
+| `setAutoPlay(bool)` | 待机自己玩开关 |
+| `action('tap'|'celebrate')` | 一次性动作 |
+
+### 10.6 布局与气泡间距
+
+- 窗口尺寸 = `精灵尺寸 × (尺寸 + 48dp)`（120 / 168 / 200 dp 三档，`PetConfig.SPRITE_SIZES`）。
+- 模板：`#bubble { max-height: 45% }`，`body.has-bubble #stage { top: var(--shift, 52px); transition: top .18s }`
+  —— **气泡出现时形象整体下移让位，让位量由 JS 按气泡实测高度算出**，窗口本身不加高：
+  overlay 是 `FLAG_NOT_TOUCH_MODAL`，窗口内区域会吃掉触摸，加高窗口就是屏幕上多一条按不到 App 的死区。
+- 让位量不能写死，两个原因（都踩过）：
+  1. **120dp 档窄，同一句话要 3 行**（`max-height: 50px` 只够 2 行，末字「你」被裁）。现改为 JS 量 `bubble.offsetHeight`。
+  2. **视频帧顶部自带透明留白**：角色内容只占帧高 `40/465 ≈ 8.6%`，所以视觉缝隙 = 让位量 + `0.086 × 舞台高`。
+     写死 18dp 时 168 档得到 31dp、200 档 34dp。现在按目标 16dp 反解：
+     ```js
+     const pad = 0.086 * (window.innerHeight - bubble.offsetHeight)
+     const margin = Math.max(2, Math.round((16 - pad) / 0.914))
+     ```
+- **量高度不能放进 `requestAnimationFrame`**：`boot.js` 待机 900ms 后把 rAF 冻掉（省电），
+  写进 rAF 的代码永远不跑，`--shift` 一直是空值、退回默认 52px —— 第一版就是这样，看着像"改了没效果"。
+- 间距实测（`screencap` + 暗色气泡掩码 + 蓝色头发掩码，避开气泡边框）见 §14。
+
+### 10.7 性能约束（已按此实现）
+
+- **不做每帧 `evaluateJavascript`**，只在状态切换 / 每句 / 口型节流点调用；
+- 不在 `onDraw` 里分配对象，不因状态变化 `requestLayout`，不重建 WebView；
+- `ACTION_SCREEN_OFF/ON` → `webView.onPause()` / `onResume()`；
+- 待机冻结 rAF（`boot.js` 里包了 `requestAnimationFrame`，idle 900ms 后停循环）。
+  待机的「自娱自乐」**不再用 JS transform 叠加**（视频本身就在呼吸，两套位移同时作用会发虚、`will-change` 还多一层合成）：
+  改成每 14–28s 随机播一支一次性的小动作（`look_around` 权重 4 / `yawn` 2 / `curtsy` 1），见 §15。
+  注意：**换成透明视频后待机不再是 0 成本**——`<video>` 循环解码本身吃 CPU。
+  - 早期 canvas 方案 137% → 2.1–3.7%（方案已废弃，仅作历史对照）。
+  - 视频方案：`/proc/<pid>/stat` 6 秒差分 = **15.8% 单核**（emulator 软解，10fps，420×465，仅 5 段循环时）；
+    加入待机小动作后复测 **18.2%**（2026-10-24 20:44，含一次切换淡化），仍在预算内。
+  - 模拟器无 VP9 硬解；真机（骁龙 7 系 / Dimensity 都有 VP9 硬解）预期更低，**未核实**，不要写成结论。
+
+## 11. 对话记录放 App 里，点进去才看
+
+- `HistoryActivity`（`singleTop`、深色、`ListView`，最新在**最下面**），行内容
+  「我：…」/「鲸灵：…」+ 13sp 时间；空态文案「还没有对话」。
+- 存储：`PetHistory` 单例，`SharedPreferences`（`pet_history`）里存 JSON 数组
+  `[{r,t,ts}]`，**只留最近 200 条**，同步写、`apply()`。
+- 语音路径的两端都落库：`FloatingPetService` 在用户文本入队时写 `ROLE_ME`、
+  在 `final` 全文时写 `ROLE_PET`（见 `FloatingPetService.kt:531/538`）。
+- 入口两个：主页状态卡下面「对话记录 ›」（带条数）和**长按悬浮窗 500ms**。
+  `HistoryActivity` 返回后 `MainActivity.onResume()` 刷新条数。
+
+## 12. 自定义称呼
+
+- `PetConfig.wakeName`（默认「鲸灵」，`cleanWakeName` 限定 2–4 个字符），
+  主页「设置」里输入 → 存 `pet_prefs/wake_name`。
+- 立即生效的两处：气泡署名（`setWho`，经 `ACTION_REFRESH` 重发）与通知标题。
+- 唤醒词匹配已接（`WakeWordEngine` 做规范化与容错匹配，单元测试 5 条），
+  但模拟器识别器只有 en-US 且永远 `ERROR_NO_MATCH`，**真实唤醒成功率仍【需真机确认】**。
+
+## 13. 形象素材：帧序列是唯一源（pet.js 已退居备用）
+
+- 形象走 §10 的 webm 视频（`android/app/src/main/assets/anim/*.webm`），**不再用代码画的像素小人**；
+  `plugins/dsh-pet-voice/public/pet.js` 只保留渲染桥与旧 canvas 兜底，不再是素材源。
+- 改 `boot.js`（渲染桥）后仍必须重新生成单文件页面：
+  ```bash
+  node scripts/gen-pet-asset.mjs   # 内联 pet.js + boot.js → assets/pet/index.html
+  ```
+  `file://` 下 ES module 的 `import` 会被拦，所以只能是生成出来的单文件页面；`index.html` 不要手改。
+- 帧序列由 `dsh-pet` 0.3.8 的 106 段动画转码而来，裁切/编码参数见 §10.1–§10.2。
+
+### 13.1 加一套新形象 / 新服装（可反复追加）
+
+`android/app/src/main/assets/aster/` 下每套 24 帧透明 WebP + `manifest.json`。
+不要手改 manifest，用导入器：
+
+```bash
+python3 scripts/import-outfit-pack.py ~/Downloads/新形象包.zip --label 夏日泳装
+python3 scripts/import-outfit-pack.py ~/Downloads/某套/ --label 冬日斗篷 --id winter --replace
+node scripts/gen-pet-asset.mjs        # 重新内联，App 设置页的服装列表才会更新
+```
+
+- 吃 zip 或目录；包里每个一级目录算一套（散放的 PNG 算单套）。透明底加 `--no-key`，绿幕底不用加。
+- 统一到同一块画布：420×465、角色高 407、脚底 444、同套 24 帧共用 union bbox，
+  所以换服装后**人物不会忽大忽小、换姿势不跳位**；`--dry-run` 先看「内容尺寸」再决定。
+- 同 `source` 目录重导会复用原 id（不会凭空多出一套同名服装）；要覆盖加 `--replace`，
+  帧数不足想先看效果加 `--allow-partial`。
+- 原稿要求：单一姿势、全身、绿幕或透明底、同套各帧构图一致（否则 union bbox 会把人物缩小）。
+
+### 13.2 三动作动画包（idle / talk / wave，Aster Studio v3）
+
+比 §13.1 多两个真动作，走路更像活人：每套 **idle 45 帧 + talk 15 帧 + wave 15 帧，15fps**。
+包里每套的 `animations/{idle_blink,talk,wave}/sequence/*.png` 就是源，绿幕底纯 `#00FF00`。
+
+```bash
+python3 scripts/build-aster-v3.py /tmp/asterv3/Aster_Studio_v3_All_In_One            # 全量 8 套
+python3 scripts/build-aster-v3.py <包目录> --only sailor --quality 78 --height 360   # 只转一套 / 压体积
+node scripts/gen-pet-asset.mjs        # 把清单内联进 assets/pet/index.html
+```
+
+- 产物：`android/app/src/main/assets/aster/v3/<key>/{idle,talk,wave}/NN.webp` + `manifest.json`（八套、15fps、420×465）。
+  画布约定与 §13.1 完全一致（角色高 407、脚底 444、同套共用 union bbox），所以两代素材可以混着换。
+- 规模参考（2026-10-25 实跑）：8 套 600 帧 = 19 MB，单套约 1 分 50 秒；APK 从 10.3 MB 涨到 29.9 MB。
+  嫌大就按顺序用 `--quality 78`、`--height 360`、`--only` 转子集。
+- 引擎（`assets/pet/anim-pet.js`）优先走 v3：只把**当前这一套**的 75 张图留在内存，换装先拍一帧快照占位再释放旧图；
+  这套没有 v3 素材时回落 §13.1 的 24 帧，再没有回落视频素材，不会白屏。
+- 素材自带眨眼，但 idle 大部分帧是静止的，所以渲染层额外叠呼吸/浮动（见 §10 的动画约定），否则看起来像卡住。
+- 授权：Aster Studio v3 角色素材随 App 与仓库一起分发时，保留包里 `ReadMe` 的署名与授权说明。
+
+## 15. 交互手感 · 低延迟 · 待机行为（2026-10-24 第二批）
+
+### 15.1 手感：反馈提前到「按下」那一刻
+旧版只在 `ACTION_UP` 判点击 → 用户感知的 100–200ms 空白会被读成「点了没反应」。现在：
+
+| 动作 | 触发时机 | 实现 |
+| --- | --- | --- |
+| 点击 | `ACTION_DOWN` | `CLOCK_TICK` 震动 + 立刻 `PetBridge.action('tap')`；UP 时若位移 <8dp 且 <500ms 才当点击 |
+| 拖动 | 位移 >8dp | 再补一次 `LONG_PRESS` 震动 + `setDragging(true)` 循环播 `drag` 素材（松手 `setDragging(false)`，140ms 淡回 idle） |
+| 吸附 | 松手 | 距屏幕边 ≤16dp 就吸附过去：6 步 × 16ms ease-out，`updateViewLayout` 不重排 WebView |
+| 长按 | 500ms | `LONG_PRESS` 震动 → 打开对话记录 |
+
+点击随机播四支之一（`tap` / `tap_shy` / `tap_tickle` / `tap_pout`），连续点不会一直同一支；
+超过 **120s 没互动**再点，改播「惊醒」(`wake_up`)。
+
+### 15.2 延迟：把「等」换成「先出声」
+实测（`PetLatency` TAG，`emulator-5556`，2026-10-24 20:43）：
+
+| 环节 | 改造前 | 现在 |
+| --- | --- | --- |
+| 点下去 → JS 开始做动作 | 等 UP，100–200ms | **1–5ms**（`点击→JS 往返`） |
+| 开口第一声 | +4462ms（等到正文合成完） | **+65ms**（填充句命中缓存） |
+| 正文第一声 | +4462ms | **+498ms**（该句已缓存时）/ 未缓存时仍是宿主合成约 +3.9s |
+| 指令分流 `/api/command` | 287–520ms | 同量级（服务端决定） |
+| SSE `connect`/`hello`/首句 | 首句 +2725ms | 首句 +1964–2053ms |
+
+两个关键点，都是被实测逼出来的：
+
+1. **宿主 TTS 每句固定开销 0.85–3.5s 且无服务端缓存**（`edge-tts` 每次请求新起进程 + 新 WebSocket 握手）。
+   客户端按 `sha1(text|preset)` 落盘缓存（`cacheDir/tts-cache`，60 个 LRU），同句第二次 **0ms**。
+2. **预热 + 填充句**：服务启动时静默合成「嗯，我看看」「好的呀」；`beginTurn` 命中就立刻出声，
+   正文一就绪立刻**掐掉**填充句（不叠音、不留空档）。旧版 `stopAll()` 是 `main.post{}`，
+   在 `beginTurn` 这种「先 stop 再 say」的同步路径里会晚一拍把刚起播的填充句砍掉——已改为主线程同步停止。
+
+`TtsPlayer` 另外两条不变式（有测试意义，别退回去）：**只能有一路出声**（`ready` 队列 + `onCompletion` 才起下一句）；
+**stop 立即生效**（所有异步回调带 `epoch`，迟到的一律丢弃并删半截文件）。
+
+### 15.3 待机行为
+- 每 14–28s 随机播一支小动作，播完回 idle；只在「idle + 活跃 + 没气泡」时触发，说话/思考/听音时一律不打扰。
+- 页面加载后第一次进 idle 会先行一次女仆礼（`curtsy`），每次加载只一次。
+- 验证方式（DOM 层，不看像素）：CDP `Runtime.evaluate` 轮询 `.pet-video.front` 的 `currentSrc`，
+  42s 内抓到 `idle.webm → curtsy.webm(15.1s) → idle.webm(18.1s)`，说明一次性动作播完会自己收回 idle。
+
+## 14. 本批验收（emulator-5556，Android 11 / API 30）
+
+设备事实（**不是真机**）：`ro.product.model = sdk_gphone_arm64`，屏幕 1220×2712、440dpi，
+6 核 / 6GB；只是**按红米 K100 Pro Max 的屏幕参数档**在跑。API 30 不等于 HyperOS 4 / Android 15，
+所以第 5 节里跟 Android 15 有关的结论仍标【需真机确认】。
+
+| 项 | 结果 |
+| --- | --- |
+| 离线构建 | `BUILD SUCCESSFUL`；debug APK **3,674,327 B**、release（0.2.0，已签名）**3,388,437 B** |
+| `bash scripts/android-smoke.sh` | **16/16 通过**（脚本已改为默认尊重 `ANDROID_SERIAL`，并打印机型/分辨率/密度自证） |
+| 待机 CPU | `/proc/<pid>/stat` 6 秒差分：仅 5 段循环时 **15.8% 单核**，加待机小动作后 **18.2%**（模拟器软解 VP9，10fps，420×465）；15fps 时 `top` 采样 23%。真机硬解预期更低但【未核实】。历史对照：早期 canvas 方案 137% → 2.1–3.7% |
+| 点一下唤醒 | 悬浮窗变 listening，系统识别器在模拟器上无结果 → `happy` 900ms 回 idle（预期） |
+| 长按 500ms | 打开 `HistoryActivity`，两行记录与「2 条」计数一致 |
+| 截图 | `docs/img/pet-overlay-idle.png`、`pet-overlay-listening.png`、`pet-overlay-thinking.png`、`pet-overlay-talking.png`、`pet-history.png` |
+| 形象渲染 | 视频帧序列（两路 `<video>` 交叉淡化）；`screencap` 与 `screenrecord` 都能拍到人物，CDP `Page.captureScreenshot` 拍到的是 alpha 全 0 空图（见 §10.3） |
+| 气泡间距（`screencap` + 掩码法，2026-10-24 20:33，让位量按目标 16dp 反解后） | 120dp：窗口 330×462，气泡 y=74..248（64dp，**3 行完整**）/ 发梢 293 → **16.0dp**；168dp：462×594，74..201（47dp）/ 249 → **17.1dp**；200dp：550×682，74..201 / 257 → **20.0dp**。三档均在判据 12–24dp 内 |
+| 120dp 气泡缺陷 | **已修**：`max-height: 50px` → `45%` + JS 量 `offsetHeight` 动态让位，3 行文案不再裁字 |
+| 图像证据 | `docs/img/pet-bubble-120.png`、`pet-bubble-168.png`、`pet-bubble-200.png` |
+
+**验证用的调试钩子（仅 debug 包）**：`FloatingPetService` 注册了 `com.whale.pet.action.*` 广播
+（`DEBUG_TURN` / `DEBUG_MODE` / `DEBUG_SAY` / `DEBUG_PAUSE`），只用于在模拟器上触发一轮真实请求或切状态截图；
+release 包不注册。模拟器语音识别永远 no-match，所以「说话 + 气泡」是用 `DEBUG_TURN` 跑真实宿主请求验证的。
+
+两个 adb 引号/寻址的坑（本批各踩一次）：
+
+```bash
+# 1) 动态注册的 receiver 必须用 -p；用 -n(组件) 会 result=0、什么都不发生
+adb shell am broadcast -a com.whale.pet.action.DEBUG_TURN -p com.whale.pet --es text "'切到 Envoy'"
+# 2) 带空格/中文的 --es text 要给设备 shell 再套一层引号，否则被空格截断（'切到' + 多余参数）
+```
+
+**不能声称的**：没有真机 → 不写「已真机验证」「可以安装」；没相机 → 扫码未在模拟器验证；
+真机 ASR 质量、HyperOS 后台存活、Android 15 FGS 校验都仍需真机确认。
+
+## 16. 0.2.0 稳定版：签名、安全与延迟（2026-10-24 第三批）
+
+### 16.1 签名与产物
+
+- `versionCode 2` / `versionName 0.2.0`；`release` 打 `signingConfigs.release`（读 `android/keystore.properties`，密钥 `android/keystore/pet-release.jks`，两者都已 gitignore）。
+- `isMinifyEnabled = false` 两个构建类型都保持关闭：JS 桥按类名反射调用，混淆会直接断掉形象层。
+- 离线环境没有 `lint-gradle`，`assembleRelease` 会触发 `lintVitalRelease` 并失败 —— 构建脚本里显式 `lint { checkReleaseBuilds = false; abortOnError = false }`；
+  静态检查改到联网机器上 `gradle :app:lintDebug` 另跑。
+- 产物：`dist/jingling-0.2.0.apk`（= `android/app/build/outputs/apk/release/app-release.apk`，3,388,437 B，SHA-256 `6fff49d7…c946e`）。
+- 真机安装/权限/接线步骤见 [`docs/real-device-install.md`](real-device-install.md)。
+
+### 16.2 链路安全（做了什么）
+
+- **拒绝公网明文 http**：`PetSettings.plaintextHostAllowed()` 只放行本机 / `10.0.2.2` / `192.168.*` / `10.*` / `172.16–31.*` / `*.local|.lan|.home`，
+  其余必须 `https://`，保存时直接提示「地址无效：公网必须 https://」。理由：明文链路上 48 字符 bearer token 与全部对话内容都可被旁观。
+- **令牌不外泄**：只存 `MODE_PRIVATE` 的 `SharedPreferences`，UI 只显示掩码，日志不打；请求走 `Cookie: pkv_<前8位>=<token>`，不拼进 URL 查询串。
+- **静态资源不放秘密**：早期 `public/qr-pairing.png` 编了带令牌的完整配对链接，而 `/pet-voice/assets/*` **不鉴权** —— 已删除（`assets/qr-pairing.png → 404` 实测），页面/白名单/契约文档同步清理。
+  规则：**不要往 `plugins/dsh-pet-voice/public/` 放任何带令牌或隐私文本的文件。**
+- **语音合成不进共享缓存**：`/api/tts` 返回 `cache-control: private, max-age=86400`（URL 里带原文，不能被 CDN / 代理留存）。
+
+### 16.3 服务端合成缓存（延迟主收益）
+
+`plugins/dsh-pet-voice/index.js` 里一个进程内 LRU：键 `音色|语速|音调|文本`，上限 48 条 / 16 MB，按字节淘汰；
+合成边吐边攒，退出码 0 且字节数 > 0 才入缓存；响应带 `x-tts-cache: hit|miss`，命中直接 `content-length` + `res.end(buf)`。
+
+【实测 2026-10-24，宿主 `curl` 取同一句】
+
+| 次数 | ttfb | 总耗时 | 字节 | 头 |
+| --- | --- | --- | --- | --- |
+| 1（host 缓存空） | 1.244 s | 1.813 s | 22,464 | `miss` |
+| 2 | **0.0006 s** | 0.0008 s | 22,464 | `hit` |
+| 3 | 0.0006 s | 0.0008 s | 22,464 | `hit` |
+| 换一句新的 | 1.084 s | — | — | `miss` |
+
+字节完全一致 ⇒ 合成是确定性的，缓存不会让同一句话音色漂移。
+客户端那侧还有一层磁盘缓存（`cacheDir/tts-cache/<sha1>.mp3`，60 条），两层叠加后：命中手机磁盘 ≈ 0 ms，
+命中宿主缓存 ≈ 调一次 HTTP 的时间（模拟器到宿主有 ≈500 ms 固定开销，**这是模拟器 NAT 的底噪，不是缓存或合成慢**——
+同一通道取静态 `index.html` 也是 508 ms）。
+插件重载会清空这个 Map（内存态），第一次预热会重新填充；`TtsPlayer.prewarm()` 是天然的预热器。
+
+> 口径提醒：一条**没缓存过的新句子**仍然是 1.9–2.0 s（模型 SSE + 宿主合成，0.85–3.5 s 波动），缓存只解决「同一句第二次」。
+
+## 17. 语音指令链路验收（可复现，0.2.1 复测）
+
+`scripts/verify-commands.sh` 一条命令跑完：装 debug → 注入 `pet_prefs.xml` → `appops set SYSTEM_ALERT_WINDOW allow`
+→ 起 `FloatingPetService` → 用 `DEBUG_TURN` 广播喂 5 句话 → 查 `PetCommand:I` / `PetLatency:I` 日志断言
+→ `trap` 里装回 `dist/jingling-0.2.1.apk` 并确认不可调试。
+
+【实测 2026-10-24，emulator-5556（Android 11 / API 30），最终 **13 通过 / 0 失败**】
+
+| 输入 | 期望 action | 实测 | 备注 |
+| --- | --- | --- | --- |
+| `切到 Pet` | `switch` | ✓ 分流 349–563 ms | 之后**没有**二次 `/api/dispatch` |
+| `派发 看一下 git status 给 Pet` | `dispatch` | ✓ | 服务端分流即派发，App 只念回包，不再补发 |
+| `停` | `stop` | ✓ | 只播报，不停麦克风常驻 |
+| `切到 没有这个项目的名字` | `switch-miss` | ✓ | 不建会话、不派发 |
+| `今天天气不错` | `chat` | ✓ | 落回 `/api/dispatch`，闲聊不误判成指令 |
+
+跑法：
+
+```bash
+bash scripts/verify-commands.sh                      # 默认 emulator-5556 + http://10.0.2.2:52356/pet-voice/
+SERIAL=emulator-5554 PET_HOST=https://pet.example.com/pet-voice/ bash scripts/verify-commands.sh
+```
+
+**踩过的坑（写进脚本了）**：`adb shell am broadcast --es text '切到 Pet'` 会被设备端 shell 再切一次词，
+`Pet` 变成裸参数 ⇒ 断言假阴性。正确写法是**整条命令一起引号**：
+`adb shell "am broadcast -a com.whale.pet.action.DEBUG_TURN --es text '切到 Pet'"`。
+
+另外两条断言不是「越多越好」：`dispatch` 分支**本来就不会**再发 `/api/dispatch`（服务端 `/api/command` 已经派发了），
+所以验收写的是「无二次 dispatch + TTS 出声日志」而不是「有 dispatch 请求」。
+
+## 18. 0.2.1：首页「打开 DSH Web GUI」
+
+需求原话是「手机经隧道打开 DSH Web GUI，语音长在它上面」。做法：**GUI 交给系统浏览器，鲸灵用悬浮窗浮在上面**，
+两者不抢屏幕、不需要 WebView 里再嵌一层（WebView 只用来读版本号）。
+
+- 地址推导：取设置里已存的 `…/pet-voice/` → 保留 scheme/authority、path 置 `/` ⇒ `https://pet.example.com/`（remote-web-ui 的根）。
+- 安全：`https` 一律放行；`http` 只给 `localhost` / `127.0.0.1` / `10.0.2.2` / `*.local`（明文只用于本机调试）。
+- 降级：`resolveActivity` 为空（没有浏览器）或 `startActivity` 抛错 → 把 GUI 地址复制到剪贴板 + toast，不崩。
+
+【实测 0.2.1，emulator-5556】
+
+| 检查 | 结果 |
+| --- | --- |
+| 首页出现该行，右侧显示主机名 | ✓ `打开 DSH Web GUI   10.0.2.2 ›`（uiautomator dump + 截图） |
+| 点击行为 | ✓ 弹出「没有浏览器，已复制 GUI 地址」；`mResumedActivity` 仍是 `com.whale.pet/.MainActivity`（模拟器无浏览器，走降级是设计如此） |
+| 装回 release 后版本 | ✓ `versionCode=3` / `versionName=0.2.1`，非 DEBUGGABLE |
+| 语音指令回归 | ✓ 13/13（见 §17） |
+
+**没验到的**：模拟器里没有浏览器，所以「真的跳进 GUI 页面」这一跳【未核实】；真机上点一下就知道，
+若真没浏览器也是复制地址，不会失败。产物与校验见 [`docs/real-device-install.md`](real-device-install.md)。
+
+## 19. 0.2.2：自签 CA 内置，不买域名也能 https（2026-10-24 第四批）
+
+**动机**：手机连非 loopback 的 `http://IP:8443` 会被 App 拦掉（防止令牌明文上公网），而公网 IP 拿不到
+公共 CA 证书。于是自己当 CA：`scripts/tls-ca.sh` 生成根证书 + 叶证书（SAN 覆盖 `127.0.0.1` / `10.0.2.2` /
+`::1` / 你传的 IP、域名），根证书打包进 App。
+
+**改动**（都很小）：
+
+| 文件 | 改动 |
+| --- | --- |
+| `android/app/src/main/res/raw/pet_ca.pem` | 新增，公开的根证书（私钥在 `~/.dsh/pet-voice/tls/`，600，不进仓库） |
+| `res/xml/network_security_config.xml` | 新增，`trust-anchors` = 系统 CA + `@raw/pet_ca`，别的 https 行为不变 |
+| `AndroidManifest.xml` | `<application android:networkSecurityConfig="@xml/network_security_config">` |
+| `scripts/tls-ca.sh` | 生成 / `--check` / `--renew-leaf` / `--no-android`，权限与链校验、App 内置一致性比对 |
+| `scripts/tls-proxy.mjs` | 零依赖 https 反代：`https://…:8443/pet-voice/*` → `http://127.0.0.1:52356`，只放行 `/pet-voice/*`，SSE 直通 |
+| `scripts/verify.sh` | 新增 4d 步：有证书时跑 `tls-ca --check`，没有就 SKIP |
+
+**验收**（模拟器 emulator-5556）：
+
+- `bash scripts/tls-ca.sh --ip 203.0.113.9` → 全部通过；叶证书 396 天后到期；CA 指纹 `F2:EE:4F:B5…83:D7`。
+- `node scripts/tls-proxy.mjs` + `curl --cacert pet-ca.pem https://127.0.0.1:8443/pet-voice/api/state` → **200**，TLS 握手 6.5 ms；换 `/api/state` → **404**（白名单生效）。
+- `PET_HOST=https://10.0.2.2:8443/pet-voice/ bash scripts/verify-commands.sh` → **13 通过 / 0 失败**，分流 623 ms，结束自动装回 release 0.2.2。这步同时证明三件事：App 认这张自签 CA、https 链路可用、命令分流在 https 下没退化。
+
+**仍是【未核实】**：真机 + 腾讯云 SSH 反向隧道的线上组合。命令与拓扑见 [tls-self-signed.md](tls-self-signed.md)。
+
+## 20. 版本与验收记录（更新通道）
+
+发布用 `node scripts/publish-apk.mjs dist/jingling-<ver>.apk --version-code N --version-name <ver> --notes "…"`，
+落盘 `~/.dsh/pet-voice/update/`，`latest.json` 原子更新；App「检查更新」读 `/api/update`。版本只升不降。
+
+| 版本 | code | 体积 | sha256（前 16） | 这一版验了什么 |
+| --- | --- | --- | --- | --- |
+| 0.9.2 | 71 | 10.34 MB | `63ad1fa5d247b8a0` | 动画基线：10.37 % 变化率 / 0.10 s 静止 |
+| 0.9.3 | 73 | 29.93 MB | `60d465d49f860682` | 内置 Aster v3 三动作包（8 套服装）；设备实测 14.35 % / 静止 0.00 s |
+| 0.9.4 | 74 | 29.94 MB | `438d20983f405a7f` | 「更多 → 去授权」四项全部跳到系统原生页（四家落点实测） |
+| 0.9.5 | 75 | 29.94 MB | `15cbfca567d0ee63` | 未绑定只留「扫码绑定」、已绑定只留「立即对话」；talk 动作实测 |
+| 0.9.6 | 76 | 29.94 MB | `750f993f901acaf5` | 插件面板新增「传输方式」（自动 / 只用轮询），锁轮询时 App 不再先开流 |
+
+模拟器实测环境：`emulator-5554`，Android 11 / API 30（`sdk_gphone_arm64`），1080×2340。
+
+## 21. 跨机型权限层（实现与验证）
+
+**为什么统一入口**：按品牌摆按钮等于把 ROM 差异写进 UI，换台手机就得改代码。现在所有跳转走 `openFirst(vararg pages: Intent)`：
+逐个 `resolveActivity(packageManager)` 判空 → 加 `FLAG_ACTIVITY_NEW_TASK` → try/catch；失败继续下一个，全落空才用 App 详情页，并 toast 一句「请在设置里允许…」。
+
+| 项 | 顺序（先试先赢） |
+| --- | --- |
+| 悬浮窗 | `ACTION_MANAGE_OVERLAY_PERMISSION(package:)` → 裸 action → App 详情 |
+| 电池 | `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS(package:)` → `ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS` → App 详情 |
+| 自启动 | 小米 `OP_AUTO_START` / `autostart.AutoStartManagementActivity` → 小米 `OP_BACKGROUND_START_ACTIVITY` / `PermissionsEditorActivity` → 华为·荣耀 启动管理 → OPPO `StartupAppListActivity` → vivo `BgStartUpManagerActivity` → 三星 `BatteryActivity` → 魅族 `PermMainActivity` → 华硕 `AutoStartActivity` → App 详情 |
+| 通知 | `ACTION_APP_NOTIFICATION_SETTINGS(EXTRA_APP_PACKAGE)` → App 详情 |
+
+**必须配 `<queries>`**：Android 11+ 的包可见性过滤会让未声明的厂商包在 `resolveActivity` 里返回 null，
+于是「明明装了安全中心却直接掉到 App 详情页」。清单里已声明 securitycenter / huawei / honor / coloros / oppo /
+vivo / iqoo / samsung lool / meizu safe / asus mobilemanager / settings，以及 5 个 settings action。
+
+【实测 0.9.4，emulator-5554 / API 30，2026-10-25 16:40】四项逐一点开，取 `mResumedActivity`：
+
+| 点哪项 | 实际落点 |
+| --- | --- |
+| 悬浮窗权限 | `com.android.settings/.Settings$OverlaySettingsActivity` |
+| 电池不受限 | `com.android.settings/.fuelgauge.RequestIgnoreBatteryOptimizations` |
+| 自启动 | `com.android.settings/.applications.InstalledAppDetails`（AOSP 无厂商启动管理器 ⇒ 设计如此） |
+| 通知 | `com.android.settings/.Settings$AppNotificationSettingsActivity` |
+
+真机上的厂商页落点仍是【未核实】——`resolveActivity` 判空 + try/catch 保证「跳不到也不会崩」，但跳到哪一页要上真机看。
+
+### 21.1 三个动作怎么验（idle / talk / wave）
+
+release 包没有调试通道，`talk` 只能靠 debug 包的广播钩子驱动（`FloatingPetService.debugReceiver`，仅 `BuildConfig.DEBUG`）：
+
+```bash
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk   # 与 release 签名不同，需先卸载
+adb shell am broadcast -a com.whale.pet.action.DEBUG_MODE  --es text talking
+adb shell am broadcast -a com.whale.pet.action.DEBUG_EVAL  --es text 'JSON.stringify(window.__petDebug())'
+adb logcat -d | grep "PetSprite: sprite" | tail -3
+# 期望：p=v3 sailor talk frame=NN.webp
+```
+
+- `DEBUG_SAY` 在无 TTS 发声引擎的模拟器上不进说话态（本机实测无帧），验 talk 用 `DEBUG_MODE talking`。
+- 验完记得卸掉 debug 包装回 release，否则签名不同，后续覆盖安装会失败。
+
+### 21.2 回填 prefs 的 SELinux 坑（两次踩到）
+
+用 `adb push` 直接把 `pet_prefs.xml` 推到 `/data/data/<pkg>/shared_prefs/`，文件的 SELinux category 会和目录不一致
+（例：文件 `c178`、目录 `c179`），App 读到的是**默认值**，界面显示「未绑定」，且没有任何报错。
+
+正确顺序：`push` 到 `/data/local/tmp/` → 设备内 `cp` 到位 → `chown <uid>:<gid>` → `chmod 660` → `restorecon -R shared_prefs`。
+验证方式：`ls -lZ` 比对文件与目录的 category，再看首页是否「已连接」。**重装后 uid 会变**，别用记死的 uid。

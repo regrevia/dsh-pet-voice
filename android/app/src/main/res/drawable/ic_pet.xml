@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 像素鲸鱼娘，形状取自 plugins/dsh-pet-voice/public/icon.svg（只读复制，未改原文件） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="112dp"
+    android:height="112dp"
+    android:viewportWidth="112"
+    android:viewportHeight="112">
+
+    <path android:fillColor="#04101A" android:pathData="M0,0h112v112h-112z" />
+    <path android:fillColor="#45B6E8" android:pathData="M18,62h12v8h-12z" />
+    <path android:fillColor="#7ADAFF" android:pathData="M14,58h8v8h-8z" />
+    <path android:fillColor="#CDF6FF" android:pathData="M10,54h8v8h-8z" />
+    <path android:fillColor="#7ADAFF" android:pathData="M22,46h68v36h-68z" />
+    <path android:fillColor="#45B6E8" android:pathData="M22,74h68v8h-68z" />
+    <path android:fillColor="#CDF6FF" android:pathData="M22,46h68v6h-68z" />
+    <path android:fillColor="#F2FBFF" android:pathData="M34,62h44v16h-44z M38,56h36v6h-36z" />
+    <path android:fillColor="#12364F" android:pathData="M40,58h6v8h-6z M66,58h6v8h-6z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M42,60h2v2h-2z M68,60h2v2h-2z" />
+    <path android:fillColor="#FF9DB1" android:pathData="M32,70h6v4h-6z M74,70h6v4h-6z" />
+    <path android:fillColor="#B6F2FF" android:pathData="M54,34h4v8h-4z M50,28h4v6h-4z M58,26h4v8h-4z" />
+    <path android:fillColor="#EAFCFF" android:pathData="M54,20h4v6h-4z" />
+</vector>

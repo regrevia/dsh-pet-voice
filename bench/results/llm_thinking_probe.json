@@ -1,0 +1,12 @@
+{
+  "note": "验证能否关掉思维链以降低首个可播文本延迟；同一条 prompt，各跑 1 次，model=anthropic/DeepSeek-V4.1-Flash",
+  "prompt": "用一句话说：语音管线首字延迟花在哪？",
+  "measured_at": "2026-10-24T13:32:40+0800",
+  "rows": [
+    {"variant": "baseline", "ttfb_any_ms": 320, "ttfb_content_ms": 1608, "content_chunks": 16},
+    {"variant": "thinking.type=disabled", "ttfb_any_ms": 247, "ttfb_content_ms": 1768, "content_chunks": 8},
+    {"variant": "enable_thinking=false", "ttfb_any_ms": 271, "ttfb_content_ms": 1403, "content_chunks": 10},
+    {"variant": "reasoning_effort=none", "ttfb_any_ms": 243, "ttfb_content_ms": null, "content_chunks": 0, "note": "无 content 增量返回，参数未被接受/无正文"}
+  ],
+  "conclusion": "三个关闭参数均未把首个 content 拉低到 300ms 量级；语音轮次需要换非思维链模型或本地小模型"
+}

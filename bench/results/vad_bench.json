@@ -1,0 +1,47 @@
+{
+  "env": {
+    "frame_ms": 20,
+    "sample_rate": 16000,
+    "threshold_rms": 120.0,
+    "note": "纯 stdlib RMS VAD；生产用 Silero VAD，端点延迟由 hangover 决定"
+  },
+  "rows": [
+    {
+      "hangover_ms": 300,
+      "onset_latency_ms": 0.0,
+      "endpoint_latency_ms": -2400.0,
+      "detect_cpu_ms": 0.01,
+      "frames": 270,
+      "audio_s": 5.4,
+      "realtime_factor": 1e-06
+    },
+    {
+      "hangover_ms": 500,
+      "onset_latency_ms": 0.0,
+      "endpoint_latency_ms": -20.0,
+      "detect_cpu_ms": 0.01,
+      "frames": 270,
+      "audio_s": 5.4,
+      "realtime_factor": 1e-06
+    },
+    {
+      "hangover_ms": 700,
+      "onset_latency_ms": 0.0,
+      "endpoint_latency_ms": -20.0,
+      "detect_cpu_ms": 0.01,
+      "frames": 270,
+      "audio_s": 5.4,
+      "realtime_factor": 1e-06
+    },
+    {
+      "hangover_ms": 1000,
+      "onset_latency_ms": 0.0,
+      "endpoint_latency_ms": -20.0,
+      "detect_cpu_ms": 0.01,
+      "frames": 270,
+      "audio_s": 5.4,
+      "realtime_factor": 1e-06
+    }
+  ],
+  "measured_at": "2026-10-24T13:28:23+0800"
+}

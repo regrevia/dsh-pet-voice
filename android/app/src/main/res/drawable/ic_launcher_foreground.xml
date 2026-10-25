@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 自适应图标前景：108dp 画布留 72dp 安全区（四边各缩 18dp），避免被启动器圆形遮罩切到脸 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@drawable/ic_pet"
+        android:left="18dp" android:top="18dp" android:right="18dp" android:bottom="18dp" />
+</layer-list>

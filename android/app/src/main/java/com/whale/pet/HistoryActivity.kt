@@ -1,0 +1,745 @@
+package com.whale.pet
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.drawable.GradientDrawable
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.text.InputType
+import android.view.Gravity
+import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
+import android.widget.AdapterView
+import android.widget.BaseAdapter
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.TextView
+import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+/**
+ * 对话页：一级「项目」→ 二级「该项目里的会话」，外加一个输入行。
+ *
+ * 分层的理由和桌面 DSH 一样：先选在哪干活（项目），再选跟哪条线接着聊（会话）。
+ * 选项目默认落进新会话；选会话就绑定那只。层级只在本地渲染，不缓存成第二套真相。
+ */
+class HistoryActivity : Activity() {
+
+    private lateinit var list: ListView
+    private lateinit var empty: TextView
+    private lateinit var typing: TextView
+    private lateinit var runBar: View
+    private lateinit var runText: TextView
+    private lateinit var runStop: TextView
+    private lateinit var input: EditText
+    private lateinit var sendBtn: TextView
+    private lateinit var micBtn: TextView
+    private lateinit var projectBtn: TextView
+    private lateinit var sessionsBtn: TextView
+
+    private lateinit var pickerScrim: View
+    private lateinit var pickerSheet: View
+    private lateinit var pickerBack: TextView
+    private lateinit var pickerTitle: TextView
+    private lateinit var pickerList: ListView
+    private lateinit var pickerClose: TextView
+
+    private val ui = Handler(Looper.getMainLooper())
+    private val adapter = ChatAdapter()
+    private val pickerAdapter = PickerAdapter()
+
+    private var turn: PetTurn? = null
+    private var turnStart = 0L
+    /** 用户自己点了「停止」：这一轮不该再弹「没收到回复」。 */
+    private var userStopped = false
+    private var lastSent = ""
+    private var tts: TtsPlayer? = null
+    private var render: ChatRender? = null
+
+    /** 一级=项目列表，二级=某项目的会话列表。 */
+    private var pickerLevel = 1
+    private var projects: List<Ws> = emptyList()
+    private var sessions: List<Sess> = emptyList()
+    private var pickerProject = ""
+    private var pickerLoading = false
+    private val pickerRows = ArrayList<PickerRow>()
+
+    /** 按住说话 */
+    private var recorder: VoiceRecorder? = null
+    private var micBusy = false
+    @Volatile private var micDown = false
+
+    private data class Ws(val id: String, val title: String, val path: String, val pinned: Boolean)
+    private data class Sess(val id: String, val title: String, val at: Long)
+
+    private sealed class ChatRow {
+        data class Me(val text: String) : ChatRow()
+        data class Pet(val text: String, val rich: Boolean) : ChatRow()
+        data class Live(val text: String) : ChatRow()
+    }
+
+    private sealed class PickerRow {
+        data class Head(val text: String) : PickerRow()
+        data class Proj(val ws: Ws) : PickerRow()
+        data class SessRow(val s: Sess) : PickerRow()
+        /** 「新建项目」这类没有现成数据的行。 */
+        data class Action(val text: String) : PickerRow()
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_history)
+
+        list = findViewById(R.id.historyList)
+        empty = findViewById(R.id.historyEmpty)
+        typing = findViewById(R.id.chatTyping)
+        runBar = findViewById(R.id.chatRun)
+        runText = findViewById(R.id.chatRunText)
+        runStop = findViewById(R.id.chatStop)
+        input = findViewById(R.id.chatInput)
+        sendBtn = findViewById(R.id.chatSend)
+        micBtn = findViewById(R.id.chatMic)
+        projectBtn = findViewById(R.id.historyProject)
+        sessionsBtn = findViewById(R.id.historySessions)
+
+        pickerScrim = findViewById(R.id.pickerScrim)
+        pickerSheet = findViewById(R.id.pickerSheet)
+        pickerBack = findViewById(R.id.pickerBack)
+        pickerTitle = findViewById(R.id.pickerTitle)
+        pickerList = findViewById(R.id.pickerList)
+        pickerClose = findViewById(R.id.pickerClose)
+
+        list.adapter = adapter
+        pickerList.adapter = pickerAdapter
+        list.dividerHeight = 0
+
+        findViewById<View>(R.id.historyBack).setOnClickListener { finish() }
+        projectBtn.setOnClickListener { openPicker(1) }
+        sessionsBtn.setOnClickListener { openPicker(2) }
+        findViewById<View>(R.id.historyNew).setOnClickListener { newChat() }
+        pickerClose.setOnClickListener { closePicker() }
+        pickerScrim.setOnClickListener { closePicker() }
+        pickerBack.setOnClickListener { if (pickerLevel == 2) openPicker(1) else closePicker() }
+        pickerList.onItemClickListener =
+            AdapterView.OnItemClickListener { _, _, pos, _ -> onPickerPick(pos) }
+
+        sendBtn.setOnClickListener { sendChat() }
+        runStop.setOnClickListener { stopTurn() }
+        input.setOnEditorActionListener { _, actionId, ev ->
+            if (actionId == EditorInfo.IME_ACTION_SEND || (ev?.keyCode == KeyEvent.KEYCODE_ENTER && ev.action == KeyEvent.ACTION_DOWN)) {
+                sendChat()
+                true
+            } else {
+                false
+            }
+        }
+
+        // 按住说话：按下开录、松手出字并且直接发出去。和输入框共用一个发送动作，没有二次确认。
+        micBtn.setOnTouchListener { v, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    micDown = true
+                    startHold()
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    micDown = false
+                    finishHold()
+                    v.performClick()
+                    true
+                }
+                else -> true
+            }
+        }
+
+        adapter.onRetry = { resendLast() }
+        render = ChatRender(this) { PetSettings.load(this) }
+
+        refreshHeader()
+        reload()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshHeader()
+        reload()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // 离开页面就别再录了，免得麦克风一直攥在手里
+        micDown = false
+        if (recorder?.isRecording == true) runCatching { recorder?.stop() }
+        stopTurn()
+    }
+
+    override fun onDestroy() {
+        ui.removeCallbacksAndMessages(null)
+        runCatching { tts?.release() }
+        tts = null
+        runCatching { render?.release() }
+        render = null
+        super.onDestroy()
+    }
+
+    @Deprecated("BackHandler")
+    override fun onBackPressed() {
+        // 选择层开着时，返回先收层，不退页面
+        if (pickerSheet.visibility == View.VISIBLE) {
+            if (pickerLevel == 2) openPicker(1) else closePicker()
+            return
+        }
+        super.onBackPressed()
+    }
+
+    /* ---------------- 标题与列表 ---------------- */
+
+    private fun refreshHeader() {
+        val title = PetSettings.pinnedTitle(this)
+        projectBtn.text = title.ifBlank { "项目" }
+    }
+
+    private fun reload() {
+        val items = PetHistory.all(this)
+        val lastPet = items.indexOfLast { !it.isMe }
+        val rows = ArrayList<ChatRow>(items.size + 2)
+        items.forEachIndexed { i, item ->
+            if (item.isMe) {
+                rows.add(ChatRow.Me(item.text))
+            } else {
+                // 只有最后一条助手消息挂富文本渲染器：历史长列表里塞多个 WebView 会卡
+                rows.add(ChatRow.Pet(item.text, rich = i == lastPet))
+            }
+        }
+        val live = liveText
+        if (live.isNotBlank()) rows.add(ChatRow.Live(live))
+        adapter.rows = rows
+        adapter.notifyDataSetChanged()
+        empty.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
+        scrollToBottom()
+    }
+
+    private fun scrollToBottom() {
+        ui.post { list.setSelection(adapter.count - 1) }
+    }
+
+    /* ---------------- 发送 / 中断 ---------------- */
+
+    private fun sendChat() {
+        val text = input.text?.toString()?.trim().orEmpty()
+        if (text.isBlank()) return
+        if (turn != null) {
+            toast("上一轮还没结束")
+            return
+        }
+        input.setText("")
+        send(text)
+    }
+
+    private fun resendLast() {
+        val text = lastSent
+        if (text.isBlank()) return
+        adapter.error = ""
+        if (turn != null) return
+        send(text)
+    }
+
+    private fun send(text: String) {
+        lastSent = text
+        adapter.error = ""
+        adapter.live = ""
+        turnStart = System.currentTimeMillis()
+        PetHistory.append(this, PetHistory.ROLE_ME, text)
+        reload()
+        typing.visibility = View.VISIBLE
+        runBar.visibility = View.VISIBLE
+        runText.text = "处理中 0 s"
+        ui.post(ticker)
+        val client = PetClient { PetSettings.load(this) }
+        val t = PetTurn(
+            client,
+            text,
+            object : PetTurn.Callback {
+                override fun onUser(text: String) {}
+                override fun onStatus(text: String) {
+                    runText.text = text
+                }
+
+                override fun onAssistant(fullText: String, isFinal: Boolean) {
+                    adapter.live = fullText
+                    adapter.notifyDataSetChanged()
+                    scrollToBottom()
+                }
+
+                override fun onSentence(sentence: String) {
+                    val cfg = PetSettings.load(this@HistoryActivity)
+                    val player = tts ?: TtsPlayer(this@HistoryActivity, client, { cfg }, {}, {}).also { tts = it }
+                    player.enqueue(sentence)
+                }
+
+                override fun onDone() {
+                    finishTurn(null)
+                }
+
+                override fun onError(message: String) {
+                    finishTurn(message)
+                }
+            },
+            PetSettings.chatSession(this),
+        )
+        turn = t
+        t.start()
+    }
+
+    private fun finishTurn(error: String?) {
+        ui.removeCallbacks(ticker)
+        turn = null
+        typing.visibility = View.GONE
+        runBar.visibility = View.GONE
+        val finalText = adapter.live
+        adapter.live = ""
+        if (error == null && finalText.isNotBlank()) {
+            PetHistory.append(this, PetHistory.ROLE_PET, finalText)
+        } else if (error == null && !userStopped) {
+            // 一轮走完了却一个字都没有：不能就这么静默收工，用户只会以为 App 坏了
+            adapter.error = "没收到回复，重试"
+        } else {
+            // 失败给一行可点的动作，不砸对话框：点了就用同一句话再发一次
+            adapter.error = "没收到回复，重试"
+        }
+        reload()
+        userStopped = false
+    }
+
+    private val ticker = object : Runnable {
+        override fun run() {
+            if (turn == null) return
+            val ms = System.currentTimeMillis() - turnStart
+            // 线程卡在开流/长轮询里时回调可能永远不来：一路没字就自己收工，别让人对着「处理中」发呆
+            if (ms > 45_000 && adapter.live.isBlank()) {
+                userStopped = false
+                turn?.cancel()
+                finishTurn(null)
+                return
+            }
+            runText.text = "处理中 ${ms / 1000} s"
+            ui.postDelayed(this, 1000)
+        }
+    }
+
+    private fun stopTurn() {
+        val t = turn ?: return
+        userStopped = true
+        t.cancel()
+        finishTurn(null)
+    }
+
+    /* ---------------- 新对话 ---------------- */
+
+    private fun newChat() {
+        if (turn != null) {
+            toast("上一轮还没结束")
+            return
+        }
+        // 项目不变，命令式地开一只新会话：先按本地状态把标题上屏，不等网络
+        refreshHeader()
+        val client = PetClient { PetSettings.load(this) }
+        Thread({
+            val r = try { client.newSession(fresh = true) } catch (_: Exception) { null }
+            val id = r?.json?.optString("sessionId").orEmpty()
+            runOnUiThread {
+                if (id.isNotBlank()) {
+                    PetSettings.saveChatSession(this, id)
+                    toast("新对话已开")
+                } else {
+                    toast("新对话没开成")
+                }
+                reload()
+            }
+        }, "pet-newchat").apply { isDaemon = true }.start()
+    }
+
+    /* ---------------- 选择层 ---------------- */
+
+    private fun openPicker(level: Int) {
+        pickerLevel = level
+        pickerSheet.visibility = View.VISIBLE
+        pickerScrim.visibility = View.VISIBLE
+        pickerRows.clear()
+        pickerAdapter.notifyDataSetChanged()
+        when (level) {
+            1 -> {
+                pickerBack.visibility = View.GONE
+                pickerTitle.text = "项目"
+                loadProjects()
+            }
+            else -> {
+                pickerBack.visibility = View.VISIBLE
+                pickerTitle.text = pickerProject.ifBlank { "会话" }
+                loadSessions()
+            }
+        }
+    }
+
+    private fun closePicker() {
+        pickerSheet.visibility = View.GONE
+        pickerScrim.visibility = View.GONE
+    }
+
+    private fun loadProjects() {
+        pickerLoading = true
+        pickerRows.clear()
+        pickerRows.add(PickerRow.Head("载入中"))
+        pickerAdapter.notifyDataSetChanged()
+        val client = PetClient { PetSettings.load(this) }
+        Thread({
+            val res = try { client.workspaces() } catch (_: Exception) { null }
+            val out = ArrayList<Ws>()
+            res?.json?.optJSONArray("workspaces")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    out.add(
+                        Ws(
+                            o.optString("id"),
+                            o.optString("title").ifBlank { o.optString("path") },
+                            o.optString("path"),
+                            o.optBoolean("pinned"),
+                        ),
+                    )
+                }
+            }
+            val pinnedTitle = res?.json?.optJSONObject("pinned")?.optString("title").orEmpty()
+            runOnUiThread {
+                pickerLoading = false
+                projects = out
+                if (pinnedTitle.isNotBlank()) {
+                    PetSettings.savePinnedTitle(this, pinnedTitle)
+                    refreshHeader()
+                }
+                pickerRows.clear()
+                if (out.isEmpty()) {
+                    pickerRows.add(PickerRow.Head("没有项目"))
+                } else {
+                    out.forEach { pickerRows.add(PickerRow.Proj(it)) }
+                }
+                pickerRows.add(PickerRow.Action("新建项目"))
+                pickerAdapter.notifyDataSetChanged()
+            }
+        }, "pet-projects").apply { isDaemon = true }.start()
+    }
+
+    private fun loadSessions() {
+        pickerRows.clear()
+        pickerRows.add(PickerRow.Head("载入中"))
+        pickerAdapter.notifyDataSetChanged()
+        val wsId = pickerProjectId
+        val client = PetClient { PetSettings.load(this) }
+        Thread({
+            val res = try {
+                client.get("sessions", if (wsId.isBlank()) emptyMap() else mapOf("workspaceId" to wsId))
+            } catch (_: Exception) {
+                null
+            }
+            val out = ArrayList<Sess>()
+            res?.json?.optJSONArray("rows")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    out.add(Sess(o.optString("id"), o.optString("title"), o.optLong("updatedAt")))
+                }
+            }
+            runOnUiThread {
+                sessions = out
+                pickerRows.clear()
+                if (out.isEmpty()) {
+                    pickerRows.add(PickerRow.Head("还没有会话"))
+                } else {
+                    out.forEach { pickerRows.add(PickerRow.SessRow(it)) }
+                }
+                pickerAdapter.notifyDataSetChanged()
+            }
+        }, "pet-sessions").apply { isDaemon = true }.start()
+    }
+
+    private var pickerProjectId = ""
+
+    private fun onPickerPick(pos: Int) {
+        val row = pickerRows.getOrNull(pos) ?: return
+        if (pickerLoading) return
+        when (row) {
+            is PickerRow.Proj -> {
+                pickerProjectId = row.ws.id
+                pickerProject = row.ws.title
+                pickProject(row.ws)
+            }
+            is PickerRow.SessRow -> pickSession(row.s)
+            is PickerRow.Action -> toast("新建项目在电脑上做")
+            else -> {}
+        }
+    }
+
+    /** 选项目 = 定好工作区，并在里面开一只新会话；操作完直接回到对话。 */
+    private fun pickProject(ws: Ws) {
+        closePicker()
+        refreshHeader()
+        PetSettings.savePinnedTitle(this, ws.title)
+        refreshHeader()
+        val client = PetClient { PetSettings.load(this) }
+        Thread({
+            var id = ""
+            try {
+                if (ws.id.isNotBlank()) client.switchWorkspace(ws.id)
+                id = client.newSession(fresh = true).json?.optString("sessionId").orEmpty()
+            } catch (_: Exception) {
+            }
+            runOnUiThread {
+                if (id.isNotBlank()) PetSettings.saveChatSession(this, id)
+                reload()
+            }
+        }, "pet-pick-project").apply { isDaemon = true }.start()
+    }
+
+    /** 选会话 = 把 App 的对话钉到那只上。 */
+    private fun pickSession(s: Sess) {
+        closePicker()
+        val client = PetClient { PetSettings.load(this) }
+        Thread({
+            try { client.bind(s.id) } catch (_: Exception) {
+            }
+            runOnUiThread {
+                PetSettings.saveChatSession(this, s.id)
+                reload()
+            }
+        }, "pet-pick-session").apply { isDaemon = true }.start()
+    }
+
+    /* ---------------- 按住说话 ---------------- */
+
+    @SuppressLint("MissingPermission")
+    private fun startHold() {
+        if (micBusy) return
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 41)
+            return
+        }
+        if (turn != null) {
+            toast("上一轮还没结束")
+            return
+        }
+        // 录的时候把唤醒引擎按住，免得它把用户这句话也当成唤醒词
+        sendServiceAction(FloatingPetService.ACTION_WAKE_PAUSE)
+        micBusy = true
+        micBtn.alpha = 0.55f
+        micBtn.text = "松手发送"
+        runBar.visibility = View.VISIBLE
+        runText.text = "听着"
+        val r = recorder ?: VoiceRecorder().also { recorder = it }
+        r.onAutoStop = { ui.post { finishHold() } }
+        val ok = r.start()
+        if (!ok) {
+            micBusy = false
+            micBtn.alpha = 1f
+            micBtn.text = "说话"
+            runBar.visibility = View.GONE
+            sendServiceAction(FloatingPetService.ACTION_WAKE_RESUME)
+            toast("麦克风不可用")
+        }
+    }
+
+    private fun finishHold() {
+        if (!micBusy) return
+        micBusy = false
+        micBtn.alpha = 1f
+        micBtn.text = "说话"
+        val r = recorder ?: return
+        val wav = try { r.stop() } catch (_: Exception) { null }
+        sendServiceAction(FloatingPetService.ACTION_WAKE_RESUME)
+        if (wav == null || wav.size < 1024) {
+            runBar.visibility = View.GONE
+            toast("没听清，再说一次")
+            return
+        }
+        runText.text = "听着"
+        val client = PetClient { PetSettings.load(this) }
+        Thread({
+            val text = try {
+                client.asr(wav).json?.optString("text").orEmpty().trim()
+            } catch (_: Exception) {
+                ""
+            }
+            runOnUiThread {
+                runBar.visibility = View.GONE
+                if (text.isBlank()) {
+                    // 没听清：不动输入框里已有的字，给一行能照做的短句
+                    input.setText("")
+                    toast("没听清，再说一次")
+                    return@runOnUiThread
+                }
+                // 听清了直接发：按住说话本来就是要「说一句、发出去」
+                input.setText(text)
+                sendChat()
+            }
+        }, "pet-asr").apply { isDaemon = true }.start()
+    }
+
+    /* ---------------- 小工具 ---------------- */
+
+    private fun sendServiceAction(action: String) {
+        runCatching {
+            startService(Intent(this, FloatingPetService::class.java).setAction(action))
+        }
+    }
+
+    private fun toast(msg: String) {
+        android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()
+    }
+
+    private fun copy(raw: String) {
+        try {
+            getSystemService(ClipboardManager::class.java)
+                .setPrimaryClip(ClipData.newPlainText("鲸灵", raw))
+            toast("已复制")
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun bubble(bg: Int, text: Int): GradientDrawable = GradientDrawable().apply {
+        cornerRadius = 16f * resources.displayMetrics.density
+        setColor(bg)
+    }
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    /** 本轮的流式文本（还没落库）。 */
+    private var liveText: String
+        get() = adapter.live
+        set(v) { adapter.live = v }
+
+    /* ---------------- 列表适配器 ---------------- */
+
+    private inner class ChatAdapter : BaseAdapter() {
+        var rows: List<ChatRow> = emptyList()
+        var live: String = ""
+        var error: String = ""
+        var onRetry: () -> Unit = {}
+
+        override fun getCount(): Int = rows.size + (if (error.isNotBlank()) 1 else 0)
+        override fun getItem(position: Int): Any? = rows.getOrNull(position)
+        override fun getItemId(position: Int): Long = position.toLong()
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            if (position >= rows.size) {
+                // 发送失败的那一行：可点，点一下重发
+                val v = convertView ?: layoutInflater.inflate(R.layout.item_history, parent, false)
+                val bubble = v.findViewById<FrameLayout>(R.id.itemBubble)
+                val text = v.findViewById<TextView>(R.id.itemText)
+                text.text = error
+                text.setTextColor(getColor(R.color.pet_accent))
+                bubble.background = null
+                v.setOnClickListener { onRetry() }
+                return v
+            }
+            val row = rows[position]
+            return when (row) {
+                is ChatRow.Me -> bindText(convertView, parent, row.text, mine = true)
+                is ChatRow.Pet -> if (row.rich) bindRich(convertView, parent, row.text) else bindText(convertView, parent, row.text, mine = false)
+                is ChatRow.Live -> bindText(convertView, parent, row.text, mine = false)
+            }
+        }
+
+        private fun bindText(convertView: View?, parent: ViewGroup, raw: String, mine: Boolean): View {
+            val v = convertView ?: layoutInflater.inflate(R.layout.item_history, parent, false)
+            val bubble = v.findViewById<FrameLayout>(R.id.itemBubble)
+            val text = v.findViewById<TextView>(R.id.itemText)
+            text.visibility = View.VISIBLE
+            text.text = if (mine) raw else MdPlain.of(raw)
+            text.setTextColor(getColor(if (mine) R.color.pet_bg else R.color.pet_text))
+            bubble.background = bubble(
+                if (mine) getColor(R.color.pet_accent) else getColor(R.color.pet_hint_bg),
+                0,
+            )
+            bubble.setPadding(dp(12), dp(9), dp(12), dp(9))
+            // 列表复用：先把可能挂在上面的渲染器摘掉，别让 WebView 跟着旧行跑
+            if (bubble.childCount > 1) bubble.removeViews(1, bubble.childCount - 1)
+            text.setOnLongClickListener { copy(raw); true }
+            return v
+        }
+
+        private fun bindRich(convertView: View?, parent: ViewGroup, raw: String): View {
+            val v = bindText(convertView, parent, raw, mine = false)
+            val bubble = v.findViewById<FrameLayout>(R.id.itemBubble)
+            val text = v.findViewById<TextView>(R.id.itemText)
+            val renderer = render ?: return v
+            val html = renderer.cached(raw)
+            if (html != null) {
+                text.visibility = View.GONE
+                renderer.attach(bubble, raw, html)
+                return v
+            }
+            // 宿主还没回渲染结果：先纯文本兜底，回来再换
+            renderer.request(raw) {
+                runOnUiThread {
+                    if (positionOf(raw) >= 0) notifyDataSetChanged()
+                }
+            }
+            return v
+        }
+
+        /** 只给「渲染完成通知」用：找到仍然显示这条文本的行，没人看就不刷。 */
+        fun positionOf(raw: String): Int = rows.indexOfFirst { it is ChatRow.Pet && it.rich && it.text == raw }
+    }
+
+    /* ---------------- 选择层适配器 ---------------- */
+
+    private inner class PickerAdapter : BaseAdapter() {
+        override fun getCount(): Int = pickerRows.size
+        override fun getItem(position: Int): Any? = pickerRows.getOrNull(position)
+        override fun getItemId(position: Int): Long = position.toLong()
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val v = convertView ?: layoutInflater.inflate(R.layout.item_history, parent, false)
+            val bubble = v.findViewById<FrameLayout>(R.id.itemBubble)
+            val text = v.findViewById<TextView>(R.id.itemText)
+            bubble.background = null
+            bubble.setPadding(dp(16), dp(14), dp(16), dp(14))
+            val row = pickerRows[position]
+            when (row) {
+                is PickerRow.Head -> {
+                    text.text = row.text
+                    text.setTextColor(getColor(R.color.pet_hint))
+                    text.textSize = 13f
+                }
+                is PickerRow.Proj -> {
+                    text.text = row.ws.title
+                    text.setTextColor(getColor(R.color.pet_text))
+                    text.textSize = 15f
+                }
+                is PickerRow.SessRow -> {
+                    val when_ = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(row.s.at))
+                    text.text = "${row.s.title.ifBlank { "未命名" }}   $when_"
+                    text.setTextColor(getColor(R.color.pet_text))
+                    text.textSize = 15f
+                }
+                is PickerRow.Action -> {
+                    text.text = row.text
+                    text.setTextColor(getColor(R.color.pet_accent))
+                    text.textSize = 15f
+                }
+            }
+            return v
+        }
+    }
+}

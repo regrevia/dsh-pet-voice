@@ -1,0 +1,33 @@
+.tmp/
+.venv/
+node_modules/
+asr/vosk-model*/
+*.log
+.DS_Store
+demo/certs/key.pem
+
+# 签名材料绝不入库
+android/keystore.properties
+android/keystore/*.jks
+
+# 本地私有凭据 / 服务器配置（脚本：scripts/import-server-creds.sh）—— 绝不入库、绝不贴对话
+local/
+*.local.env
+
+# 构建产物与发布包（APK 走 Releases，不进仓库）
+dist/
+*.apk
+*.aab
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+
+# 演示端虚拟环境与自签证书
+demo/certs/
+
+# 素材生成缓存
+scripts/.cache/
+
+# 基准测试的编译产物
+bench/build/

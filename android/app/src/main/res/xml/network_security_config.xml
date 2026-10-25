@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  自签 https 的信任配置（配合 scripts/tls-ca.sh）：
+  * 系统 CA 照旧信任 —— 你换回真域名/Cloudflare 隧道时不用改包；
+  * 额外信任一张「大肥鱼本地 CA」，就是 res/raw/pet_ca.pem（公开证书，私钥不在 App 里）。
+  换了 CA 必须重跑 scripts/tls-ca.sh 并重新出包。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/pet_ca" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

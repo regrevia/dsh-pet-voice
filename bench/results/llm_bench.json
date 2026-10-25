@@ -1,0 +1,67 @@
+{
+  "endpoint": "http://192.168.11.18:30055/v1/chat/completions",
+  "token_read_from": "~/.dsh (not printed)",
+  "measured_at": "2026-10-24T13:26:55+0800",
+  "rows": [
+    {
+      "case": "short",
+      "model": "anthropic/DeepSeek-V4.1-Flash",
+      "n": 5,
+      "ttfb_content_ms": {
+        "min": 3037.7,
+        "median": 3173.7,
+        "max": 3179.0
+      },
+      "ttfb_any_ms": {
+        "min": 240.9,
+        "median": 264.0,
+        "max": 358.6
+      },
+      "total_ms": {
+        "min": 3196.3,
+        "median": 3321.0,
+        "max": 4403.0
+      },
+      "chunks": {
+        "min": 0,
+        "median": 7,
+        "max": 8
+      },
+      "chars": {
+        "min": 0,
+        "median": 59,
+        "max": 65
+      }
+    },
+    {
+      "case": "long",
+      "model": "anthropic/DeepSeek-V4.1-Flash",
+      "n": 5,
+      "ttfb_content_ms": {
+        "min": 1098.3,
+        "median": 1679.7,
+        "max": 2470.0
+      },
+      "ttfb_any_ms": {
+        "min": 251.9,
+        "median": 261.1,
+        "max": 457.8
+      },
+      "total_ms": {
+        "min": 1810.2,
+        "median": 2815.0,
+        "max": 4525.8
+      },
+      "chunks": {
+        "min": 0,
+        "median": 34,
+        "max": 51
+      },
+      "chars": {
+        "min": 0,
+        "median": 125,
+        "max": 168
+      }
+    }
+  ]
+}

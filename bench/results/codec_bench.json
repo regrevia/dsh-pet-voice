@@ -1,0 +1,51 @@
+{
+  "source": "mid_20 (17 字, 4.23s)",
+  "rows": [
+    {
+      "case": "opus_16k_24kbps",
+      "encode_ms": {
+        "median": 47.5
+      },
+      "decode_ms": {
+        "median": 24.4
+      },
+      "bytes": 12165,
+      "effective_kbps": 23.0,
+      "encode_rtf": 0.0112,
+      "packet_ms": 20,
+      "packets_for_4_23s": 212,
+      "note": "含 ffmpeg 进程启动开销，故为上限"
+    },
+    {
+      "case": "opus_16k_16kbps",
+      "encode_ms": {
+        "median": 47.2
+      },
+      "decode_ms": {
+        "median": 26.4
+      },
+      "bytes": 8487,
+      "effective_kbps": 16.0,
+      "encode_rtf": 0.0112,
+      "packet_ms": 20,
+      "packets_for_4_23s": 212,
+      "note": "含 ffmpeg 进程启动开销，故为上限"
+    },
+    {
+      "case": "aac_16k_32kbps",
+      "encode_ms": {
+        "median": 35.9
+      },
+      "decode_ms": {
+        "median": 22.3
+      },
+      "bytes": 18443,
+      "effective_kbps": 34.9,
+      "encode_rtf": 0.0085,
+      "packet_ms": 20,
+      "packets_for_4_23s": 212,
+      "note": "含 ffmpeg 进程启动开销，故为上限"
+    }
+  ],
+  "measured_at": "2026-10-24T13:28:01+0800"
+}

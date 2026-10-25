@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/itemRow"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:paddingStart="12dp"
+    android:paddingTop="3dp"
+    android:paddingEnd="12dp"
+    android:paddingBottom="3dp">
+
+    <!-- 气泡本体：纯文字和富文本渲染器（WebView）都挂这一层，圆角/底色只在代码里定一次 -->
+    <FrameLayout
+        android:id="@+id/itemBubble"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content">
+
+        <TextView
+            android:id="@+id/itemText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:lineSpacingExtra="3dp"
+            android:maxWidth="292dp"
+            android:textColor="@color/pet_text"
+            android:textSize="15sp" />
+    </FrameLayout>
+</LinearLayout>

@@ -1,0 +1,284 @@
+# dsh-pet-voice · 鲸灵随身宠物（手机端语音壳）
+
+把 DeepSeek Harness 变成一只**能用嘴使唤**的宠物：手机打开一个页面，喊「鲸灵」，
+说完松手，活就派给电脑上的 DSH；回答边生成边读出来，像素鲸鱼娘同步做口型。
+可以随时切换项目（workspace）、切换人设（agent preset），基础操作（新建会话 /
+打断 / 自检 / 查看配对链接）都在同一个页面里。
+
+- 形态：**宿主侧 Cordis 插件**，自己在 `webServer` 上挂 `/pet-voice/` 一条带 token
+  的页面 + 一组 JSON/SSE/长轮询接口。不改官方 Harness 页面，不动 profile 的
+  `package.json`（装的时候由 `plugin_manager` 代管）。
+- 语音识别：手机浏览器自带的 Web Speech（Chrome / Edge / 安卓可用）；识别不了的
+  浏览器自动退回到输入框。
+- 语音合成：`speechSynthesis`，按句子切分边生成边读，说话时鲸鱼娘张嘴。
+- 没装、没法用时的兜底：一直有输入框，能打字派活。
+
+---
+
+## 安装
+
+```bash
+# 1. 把 bundle 放进本地插件目录
+rsync -a --delete plugins/dsh-pet-voice/ ~/.dsh/plugins/dsh-pet-voice/
+
+# 2. 装进 desktop profile（也可以在 DSH 里让 agent 调 plugin_manager）
+#    plugin_manager action=install_bundle target=~/.dsh/plugins/dsh-pet-voice
+```
+
+**首次安装**要让桌面端重新读一遍 `cordis.patch.yml`（重启 App 一次）。
+**之后改代码不用重启**：同步文件后把插件关一下再开，宿主会重新加载模块：
+
+```
+plugin_manager action=set_plugin target=include:dsh-pet-voice enabled=false
+plugin_manager action=set_plugin target=include:dsh-pet-voice enabled=true
+```
+
+> 注意 `target` 要用 `include:dsh-pet-voice`；直接写包名会报 `unknown-plugin`。
+
+装好后页面在 `ctx.webServer.getOrigin()` 下，本机就是
+`http://127.0.0.1:58686/pet-voice/`（端口按你的宿主实际值）。
+
+### 手机怎么打开
+
+浏览器**只允许 https 或 localhost 使用麦克风**，所以手机必须走隧道：
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:58686 --no-autoupdate --protocol http2
+```
+
+拿到地址之后，手机访问（**推荐命名隧道**：`scripts/tunnel.sh --named`，域名固定、可挂 Access；
+快速隧道 `--url` 只适合临时试，域名每次重启都变）：
+
+```
+https://xxx-xxx.trycloudflare.com/pet-voice/?k=<token>
+```
+
+`?k=` 只做一次：校验通过会下发 `HttpOnly` cookie 并 303 跳到 `/pet-voice/`，
+以后直接开 `/pet-voice/` 就行。token 在 `~/.dsh/pet-voice/token`（0600），
+和任何人分享链接＝把你的 DSH 交出去，别外传。
+
+**换密码 / 怀疑泄露**：`rm ~/.dsh/pet-voice/token`，下一个请求会自动生成新 token
+（不用重启）；旧 cookie 立刻失效，重新用新的 `?k=` 链接打开即可。页面里
+`⚙ → 复制配对链接` 拿到的也是当前生效的完整链接（该接口要求已有 cookie）。
+
+---
+
+## 页面能做什么
+
+| 位置 | 动作 | 说明 |
+| --- | --- | --- |
+| 底部大圆键 | 按住说话 | 松手即发送；按住时图标变成波形、按钮转红 |
+| `常听：开/关` | 免手操作 | 打开后持续听，只认「鲸灵 / 小鲸 / 嗨鲸灵 / hey whale / hello whale」 |
+| `朗读：开/关` | 语音合成 | 关掉就只看文字 |
+| 中间对话区 | 最近 2–3 轮 | 用户一句话 + 鲸灵回复（最多 3 行，超出裁切），自动滚到最新 |
+| 输入框 | 打字派活 | 语音不可用时的兜底，也方便贴着说话 |
+| ⚙ 面板 | 切项目 / 切人设 / 开新会话 / 打断 / 自检 / 复制配对链接 | 切项目＝切到那个 workspace 下干活 |
+
+- 开关统一写成「名字：状态」，打开时按钮高亮（不是「看起来像按钮的状态字」）。
+- 唤醒词命中后会「叮」一声 + 轻震动，然后进入这一轮的收音；**停顿约 1.1 秒**
+  自动提交，不用点发送。
+- 状态行固定中文：`我在～` / `在听，喊我鲸灵` / `在想…` / `在说…`。
+- 说「停一下」这类语义打断不保证——要打断请点面板里的「打断当前回答」，
+  它会调宿主的 `sessionController.cancel`。
+- 回答第一句出来就开始读，不等全文；代码块读成「（代码块）」，不念符号。
+
+---
+
+## 接口（自己写客户端时用）
+
+都在 `/pet-voice/api/` 下，除静态资源外全部要求 cookie 或 `?k=`：
+
+| 方法 | 路径 | 入参 / 出参 |
+| --- | --- | --- |
+| GET | `state` | 项目列表、人设、最近会话、唤醒词、`petSession` / `dispatchTarget`；**只给 token 前 8 位**（`tokenHint`），永远不回明文 token。`current` 仅用于界面展示 |
+| POST | `new` | `{workspaceId?, projectPath?, preset?, fresh?}` → `{sessionId, reused}`；**不给项目时落到专属会话** |
+| POST | `dispatch` | `{text, sessionId?}` → 1.2s 内已受理返回 `202 {accepted:true, sessionId}`，已结束返回 `200`。**不带 `sessionId` 一律派给专属会话**（`pet-session.json` 那只，钉在 Pet 项目），绝不回退到界面当前会话；显式给了但不存在 → `404` |
+| POST | `say` | `{text, voice?, id?}` → `{ok, seq, queued}`；`text` 超 300 字截断并标 `truncated:true`；队列只留最近 20 条；同 `id` 重复投递只入队一次 |
+| GET | `pair` | `{ok, publicBase, source:"tunnel"|"lan"|"local", tunnelAt, alive?, note?}`；页面引导卡用它填「手机上能打开的地址」。**不含 token**：`tunnel` 取 `xiaoai-url.txt` 的 origin，`lan` 用本机非回环 IPv4+宿主端口，`local` 只有 127.0.0.1（手机打不开）。`tunnelAt` 里的 `?k=` 一律替换成 `<已省略>`；`tunnel` 档会**服务端探活**（`publicBase + api/pair`，1.5 s 超时、30 s 缓存、并发去重），401 也算活着；探不通时 `alive:false` + `note:"隧道域名可能已过期（cloudflared 重启会换域名）"`，**不会**降级到 lan（私网地址手机更打不开） |
+| GET | `say?since=` | `{items:[{seq,text,voice,at}], cursor}`，按 `seq` 升序，最多 20 条；`since=-1` 只对齐游标不回放（页面刷新不重播） |
+| GET | `stream?sessionId=` | SSE：`hello` / `start` / `delta {text}` / `tool {name}` / `final {text}` / `end` / `error {message}`，15s 一次心跳 |
+| GET | `poll?sessionId=&cursor=&wait=` | 长轮询兜底，语义同 SSE。`cursor` 传帧序号续传；**`cursor=-1` 是「只对齐」**：立刻回 `{frames:[], cursor:<最新 seq>}`，用来接上会话时不重播历史 |
+| POST | `cancel` | `{sessionId}` |
+| GET | `link` | 当前生效的完整配对链接（要已登录的 cookie） |
+| GET | `selfcheck` | 只读探针；`?prompt=<sessionId>` 时额外跑一次真实 LLM 往返（会计费） |
+| GET | `tts/voices` | `{ok, ready, default, defaultPreset, presets[], voices[], hint?}`；`presets` 是 4 个形象档位（见下）；`ready:false` 时页面回退系统语音 |
+| GET | `tts?text=&preset=` | 神经语音（Edge `edge-tts`）直出 `audio/mpeg`；`preset` 由服务端解析成 voice+rate+pitch；也可显式传 `&voice=&rate=+16%&pitch=+22Hz` 覆盖；未知档位 → 400；需先跑 `tts/setup.sh` |
+| POST | `asr` | 请求体就是 44 字节头 + 16 kHz 单声道 PCM 的 WAV；转发给常驻 worker（`asr/asr-worker.py` → `127.0.0.1:52399`）→ `{ok, text, ms}`，响应头带 `X-Asr-Ms`。空音频/坏音频 → 400，超过 4 MB → 413；worker 没装 → 503 + `hint`；worker 被杀了下次请求会自动拉起并完成本次识别 |
+| GET | `asr` | 只读探针：`{ok, ready, running, model, pid?}`。`ready:false` 说明缺 venv 或 worker 脚本，`hint` 里给缺的路径 |
+| GET | `update` | 更新通道：读 `~/.dsh/pet-voice/update/latest.json` → `{ok, versionCode, versionName, size, sha256, file, notes, publishedAt, url}`；还没发布过 → `versionCode:0` + 可读 `hint` |
+| GET / HEAD | `../download/<file>.apk` | 下载已发布的 APK（**同样要 cookie**）；支持 `Range`（206 / 越界 416），`HEAD` 只回头，路径穿越 → 400/404，非 GET/HEAD → 405 |
+
+### 发新版 + 手机自更新
+
+```bash
+# 1. 出包（同一个 keystore，才能覆盖安装且保住配对信息）
+JAVA_HOME=~/jdk17/Contents/Home ~/.gradle/wrapper/dists/gradle-8.13-bin/*/gradle-8.13/bin/gradle \
+  -p android :app:assembleRelease --offline \
+  -Pandroid.aapt2FromMavenOverride=/opt/homebrew/share/android-commandlinetools/build-tools/35.0.0/aapt2
+
+# 2. 发布（算 sha256、原子写 latest.json；手机下一次检查就能看到）
+node scripts/publish-apk.mjs android/app/build/outputs/apk/release/app-release.apk \
+  --version-code 6 --version-name 0.3.1 --notes "这一版改了什么"
+```
+
+手机端：`更多 → 检查更新` → `下载并安装`。走的是 `PackageInstaller`（零 androidx 的代价），
+同一个包名 + 同一个签名 ⇒ **覆盖安装**，`pet_prefs` 里的地址/token/唤醒词/尺寸全部保留，
+不需要重新扫码。想彻底停掉所有服务（含自启动）用 `更多 → 关闭全部服务`。
+
+### 换隧道域名：`scripts/tunnel.sh`
+
+```bash
+scripts/tunnel.sh --check          # 只校验 cloudflared / 宿主端口 / xiaoai.json，不起隧道
+scripts/tunnel.sh                  # 默认端口 52356：快速隧道 → 抓 https://*.trycloudflare.com（临时）
+scripts/tunnel.sh --named          # 自己的域名 + 命名隧道（读 ~/.dsh/pet-voice/cloudflared.token/.host）
+                                   # → 写回 ~/.dsh/pet-voice/xiaoai-url.txt（?k= 用已有 urlSecret，chmod 600）
+scripts/tunnel.sh --stop           # 停掉本脚本上次起的隧道（读 tunnel.pid）
+```
+
+- cloudflared 找不到时依次回退：`PATH` → `~/.dsh/profiles/desktop/node_modules/cloudflared/bin/cloudflared` → `npx --yes cloudflared`；
+- 隧道进程 `nohup` 到 `~/.dsh/pet-voice/tunnel.log`，脚本**只打印 PID 与日志路径**就退出（不会把隧道挂在前台）；
+- `?k=` 只写进文件，任何输出里都不出现；公网地址（不含令牌）会打印，可以截图；
+- 写完后的 30 s 内 `/api/pair` 会读到新域名（探活结果有缓存，30 s 后自动刷新）。
+
+## 音色档位（形象 = 声音）
+
+页面「设置 → 音色」是 4 个档位，每档 = 一个真实 zh-CN 女声 + 语速 + 音高，
+选中写 `localStorage['pv.ttsPreset']`（同时把音色写 `pv.ttsVoice`），刷新后保持：
+
+| id | 音色 | rate | pitch | 听感 |
+| --- | --- | --- | --- | --- |
+| `whale`（默认） | `zh-CN-XiaoyiNeural` | `+6%` | `+8Hz` | 清亮少女，贴像素蓝发鲸鱼娘 |
+| `genki` | `zh-CN-XiaoyiNeural` | `+16%` | `+22Hz` | 元气，语速快调门高 |
+| `gentle` | `zh-CN-XiaoxiaoNeural` | `-4%` | `-4Hz` | 温柔，慢一点低一点 |
+| `cool` | `zh-CN-XiaoxiaoNeural` | `-10%` | `-12Hz` | 清冷，更慢更低 |
+
+> 2026-10-24 用 `edge_tts.list_voices()` 核过：edge-tts 里的 zh-CN **女声**只有
+> Xiaoxiao(Warm) / Xiaoyi(Lively) / Xiaobei(Humorous) / Xiaoni(Bright) 四个（其余 zh-CN 是男声），
+> 所以四档是「两只音色 × 四种韵律」，不是八个音色。要换嗓子只改 `TTS_PRESETS`，
+> 前端下拉、试听、`/api/say` 播放全部同源。
+
+「试听这句」固定念「我是鲸灵，今天想让我帮你做点什么？」，试听会清掉未播完的排队句。
+
+**验证 pitch/rate 真的透传**（同句、不同档位，音频字节必然不同）：
+
+```bash
+# 用任意 URL 编码工具把试听句编码后填到 text=
+curl -s -H "Cookie: pkv_<前8位>=<token>" \
+  'http://127.0.0.1:<port>/pet-voice/api/tts?text=<编码后的试听句>&preset=genki' -o /tmp/genki.mp3
+# 直接看子进程收到的参数（stderr 会打 [tts] voice=... rate=+16% pitch=+22Hz chunks=.. bytes=..）
+~/.dsh/pet-voice/tts-venv/bin/python \
+  ~/.dsh/plugins/dsh-pet-voice/tts/stream.py zh-CN-XiaoyiNeural 你好 +16% +22Hz >/dev/null
+```
+
+`/api/say` 入队的那条**也走当前档位**：服务端只记 `voice`（可空），页面播放时以本地档位为准
+（换档位不必重新喊一次，刷新页面即按新档位念）。
+
+## 加到主屏 / Siri 唤醒
+
+手机页面 dock 上的「加主屏」打开引导卡（**不提供二维码**，只显示地址），3 步：Safari 分享 → 添加到主屏；快捷指令新建「打开 URL」贴页面地址；
+捷径改名「打开鲸灵」→「嘿 Siri，打开鲸灵」。卡里显示的地址来自 `GET /pet-voice/api/pair`，按可信度分三档并如实标注：
+
+- `tunnel`：`~/.dsh/pet-voice/xiaoai-url.txt` 的公网地址（小爱隧道落地时写入），显示「✅ 公网隧道地址：手机流量也能直接打开」；
+- `lan`：没有隧道时用本机非回环 IPv4 + 宿主端口，显示「⚠️ 同一个 WiFi 能打开，出门打不开」；
+- `local`：只剩 127.0.0.1，显示「⚠️ 本机地址：手机打不开，先在电脑上起云隧道」。
+
+`tunnel` 档会探活：通 → 绿色 ✅；不通 → 黄色 ⚠️ +「隧道域名可能已过期（cloudflared 重启会换域名）」，
+但**地址仍然是隧道域名**（不降级成私网地址）。换域名走 `scripts/tunnel.sh`（见下）。
+
+地址本身**不含令牌**（`?k=` 在一次 303 跳转后已从 URL 消失），配对靠「复制配对链接」粘贴或首次手输令牌。
+二维码图已于 2026-10-24 删除：`/pet-voice/assets/*` 是不鉴权静态路由，而那张图编的是带令牌的完整配对链接 ——
+任何能碰到隧道域名的人都能白拿一份令牌。要恢复扫码，必须改成只编地址、令牌手输。
+卡默认收起，展开后在 390×844 上内部滚动，不挤压对话区。
+
+## 语音播报（外部喊手机说话）
+
+`POST /pet-voice/api/say` 是给喇叭 / 手表 / MCP 用的：「让手机念这句」。服务端只入队
+（内存环形队列，20 条）并广播 `event: say`；页面收到就用**现有神经语音管线**念出来，
+正在念的那句不打断，新的一句排队尾。隧道环境收不到 SSE 时，页面每 1.5 秒
+`GET /api/say?since=<cursor>` 补拉。页面启动时先用 `since=-1` 对齐游标，所以刷新
+不会把历史播报重播一遍。
+
+```bash
+curl -s -X POST -H "Cookie: pkv_<前8位>=<token>" -H 'content-type: application/json' \
+  -d '{"text":"我是鲸灵，播报测试"}' http://127.0.0.1:<port>/pet-voice/api/say
+# {"ok":true,"seq":1,"queued":1}
+curl -s -H "Cookie: pkv_<前8位>=<token>" 'http://127.0.0.1:<port>/pet-voice/api/say?since=0'
+# {"ok":true,"items":[{"seq":1,"text":"我是鲸灵，播报测试","voice":"zh-CN-XiaoyiNeural","at":"..."}],"cursor":1}
+```
+
+### 推送为什么有两套
+
+- **SSE**：本机 / 直连 https 用。服务端先补 2KB 注释padding 再 `event: hello`，避免
+  中间层憋着不吐头；页面收到 `hello` 就算「这条连接真在推」。
+- **长轮询**：cloudflared 之类**缓冲整段 SSE** 的隧道用（实测 quic/http2 都一样：
+  响应头 200 立刻到、body 一个字节都不来）。页面 4 秒内既没有 `hello` 也没有任何帧，
+  才切成 `poll` 并提示一句；能推的环境不会走到这条分支。
+- 服务端给每个会话留最近 **400 帧**（内存，最多 40 个会话），所以长轮询断线重连
+  不丢帧；但**不会**在接上会话时把历史当新消息重播（见 `cursor=-1`）。
+
+---
+
+## 已离线验证（不需要装 DSH）
+
+```bash
+HOME=/tmp/pvtest node plugins/dsh-pet-voice/selftest.mjs
+# selftest: 131/131 通过
+```
+
+假 `ctx` + 真 http server，覆盖：token 门禁（401 / `?k=` 303 + `HttpOnly` cookie）、
+静态资源类型与路径穿越、`state` 结构（**不含明文 token**、`tokenHint` 是前 8 位）、
+`/api/link` 的 401 与正确链接、`poll` 的 401 / 回放 / `cursor=-1` 对齐、
+`new` 的复用与 `fresh`、`dispatch` 的 `prompt` 契约（`mode:'queue'`、
+`content[0].type==='text'`、`requestId`、时区）、空文本 400、`cancel` 转发、
+SSE 三种帧（`delta` / `end` / `final`）与**会话串台**、`selfcheck`，
+以及**派发落点**（不带 `sessionId` → `pet-session.json` 那只，且 ≠ `state.current`
+/ `remembered`；显式不存在 → 404）、`/api/say` 的 401 / 入队 / 游标 / 300 字截断 /
+幂等 id / 队列 cap 20、神经语音的 401 / 空文本 / 超长 / 未知音色 / 缺 venv 提示。
+
+真机整链路（会真的跑一次模型调用，会计费）：
+
+```bash
+# 本机
+node plugins/dsh-pet-voice/e2e.mjs
+# 走隧道（验证长轮询兜底）
+BASE=https://xxx-xxx.trycloudflare.com node plugins/dsh-pet-voice/e2e.mjs
+```
+
+`e2e.mjs` 会打印 `SUMMARY {transport, frames, deltas, firstDeltaMs, final}`，
+失败时退出码 1。可用环境变量：`BASE`、`PV_TOKEN`、`PV_PROJECT`、`PV_TEXT`、
+`PV_TIMEOUT`；`--transport=sse|poll|auto` 强制传输方式。
+
+页面视觉：Chrome headless 在 390×844（DPR 2）下截图核对（一屏放得下、对话气泡
+不遮输入区、麦克风是内联 SVG、能推的环境不出现「已切到长轮询」）。
+
+## 还没验证的 / 已知限制
+
+1. **iOS Safari 没有 Web Speech 识别**：页面会明确提示「这个浏览器不支持语音识别」，
+   只能用输入框打字；要真机语音得加服务端 STT（SenseVoice 之类）。
+2. iOS 每次会话要重新授权麦克风；TTS 需要先有一次用户手势解锁（页面已预热一次）。
+3. `sessionController.create(request)` 的真实入参名（`workspaceId` / `cwd` /
+   `agentPreset`）——目前按最合理形状发，失败时 `selfcheck` 会带出真实报错。
+4. `sessions` 的返回行结构（只做了多路兜底：`sessionId` / `id` / `session.id`）。
+5. 长轮询在隧道上的首字延迟明显高于 SSE（隧道每轮一次请求），功能性一致。
+6. 会话正被别的客户端占用时，派发的消息会在宿主侧排队，页面看着「没反应」——
+   等它排到就好；用 `⚙ → 开新会话` 可以立刻拿一只干净会话。
+
+## 排查
+
+| 现象 | 查什么 |
+| --- | --- |
+| 打开是 token 输入页 | 正常，粘 `~/.dsh/pet-voice/token`；或直接用 `?k=` 链接 |
+| 「连不上 DSH 宿主」 | 插件没装/没重启；`/pet-voice/api/selfcheck` 看哪一步失败 |
+| 能打字、按麦没反应 | 页面不是 https；或浏览器没给麦克风权限；面板提示会写明 |
+| 有文字没声音 | 手机静音开关 / 「朗读」被关；iOS 需要先点一下页面解锁音频 |
+| 派发了没回应 | 点「宿主自检」；`?prompt=` 模式能跑通说明到模型这层是好的 |
+| 提示「已切到长轮询」 | 说明当前隧道把 SSE 缓冲了，属于预期兜底；同一提示只出现一次 |
+
+## 卸载
+
+```bash
+# 在 DSH 里
+plugin_manager action=remove_bundle target=dsh-pet-voice
+```
+
+token / 项目记忆留在 `~/.dsh/pet-voice/`，要清就 `rm -rf ~/.dsh/pet-voice`。

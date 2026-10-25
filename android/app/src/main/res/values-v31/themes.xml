@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ 启动页：不要白屏闪一下，用同色底 + 鲸鱼娘 -->
+<resources>
+    <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/pet_bg</item>
+        <item name="android:colorAccent">@color/pet_accent</item>
+        <item name="android:statusBarColor">@color/pet_bg</item>
+        <item name="android:navigationBarColor">@color/pet_bg</item>
+        <item name="android:windowSplashScreenBackground">@color/pet_bg</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/ic_launcher_background</item>
+    </style>
+</resources>

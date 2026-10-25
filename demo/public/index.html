@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<meta name="theme-color" content="#04121d" />
+<title>鲸灵 · 随身宠物</title>
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <canvas id="sea" aria-hidden="true"></canvas>
+  <div class="rays" aria-hidden="true"></div>
+  <div class="vignette" aria-hidden="true"></div>
+
+  <main id="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="led" id="led"></span>
+        <span class="brand-name">鲸灵</span>
+        <span class="brand-code">WHALE-01</span>
+      </div>
+      <div class="hud">
+        <button class="icon" id="btn-voice" title="声音开关" aria-label="声音开关">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/><path class="wave" d="M16 8.5a4.5 4.5 0 0 1 0 7M18.5 6a8 8 0 0 1 0 12" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>
+        </button>
+        <button class="icon" id="btn-settings" title="设置" aria-label="设置">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="1.7" fill="none"/><path d="M12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M18.4 5.6l-1.6 1.6M7.2 16.8l-1.6 1.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <section class="stage" id="stage">
+      <div class="halo" id="halo" aria-hidden="true"></div>
+      <div class="pet-wrap" id="pet-wrap">
+        <canvas id="pet" width="112" height="112" aria-label="像素鲸鱼娘"></canvas>
+      </div>
+      <div class="floor" aria-hidden="true"></div>
+      <div class="state" id="state"><span class="dot"></span><span id="state-text">在线</span></div>
+    </section>
+
+    <section class="bubble" id="bubble" aria-live="polite">
+      <p id="bubble-text"></p>
+      <div class="typing" id="typing" hidden><i></i><i></i><i></i></div>
+    </section>
+
+    <section class="log" id="log" hidden></section>
+
+    <section class="dock" id="dock">
+      <div class="chips" id="chips">
+        <button class="chip" data-say="陪我聊聊天吧">陪我聊聊</button>
+        <button class="chip" data-say="给我讲个冷笑话">讲个笑话</button>
+        <button class="chip" data-say="唱一句歌给我听">唱一句</button>
+        <button class="chip" data-say="我今天有点累">今天好累</button>
+        <button class="chip" data-say="你现在在哪里呀">你在哪</button>
+      </div>
+      <div class="inputbar">
+        <button class="mic" id="mic" aria-label="按住说话">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M12 3.5a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0v-5a3 3 0 0 1 3-3z" fill="currentColor"/><path d="M6.5 11a5.5 5.5 0 0 0 11 0M12 16.5V20M9.5 20h5" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linecap="round"/></svg>
+          <span class="ring"></span>
+        </button>
+        <input id="text" type="text" autocomplete="off" enterkeyhint="send" placeholder="跟鲸灵说点什么…" />
+        <button class="send" id="send" aria-label="发送">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 11.5 20 4l-6.5 16-2.2-6.3L4 11.5z" fill="currentColor"/></svg>
+        </button>
+      </div>
+      <div class="hint" id="hint">点麦克风说话 · 也可以直接打字</div>
+    </section>
+  </main>
+
+  <div class="sheet-backdrop" id="sheet-backdrop" hidden></div>
+  <aside class="sheet" id="sheet" hidden>
+    <div class="sheet-grip"></div>
+    <h2>设置</h2>
+    <label class="row"><span>语音回复</span><input type="checkbox" id="opt-voice" checked /></label>
+    <label class="row"><span>连续对话<small>说完自动再听 6 秒</small></span><input type="checkbox" id="opt-cont" /></label>
+    <label class="row"><span>音色</span>
+      <select id="opt-tone">
+        <option value="cute">软萌（升调）</option>
+        <option value="soft">温柔</option>
+        <option value="mei">美佳</option>
+      </select>
+    </label>
+    <label class="row"><span>显示文字记录</span><input type="checkbox" id="opt-log" /></label>
+    <div class="sheet-meta" id="sheet-meta">连接中…</div>
+    <p class="sheet-note">声音与识别都在这台电脑上完成；手机只是屏幕、麦克风和喇叭。手机若通过 http:// 局域网地址打开，浏览器会禁用麦克风，请改用 https:// 地址（首次点“继续访问”）。</p>
+    <button class="sheet-close" id="sheet-close">好的</button>
+  </aside>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

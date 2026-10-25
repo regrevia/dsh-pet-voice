@@ -1,0 +1,29 @@
+[
+  {
+    "audioSeconds" : 2.421,
+    "caseName" : "short_12",
+    "chars" : 11,
+    "chunks" : 209,
+    "firstBufferMs" : 330.5,
+    "totalMs" : 348.2,
+    "voice" : "Tingting"
+  },
+  {
+    "audioSeconds" : 4.232,
+    "caseName" : "mid_20",
+    "chars" : 17,
+    "chunks" : 365,
+    "firstBufferMs" : 161.4,
+    "totalMs" : 185.4,
+    "voice" : "Tingting"
+  },
+  {
+    "audioSeconds" : 10.873,
+    "caseName" : "long_40",
+    "chars" : 46,
+    "chunks" : 937,
+    "firstBufferMs" : 155.8,
+    "totalMs" : 215.1,
+    "voice" : "Tingting"
+  }
+]

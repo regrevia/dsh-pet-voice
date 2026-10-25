@@ -1,0 +1,342 @@
+#!/usr/bin/env node
+/**
+ * 发布一个 APK 到本机更新通道：
+ *
+ *   node scripts/publish-apk.mjs dist/jingling-0.3.0.apk --notes "修了语音唤醒"
+ *
+ * 干的事（按顺序）：
+ *   1. 校验 APK（存在、是 zip、文件名安全）——不校验就发，等于把 404 页面推给手机；
+ *   2. 读出版本号：优先命令行显式给的，其次 aapt2/aapt dump badging，最后 apktool 解包；
+ *   3. 复制到发布目录（先写临时名再 rename，手机下到一半不会看到半个文件）；
+ *   4. 算 sha256 + 字节数，原子写 latest.json（临时文件 + rename）。
+ *
+ * 为什么要 sha256：手机端下载完要校验完整性，隧道路径偶尔会被中间层缓存/截断，
+ * 有 hash 才能区分「网络坏了」和「服务端发错了」。size 一起带上省一次 HEAD。
+ *
+ * 目录默认 ~/.dsh/pet-voice/update，可用 --dir 或 DSH_PET_UPDATE_DIR 改（自测用）。
+ * 零依赖：只用 node:fs / node:crypto / node:child_process。
+ */
+
+import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { basename, delimiter, dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const UPDATE_DIR = resolve(process.env.DSH_PET_UPDATE_DIR || join(homedir(), '.dsh', 'pet-voice', 'update'))
+/** 和插件里的白名单保持一致：没有 `/`、不以 `.` 开头。 */
+const APK_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.apk$/i
+const USAGE = `用法：
+  node scripts/publish-apk.mjs <apk 路径> [--notes "更新说明"] [--version-code 5] [--version-name 0.3.0]
+
+  --dir <目录>      发布到别处（默认 ${UPDATE_DIR}）
+  --version-code N  显式指定 versionCode（不给就自己读 APK）
+  --version-name S  显式指定 versionName
+  --notes TEXT      写进 latest.json 的更新说明，App 更新弹窗直接显示
+  -h, --help        看这个
+
+例：
+  node scripts/publish-apk.mjs dist/jingling-0.3.0.apk --notes "支持本机语音识别"`
+
+function fail(message, hint) {
+  console.error(`✗ ${message}`)
+  if (hint) console.error(`  ${hint}`)
+  process.exit(1)
+}
+
+function parseArgs(argv) {
+  const options = { notes: '', versionCode: null, versionName: null, dir: UPDATE_DIR, apk: null }
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]
+    const next = () => {
+      const value = argv[index + 1]
+      if (value === undefined) fail(`${arg} 后面缺参数`)
+      index += 1
+      return value
+    }
+    if (arg === '-h' || arg === '--help') {
+      console.log(USAGE)
+      process.exit(0)
+    } else if (arg === '--notes') {
+      options.notes = String(next()).trim()
+    } else if (arg === '--version-code') {
+      const value = Number(next())
+      if (!Number.isInteger(value) || value <= 0) fail(`--version-code 要正整数，收到 ${value}`)
+      options.versionCode = value
+    } else if (arg === '--version-name') {
+      options.versionName = String(next()).trim()
+      if (!options.versionName) fail('--version-name 不能为空')
+    } else if (arg === '--dir') {
+      options.dir = resolve(next())
+    } else if (arg.startsWith('-')) {
+      fail(`不认识的参数 ${arg}`, USAGE)
+    } else if (options.apk) {
+      fail(`只能发布一个 APK（已经拿到 ${options.apk}）`)
+    } else {
+      options.apk = arg
+    }
+  }
+  if (!options.apk) fail('缺 APK 路径', USAGE)
+  return options
+}
+
+// ---------------------------------------------------------------------------
+// 版本号探测：aapt2 → aapt → apktool，都没有就要求显式传参
+// ---------------------------------------------------------------------------
+
+function isExecutableFile(path) {
+  try {
+    return statSync(path).isFile()
+  } catch {
+    return false
+  }
+}
+
+/** 在 PATH 里找可执行文件（不走 shell，避免引号问题）。 */
+function findOnPath(name) {
+  for (const dir of String(process.env.PATH ?? '').split(delimiter)) {
+    if (!dir) continue
+    const candidate = join(dir, name)
+    if (isExecutableFile(candidate)) return candidate
+  }
+  return null
+}
+
+/** 可能的 Android SDK 根目录：环境变量 → 本仓库 android/local.properties → 常见安装位置。 */
+function sdkRoots() {
+  const roots = []
+  for (const key of ['ANDROID_HOME', 'ANDROID_SDK_ROOT']) {
+    if (process.env[key]) roots.push(process.env[key])
+  }
+  try {
+    const props = readFileSync(join(REPO_ROOT, 'android', 'local.properties'), 'utf8')
+    const match = /^sdk\.dir=(.+)$/m.exec(props)
+    if (match) roots.push(match[1].trim())
+  } catch {
+    /* 没有 local.properties 就跳过 */
+  }
+  roots.push(join(homedir(), 'Library', 'Android', 'sdk'))
+  roots.push('/opt/homebrew/share/android-commandlinetools')
+  roots.push('/usr/local/share/android-commandlinetools')
+  return roots.filter(Boolean)
+}
+
+function compareVersions(a, b) {
+  const pa = a.split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0)
+  const pb = b.split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0)
+  for (let index = 0; index < Math.max(pa.length, pb.length); index += 1) {
+    const diff = (pa[index] ?? 0) - (pb[index] ?? 0)
+    if (diff !== 0) return diff
+  }
+  return 0
+}
+
+/** 在 SDK 的 build-tools/<version>/ 里找工具，取版本号最大的那个。 */
+function findInBuildTools(name) {
+  for (const root of sdkRoots()) {
+    const buildTools = join(root, 'build-tools')
+    let versions = []
+    try {
+      versions = readdirSync(buildTools)
+    } catch {
+      continue
+    }
+    versions.sort((a, b) => compareVersions(b, a))
+    for (const version of versions) {
+      const candidate = join(buildTools, version, name)
+      if (isExecutableFile(candidate)) return candidate
+    }
+  }
+  return null
+}
+
+function readWithAapt(tool, apkPath) {
+  let output
+  try {
+    output = execFileSync(tool, ['dump', 'badging', apkPath], {
+      encoding: 'utf8',
+      timeout: 20_000,
+      maxBuffer: 8 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  } catch (error) {
+    return { ok: false, error: `${basename(tool)} 读不出来：${error?.stderr?.toString?.().trim() || error?.message || error}` }
+  }
+  const code = /versionCode='(\d+)'/.exec(output)
+  const name = /versionName='([^']*)'/.exec(output)
+  if (!code || !name) return { ok: false, error: `${basename(tool)} 输出里没有 versionCode/versionName` }
+  return { ok: true, versionCode: Number(code[1]), versionName: name[1] }
+}
+
+/**
+ * apktool 兜底：解出明文 AndroidManifest.xml 再正则读。
+ * 比解析二进制 AXML 简单得多，而且 apktool 本来就装在开发机上。
+ */
+function readWithApktool(apkPath) {
+  const tool = findOnPath('apktool')
+  if (!tool) return { ok: false, error: '没装 apktool' }
+  const workDir = join(process.env.TMPDIR || '/tmp', `pet-apk-${process.pid}-${Date.now()}`)
+  try {
+    execFileSync(tool, ['d', '-f', '-s', '-o', workDir, apkPath], {
+      timeout: 120_000,
+      maxBuffer: 8 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const manifest = readFileSync(join(workDir, 'AndroidManifest.xml'), 'utf8')
+    const code = /android:versionCode="(\d+)"/.exec(manifest)
+    const name = /android:versionName="([^"]*)"/.exec(manifest)
+    if (!code || !name) return { ok: false, error: 'apktool 解出来的 manifest 里没有版本号' }
+    return { ok: true, versionCode: Number(code[1]), versionName: name[1] }
+  } catch (error) {
+    return { ok: false, error: `apktool 解包失败：${error?.message ?? error}` }
+  } finally {
+    try {
+      rmSync(workDir, { recursive: true, force: true })
+    } catch {
+      /* 临时目录删不掉不影响发布 */
+    }
+  }
+}
+
+function detectVersion(apkPath) {
+  const attempts = []
+  const aapt2 = process.env.AAPT2 || findInBuildTools('aapt2') || findOnPath('aapt2')
+  if (aapt2) {
+    const result = readWithAapt(aapt2, apkPath)
+    if (result.ok) return { ...result, via: `aapt2 ${aapt2}` }
+    attempts.push(result.error)
+  } else {
+    attempts.push('找不到 aapt2')
+  }
+  const aapt = process.env.AAPT || findInBuildTools('aapt') || findOnPath('aapt')
+  if (aapt) {
+    const result = readWithAapt(aapt, apkPath)
+    if (result.ok) return { ...result, via: `aapt ${aapt}` }
+    attempts.push(result.error)
+  } else {
+    attempts.push('找不到 aapt')
+  }
+  const viaApktool = readWithApktool(apkPath)
+  if (viaApktool.ok) return { ...viaApktool, via: 'apktool 解包' }
+  attempts.push(viaApktool.error)
+  return { ok: false, error: attempts.join('；') }
+}
+
+// ---------------------------------------------------------------------------
+// 文件操作
+// ---------------------------------------------------------------------------
+
+function sha256File(path) {
+  return new Promise((resolveHash, rejectHash) => {
+    const hash = createHash('sha256')
+    const stream = createReadStream(path)
+    stream.on('data', (chunk) => hash.update(chunk))
+    stream.on('error', rejectHash)
+    stream.on('end', () => resolveHash(hash.digest('hex')))
+  })
+}
+
+/** 临时名 + rename：任何时刻 latest.json 要么是旧的完整版，要么是新的完整版。 */
+function writeJsonAtomic(path, value) {
+  const tmp = `${path}.tmp-${process.pid}`
+  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o644 })
+  renameSync(tmp, path)
+}
+
+function assertZipMagic(apkPath) {
+  // 只读前 4 个字节：判断 zip 头不需要把整个 APK 拉进内存。
+  const buffer = Buffer.alloc(4)
+  const fd = openSync(apkPath, 'r')
+  try {
+    readSync(fd, buffer, 0, 4, 0)
+  } finally {
+    closeSync(fd)
+  }
+  if (buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
+    fail(`${apkPath} 看起来不是 APK（zip 头不对）`, '构建失败时经常把错误页/空文件当产物，先确认文件本身')
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2))
+  const apkPath = resolve(options.apk)
+  if (!existsSync(apkPath)) fail(`找不到 APK：${apkPath}`)
+  const stat = statSync(apkPath)
+  if (!stat.isFile()) fail(`${apkPath} 不是文件`)
+  assertZipMagic(apkPath)
+
+  const fileName = basename(apkPath)
+  if (!APK_NAME_RE.test(fileName)) {
+    fail(`文件名不合法：${fileName}`, '只允许字母数字开头、由 [A-Za-z0-9._-] 组成、以 .apk 结尾（下载路由按这个白名单校验）')
+  }
+
+  let versionCode = options.versionCode
+  let versionName = options.versionName
+  let via = '命令行参数'
+  if (!versionCode || !versionName) {
+    const detected = detectVersion(apkPath)
+    if (!detected.ok) {
+      fail(
+        '读不出 APK 的 versionCode/versionName',
+        `试过 aapt2/aapt/apktool 都不行：${detected.error}\n` +
+          '  直接显式传：--version-code 5 --version-name 0.3.0（App 拿 versionCode 比大小，必须比线上大）',
+      )
+    }
+    if (!versionCode) versionCode = detected.versionCode
+    if (!versionName) versionName = detected.versionName
+    if (!options.versionCode && !options.versionName) via = detected.via
+  }
+  if (!Number.isInteger(versionCode) || versionCode <= 0) fail(`versionCode 不合法：${versionCode}`)
+  if (!versionName) fail('versionName 为空')
+
+  // 文件名里的版本号对不上时提醒一句：拼错会让用户装到「显示 0.3.0 实际 0.2.9」的包。
+  if (!fileName.includes(versionName)) {
+    console.warn(`⚠ 文件名 ${fileName} 里没有 versionName ${versionName}，确认不是拿错包了`)
+  }
+
+  mkdirSync(options.dir, { recursive: true, mode: 0o700 })
+  const targetPath = join(options.dir, fileName)
+  const sha256 = await sha256File(apkPath)
+  const size = stat.size
+
+  let copied = false
+  let same = false
+  try {
+    same = statSync(targetPath).size === size && (await sha256File(targetPath)) === sha256
+  } catch {
+    same = false
+  }
+  if (!same) {
+    // 先写临时名再 rename：手机正在下载时重发同一版，不会看到被截断的文件。
+    const tmp = `${targetPath}.tmp-${process.pid}`
+    copyFileSync(apkPath, tmp)
+    renameSync(tmp, targetPath)
+    copied = true
+  }
+
+  const meta = {
+    ok: true,
+    versionCode,
+    versionName,
+    size,
+    sha256,
+    file: fileName,
+    notes: options.notes,
+    publishedAt: new Date().toISOString(),
+  }
+  writeJsonAtomic(join(options.dir, 'latest.json'), meta)
+
+  console.log(`✓ 版本 ${versionName}（versionCode ${versionCode}）${via ? `· 来源 ${via}` : ''}`)
+  console.log(copied ? `✓ 已复制 → ${targetPath}` : `✓ 已在发布目录（内容一致，跳过复制）→ ${targetPath}`)
+  console.log(`✓ ${size} B · sha256 ${sha256}`)
+  console.log(`✓ latest.json 已原子更新 → ${join(options.dir, 'latest.json')}`)
+  console.log(`  下载路径（需 cookie）：/pet-voice/download/${encodeURIComponent(fileName)}`)
+}
+
+main().catch((error) => {
+  fail(`发布失败：${error?.stack ?? error}`)
+})

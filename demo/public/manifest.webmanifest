@@ -1,0 +1,12 @@
+{
+  "name": "鲸灵 · 随身宠物",
+  "short_name": "鲸灵",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#04121d",
+  "theme_color": "#04121d",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

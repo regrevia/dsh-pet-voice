@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<!-- 悬浮窗专用：只有鲸鱼娘本体，画布之外全透明。窗口背景由原生设成 TRANSPARENT。 -->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>pet</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      background: transparent; overflow: hidden;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: none;               /* 手势交给原生窗口处理 */
+    }
+    /* 竖构图形象（420x465）按宽度 contain 后会吃满整个窗口高度，气泡就没地方放了。
+       不靠「加高窗口」解决——overlay 窗口内区域会吃触摸，加高等于在屏幕上多一条按不到的死区。
+       改成：气泡出现时身体整体让位（top 下移，短视频层重排一次，走合成器，不重绘）。 */
+    #stage {
+      position: fixed; inset: 0;
+      pointer-events: none;             /* 视频层不吃触摸，点哪都是点小人 */
+      transition: top .18s cubic-bezier(.2,.8,.2,1);
+      will-change: top;
+    }
+    /* 让位高度不能写死：120dp 档同一句话要 3 行、168dp 档只要 2 行，写死 52px 会把小档末字裁掉。
+       boot.js 在 say() 里量出气泡真实高度，按目标 16dp 缝隙反解后写进 --shift，这里只兜底。 */
+    body.has-bubble #stage { top: var(--shift, 52px); }
+    /* 形象：两路 video 交叉淡化（换动作时先出画再切前台，不闪黑底）。
+       素材是 420x465 的透明 VP9，object-fit: contain 撑满窗口不裁切 */
+    .pet-video {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      object-fit: contain;
+      display: block;
+      opacity: 0;
+      transition: opacity .12s linear;
+      will-change: opacity, transform;
+      pointer-events: none;
+    }
+    .pet-video.front { opacity: 1; }
+    /* 说话气泡：固定贴在窗口顶部，高度上限只做兜底（实际高度由 JS 量） */
+    #bubble {
+      position: fixed; left: 6px; right: 6px; top: 2px;
+      max-height: 45%;
+      box-sizing: border-box;
+      padding: 6px 9px;
+      border-radius: 12px;
+      background: rgba(10, 26, 38, 0.92);
+      border: 1px solid rgba(122, 218, 255, 0.55);
+      color: #E6F4FF;
+      font: 12px/1.45 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      overflow: hidden;
+      opacity: 0; transform: translateY(-4px) scale(.96);
+      transition: opacity .14s ease, transform .14s ease;
+      pointer-events: none;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, .38);
+    }
+    #bubble.show { opacity: 1; transform: none; }
+    #bubble .who { color: #7ADAFF; font-weight: 600; margin-right: 4px; }
+  
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <video class="pet-video" muted playsinline preload="auto"></video>
+    <video class="pet-video" muted playsinline preload="auto"></video>
+  </div>
+  <div id="bubble"><span class="who">大肥鱼</span><span id="bubbleText"></span></div>
+  <script type="module" src="./boot.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 悬浮窗：整块就是一个透明 WebView，除了鲸鱼娘本体什么都不画（气泡由页面里的 #bubble 画）。
+     卡片背景 / 状态字 / 双击按钮 / 最小化 / 关闭全部去掉；触摸由原生 OnTouchListener 处理，
+     所以 WebView 自己不吃点击。 -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/petRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@null">
+
+    <WebView
+        android:id="@+id/web"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@null" />
+</FrameLayout>

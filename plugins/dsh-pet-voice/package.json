@@ -1,0 +1,34 @@
+{
+  "name": "dsh-pet-voice",
+  "version": "0.1.0",
+  "private": true,
+  "description": "手机端语音宠物：像素鲸鱼娘 + 唤醒词 + 语音对话 + 项目切换，直接驱动本机 DSH 会话（复用其 agent preset 人设）。",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
+    }
+  },
+  "files": [
+    "README.md",
+    "client.js",
+    "cordis.patch.yml",
+    "index.js",
+    "public/",
+    "selftest.mjs"
+  ]
+}

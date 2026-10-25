@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  主界面配色（与需求一致）：底 #0F1720 / 卡 #18232E / 主色 #3FD0C9 /
+  正文 #E6EEF4 / 次要 #8FA3B3。布局与 drawable 一律引用名字，不再写死十六进制。
+-->
+<resources>
+    <color name="pet_bg">#0F1720</color>
+    <color name="pet_surface">#18232E</color>
+    <color name="pet_accent">#3FD0C9</color>
+    <color name="pet_accent_dim">#2FA9A4</color>
+    <color name="pet_text">#E6EEF4</color>
+    <color name="pet_text_dim">#8FA3B3</color>
+    <color name="pet_line">#2C3B49</color>
+    <color name="pet_hint">#6B7C8C</color>
+    <color name="pet_hint_bg">#22303D</color>
+    <color name="ic_launcher_background">#04101A</color>
+</resources>

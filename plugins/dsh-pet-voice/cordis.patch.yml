@@ -1,0 +1,12 @@
+# dsh-pet-voice 的 bundle patch。
+#
+# 只往配置树里插入一行插件，不动 profile 里的其它任何东西。把这个 bundle 从
+# package.json 的 dsh.profile.bundles 里删掉，就完全回到原样：本插件不改
+# node_modules、不改官方 UI 的白名单，也不接管任何已有路由。
+#
+# 可选 config（一般不用写）：
+#   petName: '鲸灵'        # 页面上显示的名字
+#   stateless: false       # true 时每个项目都不复用会话，每次新开一个
+- insert:
+    - id: dsh-pet-voice
+      name: dsh-pet-voice

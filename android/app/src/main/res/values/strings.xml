@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">大肥鱼</string>
+    <string name="notif_channel_name">大肥鱼常驻</string>
+    <string name="notif_title">大肥鱼在听</string>
+    <string name="notif_text">双击悬浮窗说话 · 点按设置</string>
+</resources>

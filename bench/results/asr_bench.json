@@ -1,0 +1,30 @@
+{
+  "note": "openai-whisper (PyTorch) 权重与 whisper.cpp 相同；cpp+Metal 通常更快，故本表为上限",
+  "env": {
+    "torch": "2.8.0",
+    "mps": true,
+    "python": "3.9.6",
+    "machine": "arm64"
+  },
+  "reference_text": "你好，我是小宠，今天想陪你聊聊天。",
+  "rows": [
+    {
+      "model": "base",
+      "device": "cpu",
+      "load_ms": 374.6,
+      "transcribe_4_23s_ms": {
+        "min": 203.0,
+        "median": 204.2,
+        "max": 420.1
+      },
+      "rtf": 0.048,
+      "prefix_1p5s_ms": 776.5,
+      "prefix_1p5s_text": "您好 SMHIT",
+      "prefix_3s_ms": 183.7,
+      "prefix_3s_text": "你好 我是小丑今天想陪",
+      "text": "你好,我是小丑,今天想陪你聊聊天。",
+      "correct": null
+    }
+  ],
+  "measured_at": "2026-10-24T13:32:06+0800"
+}

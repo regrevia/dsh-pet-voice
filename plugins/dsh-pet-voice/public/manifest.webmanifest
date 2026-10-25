@@ -1,0 +1,20 @@
+{
+  "name": "鲸灵 · 随身宠物",
+  "short_name": "鲸灵",
+  "description": "语音唤醒的 DSH 随身宠物：说话即派活，随时切项目。",
+  "start_url": "/pet-voice/",
+  "scope": "/pet-voice/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#04101a",
+  "theme_color": "#071722",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "/pet-voice/assets/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

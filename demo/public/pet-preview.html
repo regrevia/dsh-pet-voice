@@ -1,0 +1,11 @@
+<!doctype html><meta charset="utf-8">
+<style>
+  body{margin:0;background:#07202e;display:flex;align-items:center;justify-content:center;height:100vh;gap:0}
+  canvas{image-rendering:pixelated;width:840px;height:840px}
+</style>
+<canvas id="a" width="112" height="112"></canvas>
+<script type="module">
+import { createPet } from '/pet.js'
+const p = createPet(document.getElementById('a'))
+p.setMode(new URLSearchParams(location.search).get('m') || 'idle')
+</script>
