@@ -13,7 +13,7 @@
 | 语音唤醒「鲸灵」 | 常驻 `SpeechRecognizer`，`ERROR_NO_MATCH`/`SPEECH_TIMEOUT` 自动重启；唤醒词可改 | 真机说「鲸灵」 | 【未核实】模拟器 ASR 恒 no-match，无法测 |
 | 按住说话 / 语音对话（复用会话人设与工具） | `beginTurn` → `/api/command` 分流 → `/api/dispatch` 落专属会话；失败静默回退，不重复派发 | `bash scripts/verify-commands.sh` | 【实测】13/13 |
 | 语音播报（TTS） | `/api/tts` + 客户端磁盘缓存 60 条 + 宿主 LRU 48 条 | 见 [android-app.md](android-app.md) 延迟表 | 【实测】缓存命中 0.6 ms / 磁盘 0 ms / 新句 1.9–2.0 s |
-| 像素风鲸鱼娘形象 | 13 段 VP9-alpha 420×465 10 fps，共 2,427,042 B；悬浮窗只画形象（无卡片/按钮/文字） | `bash scripts/android-smoke.sh` | 【实测】模拟器渲染；真机硬件解码【未核实】 |
+| 像素风鲸鱼娘形象 | 13 段 VP9-alpha 420×465 10 fps，共 2,427,042 B；悬浮窗只画形象（无卡片/按钮/文字）；0.9.23 起 App 在前台时收起、不吃点击 | `bash scripts/android-smoke.sh`（18/18，含桌面可见 / 前台收起两态断言） | 【实测】模拟器渲染；真机硬件解码【未核实】 |
 | 语音指令：切项目/派发/基础操作 | 5 条 utterance 的 `action` 断言 + 无二次 dispatch | `bash scripts/verify-commands.sh` | 【实测】13/13 |
 | MCP 服务端暴露同样能力 | stdio MCP，`ping`/`pet_status`/`pet_ask`/`pet_say` 等；live 模式真打宿主 | `PET_LIVE=1 PET_BASE=http://127.0.0.1:52356 node mcp/pet-bridge/selftest.mjs` | 【实测】18/18 |
 | 不买域名也能 https（0 元路线） | 自签 CA + 根证书打进 App（`res/raw/pet_ca.pem` + `network_security_config`）+ 本地 https 反代；模拟器上 https 链路下语音指令全过 | `bash scripts/tls-ca.sh --check`；`PET_HOST=https://10.0.2.2:8443/pet-voice/ bash scripts/verify-commands.sh` | 【实测】模拟器 13/13；真机 + 腾讯云线上【未核实】，见 [tls-self-signed.md](tls-self-signed.md) |
@@ -27,7 +27,7 @@ node scripts/contract-check.mjs               # 25/25：接口契约 + 401 鉴�
 node scripts/cf-tunnel-token.test.mjs         # 30/30：token 落盘脚本（假 token、临时 HOME）
 node scripts/cf-creds.test.mjs                # 29/29：Cloudflare 凭据解析
 node mcp/pet-bridge/selftest.mjs              # 17/18（1 项 live 跳过）
-bash scripts/android-smoke.sh                 # 16/16：APK 静态检查
+bash scripts/android-smoke.sh                 # 18/18：装包→注入配置→真发一条→悬浮窗两态（桌面在 / App 前台收起）
 bash scripts/verify-commands.sh               # 13/13：手机侧语音指令（需 adb + 模拟器/真机）
 bash scripts/tls-ca.sh --check                # 自签证书：链/SAN/权限/App 内置一致（没生成过会提示，不失败）
 ```
