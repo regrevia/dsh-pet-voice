@@ -300,14 +300,23 @@ $ADB shell pm grant $PKG android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 |
 $ADB shell input keyevent 4 >/dev/null 2>&1 || true
 $ADB shell dumpsys activity services $PKG 2>/dev/null | grep -m1 -E "isForeground=true" >/dev/null \
   && ok "前台服务在跑（isForeground=true）" || bad "前台服务没起来"
+# 0.9.23 起：App 自己在前台时悬浮窗收起（不遮挡对话页），所以先回桌面再断言
+$ADB shell input keyevent 3 >/dev/null 2>&1 || true
 # 悬浮窗是异步挂上去的：给 15s，别刚点完就断言
 OV=""
 for _ in $(seq 1 10); do
   if $ADB shell dumpsys window windows 2>/dev/null | grep -m1 "APPLICATION_OVERLAY" >/dev/null; then OV=1; break; fi
   sleep 1.5
 done
-[ -n "$OV" ] && ok "悬浮窗窗口存在（ty=APPLICATION_OVERLAY）" \
+[ -n "$OV" ] && ok "桌面悬浮窗存在（ty=APPLICATION_OVERLAY）" \
   || bad "没看到悬浮窗（可能需要先点「启动悬浮窗」并授权）"
+# 回到 App：悬浮窗应收起，不再压住对话页、也不吃点击
+$ADB shell am start -n $PKG/.HistoryActivity >/dev/null 2>&1; sleep 3
+if $ADB shell dumpsys window windows 2>/dev/null | awk '/APPLICATION_OVERLAY/{found=1} found&&/isVisible=/{print; exit}' | grep -q "isVisible=true"; then
+  bad "App 在前台时悬浮窗仍然可见"
+else
+  ok "App 在前台时悬浮窗收起（不再遮挡对话页）"
+fi
 
 echo
 echo "===== 结果：通过 $pass 项，失败 $fail 项 ====="

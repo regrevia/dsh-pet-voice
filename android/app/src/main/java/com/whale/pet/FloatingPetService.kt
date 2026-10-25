@@ -188,6 +188,7 @@ class FloatingPetService : Service() {
         tts = TtsPlayer(this, client, { cfg }, ::onSpeakingChanged, ::onTtsError)
         tts.prewarm(FILLERS) // 口头填充句先合成好，宿主一句要 0.9s+，不能让用户干等
         createChannel()
+        AppForeground.onChange = { on -> main.post { applyAppForeground(on) } }
         registerScreenReceiver()
         if (BuildConfig.DEBUG) {
             try {
@@ -320,6 +321,7 @@ class FloatingPetService : Service() {
 
     override fun onDestroy() {
         alive = false
+        if (AppForeground.onChange != null) AppForeground.onChange = null
         stopContinuous("服务结束")
         stopTicker()
         try {
@@ -519,6 +521,7 @@ class FloatingPetService : Service() {
             y = (dm.heightPixels - dp(size + 48) - dp(112)).coerceAtLeast(0)
         }
         params = p
+        applyAppForeground(AppForeground.visible)
         try {
             wm.addView(v, p)
         } catch (e: Exception) {
@@ -527,6 +530,19 @@ class FloatingPetService : Service() {
             updateNotification("悬浮窗添加失败：${e.javaClass.simpleName}")
             stopSelf()
         }
+    }
+
+    /** 自己的界面在前台时把悬浮窗收起，免得盖住对话页的字；同时设成不可触摸，别偷偷吃掉点击。 */
+    private fun applyAppForeground(on: Boolean) {
+        val v = root ?: return
+        v.visibility = if (on) android.view.View.GONE else android.view.View.VISIBLE
+        val p = params ?: return
+        p.flags = if (on) {
+            p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        } else {
+            p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        }
+        runCatching { wm.updateViewLayout(v, p) }
     }
 
     private fun setupWeb() {
