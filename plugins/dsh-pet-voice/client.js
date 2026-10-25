@@ -156,6 +156,7 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = React.useState(null)
       const [qr, setQr] = React.useState('')
       const [error, setError] = React.useState('')
+      const [copied, setCopied] = React.useState(false)
 
       const load = React.useCallback(async () => {
         try {
@@ -226,15 +227,40 @@ window.__ModuleLoader__.load({
 
       const mode = state.modes.find((m) => m.id === draft.mode)
 
+      const copyLink = async () => {
+        if (!pairingUrl) return
+        try {
+          await navigator.clipboard.writeText(pairingUrl)
+          setCopied(true)
+          setTimeout(() => setCopied(false), 1500)
+        } catch {
+          setError('复制失败，手动选中链接复制')
+        }
+      }
+
+      const linkRow = pairingUrl
+        ? h(
+            'div',
+            { style: { ...S.row, gap: 8 } },
+            h('input', {
+              value: pairingUrl,
+              readOnly: true,
+              onFocus: (e) => e.target.select(),
+              style: { ...S.input, flex: 1, minWidth: 240, opacity: 0.75 },
+            }),
+            h('button', { style: S.button, onClick: copyLink }, copied ? '已复制' : '复制链接'),
+          )
+        : null
+
       const pairSection = h(
         Section,
-        { title: '配对' },
+        { title: '连上手机' },
         h(
           'div',
           { style: S.row },
           qr
             ? h('div', { style: S.qr, dangerouslySetInnerHTML: { __html: qr } })
-            : h('div', { style: S.empty }, pairingUrl ? '' : '还没有可用的地址'),
+            : h('div', { style: S.empty }, '先选一种连法'),
           h(
             'div',
             { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
@@ -254,16 +280,18 @@ window.__ModuleLoader__.load({
                   onChange: field('customUrl'),
                   onCommit: commit('customUrl'),
                   width: 240,
+                  placeholder: 'https://你的域名',
                 })
               : null,
           ),
         ),
+        linkRow,
       )
 
       const devices = state.devices ?? []
       const deviceSection = h(
         Section,
-        { title: '设备' },
+        { title: '已连上的手机' },
         devices.length
           ? h(
               'div',
@@ -294,7 +322,7 @@ window.__ModuleLoader__.load({
                 ),
               ),
             )
-          : h('div', { style: S.empty }, '没有设备'),
+          : h('div', { style: S.empty }, '还没有手机连上'),
         h(
           'div',
           { style: S.row },
@@ -311,7 +339,7 @@ window.__ModuleLoader__.load({
 
       const paramsSection = h(
         Section,
-        { title: '参数' },
+        { title: '对话' },
         h(
           'div',
           { style: S.row },
