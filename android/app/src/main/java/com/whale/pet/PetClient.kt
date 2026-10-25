@@ -1,5 +1,6 @@
 package com.whale.pet
 
+import android.os.Build
 import android.util.Log
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -303,7 +304,9 @@ class PetClient(private val config: () -> PetConfig) {
         conn.readTimeout = 180_000
         conn.instanceFollowRedirects = true
         conn.setRequestProperty("Cookie", cfg.cookieHeader)
-        conn.setRequestProperty("User-Agent", "WhalePet/0.1 (Android)")
+        conn.setRequestProperty("User-Agent", "WhalePet/${BuildConfig.VERSION_NAME} (Android ${Build.VERSION.SDK_INT}; ${deviceName()})")
+        conn.setRequestProperty("X-Pet-Device", deviceName())
+        conn.setRequestProperty("X-Pet-Device-Id", deviceId())
         try {
             val code = conn.responseCode
             if (code !in 200..299) throw IOException("APK HTTP $code")
@@ -406,9 +409,34 @@ class PetClient(private val config: () -> PetConfig) {
         conn.instanceFollowRedirects = true
         conn.setRequestProperty("Cookie", cfg.cookieHeader)
         conn.setRequestProperty("Accept", "application/json, text/event-stream")
-        conn.setRequestProperty("User-Agent", "WhalePet/0.1 (Android)")
+        conn.setRequestProperty("User-Agent", "WhalePet/${BuildConfig.VERSION_NAME} (Android ${Build.VERSION.SDK_INT}; ${deviceName()})")
+        conn.setRequestProperty("X-Pet-Device", deviceName())
+        conn.setRequestProperty("X-Pet-Device-Id", deviceId())
         return conn
     }
+
+    /**
+     * 面板「已连上的手机」里显示的名字：厂商 + 机型（`Xiaomi Redmi K80 Pro`）。
+     * 走请求头而不是 UA 解析，国产 ROM 的 UA 常常只有 `Android` 或一串 Build 号。
+     */
+    private fun deviceName(): String {
+        val manu = Build.MANUFACTURER.orEmpty().trim()
+        val model = Build.MODEL.orEmpty().trim()
+        val name = when {
+            model.isBlank() -> manu.ifBlank { "Android" }
+            manu.isBlank() || model.startsWith(manu, true) -> model
+            else -> "$manu $model"
+        }
+        return name.replace(Regex("\\s+"), " ").take(40)
+    }
+
+    /** 同一台机器换 UA / 换 IP 也要认成同一台：用机型 + 系统指纹做稳定 id。 */
+    private fun deviceId(): String {
+        val seed = "${Build.MANUFACTURER}|${Build.MODEL}|${Build.FINGERPRINT}|${Build.DEVICE}"
+        val digest = java.security.MessageDigest.getInstance("SHA-1").digest(seed.toByteArray())
+        return digest.joinToString("") { "%02x".format(it.toInt() and 0xff) }.take(12)
+    }
+
 }
 
 private fun String.toJsonOrNull(): JSONObject? = try {

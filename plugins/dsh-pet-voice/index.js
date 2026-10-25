@@ -752,10 +752,49 @@ function asrStartWorker() {
   return asrStarting
 }
 
+/** worker 脚本的修改时间：用来判断常驻进程是不是还在跑旧代码。 */
+function asrScriptMtime() {
+  try {
+    return statSync(asrScriptPath()).mtimeMs
+  } catch {
+    return 0
+  }
+}
+
+/** 停掉老 worker：先 SIGTERM 等端口释放，3 s 还不走就 SIGKILL。 */
+async function asrKillWorker(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return
+  try {
+    process.kill(pid, "SIGTERM")
+  } catch {
+    return // 已经不在了
+  }
+  const deadline = Date.now() + 3000
+  while (Date.now() < deadline) {
+    if (!(await asrHealth(600))) return
+    await new Promise((resolve) => setTimeout(resolve, 120))
+  }
+  try {
+    process.kill(pid, "SIGKILL")
+  } catch {
+    /* 已经退了 */
+  }
+  await new Promise((resolve) => setTimeout(resolve, 150))
+}
+
 /** 先探活再决定拉不拉：绝大多数请求会走到「已经在跑」这条快路。 */
 async function asrEnsure() {
   const health = await asrHealth()
-  if (health?.ok) return { ok: true, pid: health.pid, cold: false }
+  if (health?.ok) {
+    // 改了 worker 脚本、老进程还活着：不主动重启就永远跑旧代码，补丁等于没打。
+    const startedAt = Number.isFinite(health.uptimeMs) ? Date.now() - health.uptimeMs : 0
+    if (startedAt && asrScriptMtime() > startedAt + 2000) {
+      LOG(`ASR worker 比脚本旧，重启一次（pid ${health.pid}）`)
+      await asrKillWorker(health.pid)
+      return asrStartWorker()
+    }
+    return { ok: true, pid: health.pid, cold: false }
+  }
   return asrStartWorker()
 }
 
@@ -1242,9 +1281,13 @@ async function browseSessions(ctx, query, liveTurns) {
       // 不带 projectId 时只列有项目归属的会话：手机上是「进项目看历史」，
       // 散落在 /private/tmp 的临时会话没有归属，列出来只会让人困惑。
       if (projectId ? projectIdOf !== projectId : !projectIdOf) continue
+      const meta = projectCacheOf(id)
+      const title = String(row.title ?? '') || meta.title || ''
+      // 开了没聊的空壳（无标题、0 轮）在手机列表里就是一串「未命名」，直接不列。
+      if (!title && (meta.turns ?? 0) === 0) continue
       const updatedAt = toMs(row.updatedAt)
       if (before && updatedAt >= before) continue
-      picked.push({ id, updatedAt, projectIdOf, cwd: String(row.cwd ?? ''), title: String(row.title ?? '') })
+      picked.push({ id, updatedAt, projectIdOf, cwd: String(row.cwd ?? ''), title })
     }
     picked.sort((a, b) => b.updatedAt - a.updatedAt)
     const sliced = picked.slice(0, limit + 1)
@@ -1658,7 +1701,50 @@ const trailPath = (value) => String(value ?? '').replace(/\/+$/, '')
  * MCP 的 pet_ask 不带 sessionId，旧逻辑拿 sessions[0]（谁在看界面就是谁），
  * 于是自测任务出现在用户正看着的会话里。找不到/对不上就新建，然后写回文件。
  */
+/**
+ * 同一时刻只许建一只专属会话。
+ *
+ * 踩过的坑：手机两条并发请求同时打进 `/api/*`，两边都判「旧会话不可用」，于是各 create 一只。
+ * 赢的那只写进 pet-session.json，输的那只成了没人钉、却还接得到消息的野会话——用户看到
+ * 两个会话各自回答、各自说话，像「自己跟自己聊」。这里用单飞锁：后来者等第一只落地，
+ * 然后按文件里那只走，绝不另建。
+ */
+let petTargetCreating = null
+
 async function petTargetSession(ctx, state) {
+  if (petTargetCreating) {
+    try {
+      await petTargetCreating
+    } catch (_) {
+      // 第一只建失败：让它自己按原逻辑重建
+    }
+    const stored = readPetSessionFile()
+    if (stored.sessionId) {
+      const rows = await sessionRows(ctx)
+      const row = rows.find((item) => item.id === stored.sessionId)
+      const known = row ? true : await sessionKnownToHost(ctx, stored.sessionId, rows)
+      if (known) {
+        return {
+          sessionId: stored.sessionId,
+          workspace: {
+            id: row?.workspaceId || stored.workspaceId,
+            title: stored.workspaceTitle || '',
+            path: row?.cwd || stored.cwd,
+          },
+        }
+      }
+    }
+  }
+  const job = petTargetSessionUnlocked(ctx, state)
+  petTargetCreating = job
+  try {
+    return await job
+  } finally {
+    if (petTargetCreating === job) petTargetCreating = null
+  }
+}
+
+async function petTargetSessionUnlocked(ctx, state) {
   const controller = ctx.get?.('sessionController')
   if (!controller?.create) throw new Error('宿主缺少 sessionController（create），建不了专属会话')
   const want = petWorkspaceName()
@@ -1696,6 +1782,20 @@ async function petTargetSession(ctx, state) {
   const created = await withTimeout(controller.create(request), CREATE_TIMEOUT_MS, '创建专属会话超时（15s）')
   const sessionId = String(created?.sessionId ?? created?.id ?? created?.session?.id ?? '')
   if (!sessionId) throw new Error(`create() 没有返回 sessionId：${JSON.stringify(created).slice(0, 200)}`)
+  // 并发兜底：如果这中间已经有人先钉好了一只，就认文件里那只，别把刚建的变成野会话
+  const raced = readPetSessionFile()
+  // 只认「宿主确实认得」的那只：文件里可能还留着早就死掉的旧 id，别把它捡回来
+  if (raced.sessionId && raced.sessionId !== sessionId && (await sessionKnownToHost(ctx, raced.sessionId, []))) {
+    LOG(`并发建会话：沿用已钉的 ${raced.sessionId}，忽略刚建的 ${sessionId}`)
+    return {
+      sessionId: raced.sessionId,
+      workspace: {
+        id: raced.workspaceId || hit.id,
+        title: raced.workspaceTitle || hit.title,
+        path: raced.cwd || hit.path,
+      },
+    }
+  }
   mkdirSync(HOME_DIR, { recursive: true, mode: 0o700 })
   writeFileSync(
     petSessionFile(),
@@ -3146,11 +3246,13 @@ export function apply(ctx, config) {
       })
     }
     let result = await asrForward(body)
-    if (result.dead) {
-      // 只重启一次：手机那句已经说完了，重试两轮还不通就该让它显示「再说一次」。
-      LOG(`ASR worker 无响应，重启一次：${result.error}`)
-      const again = await asrStartWorker()
-      if (again.ok) result = await asrForward(body)
+    // 进程刚重启/刚被换掉的那一下就绪和端口之间有空档：给两次机会，中间等一下再发，
+    // 这样用户第一句不会白说（只重试两轮，还不通才让他「再说一次」）。
+    for (let attempt = 0; attempt < 2 && result.dead; attempt += 1) {
+      LOG(`ASR worker 无响应，第 ${attempt + 1} 次重试：${result.error}`)
+      await asrStartWorker()
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      result = await asrForward(body)
     }
     if (result.dead) {
       return sendJson(res, 502, {
@@ -3523,7 +3625,8 @@ export function apply(ctx, config) {
             await browseSessions(
               ctx,
               {
-                projectId: url.searchParams.get('projectId') ?? '',
+                // App 传的是 workspaceId（项目 = 工作区），桌面端传 projectId，两边都认。
+                projectId: url.searchParams.get('projectId') ?? url.searchParams.get('workspaceId') ?? '',
                 limit: url.searchParams.get('limit') ?? '',
                 before: url.searchParams.get('before') ?? '',
               },

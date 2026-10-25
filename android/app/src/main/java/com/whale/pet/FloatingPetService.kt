@@ -900,7 +900,7 @@ class FloatingPetService : Service() {
         // 立刻开 AudioRecord 在真机上常常抢不到麦克风（录音起来但全是静音，或干脆失败），
         // 表现就是「点了一下没反应、也不说话」。所以先停唤醒，再退避重试几次。
         wake.stop()
-        say("我在听…")
+        updateNotification("在听 · 说完停一下或再点我")
         beginListening(0)
     }
 
@@ -910,8 +910,14 @@ class FloatingPetService : Service() {
             openSettings()
             return
         }
-        // 播报没结束绝不开麦：TTS 声音会被自己录进去，一问一答变成叠音自激
-        if (speaking) {
+        // 播报没结束绝不开麦：TTS 声音会被自己录进去，一问一答变成叠音自激。
+        // 判 tts.busy 而不是 speaking：句子之间有一个短暂的空档，那缝隙里开麦一样会录到自己。
+        if (tts.busy || speaking) {
+            scheduleResume(150)
+            return
+        }
+        // 最后一句刚播完的 600ms 里，房间回声还在，等它散掉。
+        if (SystemClock.elapsedRealtime() - tts.lastAudioEndAt < 600L) {
             scheduleResume(150)
             return
         }
@@ -970,6 +976,10 @@ class FloatingPetService : Service() {
             Log.i("PetVoice", "asr http=${res?.code ?: -1} textLen=${text.length} err=${err ?: "-"}")
             main.post {
                 when {
+                    ok && text.isNotBlank() && rejectAsNoise(text) -> {
+                        logVad(listenedMs, heard, 0, false)
+                        emptyRound()
+                    }
                     ok && text.isNotBlank() -> {
                         emptyRounds = 0
                         logVad(listenedMs, heard, text.length, true)
@@ -1009,8 +1019,8 @@ class FloatingPetService : Service() {
 
             override fun onFinal(text: String) {
                 pttActive = false
-                if (text.isBlank()) {
-                    toIdle()
+                if (text.isBlank() || rejectAsNoise(text)) {
+                    emptyRound()
                     return
                 }
                 beginTurn(text)
@@ -1109,7 +1119,7 @@ class FloatingPetService : Service() {
 
     private fun onWake(hit: WakeHit) {
         if (!cfg.wakeEnabled) return
-        if (turnActive || pttActive || speaking) return
+        if (turnActive || pttActive || speaking || tts.busy) return
         wake.stop() // 呼出后立刻停引擎：别把自己 TTS 的声音当唤醒词（回声自激）
         updateNotification("听到「${hit.word}」")
         continuous = true
@@ -1298,8 +1308,8 @@ class FloatingPetService : Service() {
             toIdle()
             return@Runnable
         }
-        if (speaking || turnActive || pttActive) {
-            scheduleResume(200)
+        if (tts.busy || speaking || turnActive || pttActive) {
+            scheduleResume(250)
         } else {
             beginListening(0)
         }
@@ -1349,6 +1359,19 @@ class FloatingPetService : Service() {
     }
 
     /** 每轮一条：时长、尾静音、识别字数、是否续听（「诊断」里能直接看到）。 */
+    /**
+     * 这段识别结果该不该发给模型？
+     *
+     * 自己刚说的话被扬声器送回麦克风（回声）、或模型在杂音上硬编的套话，发出去就成了
+     * 「自己跟自己聊」。命中就当这一轮没人说话，继续听。
+     */
+    private fun rejectAsNoise(text: String): Boolean {
+        if (!SpeechNoise.reject(text, tts.recentSpokenSnapshot())) return false
+        val kind = if (SpeechNoise.echoes(text, tts.recentSpokenSnapshot())) "回声" else "套话"
+        Log.i("PetVoice", "丢掉$kind：${text.take(20)}")
+        return true
+    }
+
     private fun logVad(listenedMs: Long, heard: Boolean, textLen: Int, resume: Boolean) {
         val tail = recorder.lastEndSilenceMs
         val voiced = recorder.lastVoicedMs
@@ -1414,7 +1437,7 @@ class FloatingPetService : Service() {
         // 只在「设置里开了常听 + 悬浮窗真的挂在屏幕上 + 待机」时开引擎，其余一律停：
         // 不长期攥着麦克风，也避免 TTS 自己的声音把自己唤醒。
         if (root == null || params == null) { wake.stop(); return }
-        if (pttActive || turnActive || speaking) { wake.stop(); return }
+        if (pttActive || turnActive || speaking || tts.busy) { wake.stop(); return }
         if (webPaused) { wake.stop(); return }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             wake.stop()

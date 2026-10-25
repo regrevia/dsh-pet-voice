@@ -114,8 +114,18 @@ function remoteAddress(req) {
   return raw.startsWith('::ffff:') ? raw.slice(7) : raw
 }
 
+/** 手机自己报的机型（`X-Pet-Device`）优先；UA 解析只是浏览器兜底。 */
+function explicitLabel(req) {
+  const raw = String(req?.headers?.['x-pet-device'] ?? '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return raw.slice(0, 40)
+}
+
 /** UA 里能稳定认出来的只有 Android 机型和 iOS 大类，其余桌面浏览器都算一个标签。 */
-function deviceLabel(ua) {
+function deviceLabel(ua, explicit = '') {
+  if (explicit) return explicit
   const android = ua.match(/Android[^;)]*(?:;\s*[a-z]{2}[-_][a-z]{2})?;\s*([^;)]+)/i)
   if (android) {
     const model = android[1]
@@ -148,17 +158,26 @@ export function touchDevice(req) {
     const ua = String(req?.headers?.['user-agent'] ?? '')
     const ip = remoteAddress(req)
     const now = Date.now()
-    const id = createHash('sha1').update(`${ua}${ip}`).digest('hex').slice(0, 12)
+    const explicit = explicitLabel(req)
+    // App 会给稳定设备 id：同一台手机换 UA、换网络、重装都还是同一行。
+    const claimed = String(req?.headers?.['x-pet-device-id'] ?? '').toLowerCase()
+    const id = /^[a-f0-9]{8,32}$/.test(claimed)
+      ? claimed
+      : createHash('sha1').update(`${ua}${ip}`).digest('hex').slice(0, 12)
     const store = readDeviceStore()
     const existing = store.devices.find((item) => item.id === id)
     if (existing) {
       existing.lastSeen = now
       existing.ip = ip
+      // 以前只能从 UA 猜，现在手机自己报了机型：把占位标签换成真名字。
+      if (explicit && existing.label !== explicit) existing.label = explicit
+      else if (!explicit && !existing.label) existing.label = deviceLabel(ua)
+      if (explicit) existing.platform = 'android'
     } else {
       store.devices.push({
         id,
-        label: deviceLabel(ua),
-        platform: devicePlatform(ua),
+        label: deviceLabel(ua, explicit),
+        platform: explicit ? 'android' : devicePlatform(ua),
         ip,
         firstSeen: now,
         lastSeen: now,

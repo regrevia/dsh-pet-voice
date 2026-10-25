@@ -58,6 +58,34 @@ class TtsPlayer(
     var speaking: Boolean = false
         private set
 
+    /** 最后一句播完的时刻（elapsedRealtime）：开麦前要等房间里的回声散掉。 */
+    @Volatile
+    var lastAudioEndAt: Long = 0L
+        private set
+
+    /**
+     * 还有没有声音要出：正在播、正等着 prepareAsync、或者队列里还排着句子。
+     *
+     * 只看 `speaking` 不够——它对句子是「一句一清」，句间那几十毫秒会漏成 false，
+     * 悬浮窗连续对话正好在这缝隙里开麦，把自己的下一句录进去再发给模型，就成了自问自答。
+     */
+    val busy: Boolean
+        get() = speaking || current != null || texts.isNotEmpty() || ready.isNotEmpty()
+
+    /** 刚说出口的句子（归一化后），用来认回声。只在主线程读写。 */
+    private val recentSpoken = ArrayDeque<String>()
+
+    /** 刚说出口的句子快照：给收尾过滤用，避免把主线程的队列暴露出去。 */
+    fun recentSpokenSnapshot(): List<String> = recentSpoken.toList()
+
+    private fun rememberSpoken(text: String) {
+        val norm = SpeechNoise.normalize(text)
+        if (norm.length < 4) return
+        recentSpoken.addLast(norm)
+        while (recentSpoken.size > 4) recentSpoken.removeFirst()
+    }
+
+
     /* ---------------- 缓存 ---------------- */
 
     private fun cacheDir(): File = File(context.cacheDir, "tts-cache").also { it.mkdirs() }
@@ -86,6 +114,7 @@ class TtsPlayer(
         val t = text.trim()
         if (t.isEmpty()) return
         main.post {
+            rememberSpoken(t)
             texts.addLast(Item(t, SystemClock.elapsedRealtime(), epoch))
             kickDownload()
         }
@@ -329,6 +358,7 @@ class TtsPlayer(
     private fun setSpeaking(v: Boolean) {
         if (speaking == v) return
         speaking = v
+        if (!v) lastAudioEndAt = SystemClock.elapsedRealtime()
         onSpeaking(v)
     }
 }

@@ -109,6 +109,8 @@ class HistoryActivity : Activity() {
         data class SessRow(val s: Sess) : PickerRow()
         /** 「新建项目」这类没有现成数据的行。 */
         data class Action(val text: String) : PickerRow()
+        /** 「新建对话」：就在当前项目里开一只新的。 */
+        data class NewChat(val text: String) : PickerRow()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -493,12 +495,15 @@ class HistoryActivity : Activity() {
             val id = r?.json?.optString("sessionId").orEmpty()
             runOnUiThread {
                 if (id.isNotBlank()) {
+                    // 开成功了就把屏幕上的旧消息一并收掉，否则新对话里还挂着上一只的内容。
                     PetSettings.saveChatSession(this, id)
+                    PetHistory.clear(this)
+                    liveText = ""
+                    reload()
                     toast("新对话已开")
                 } else {
                     toast("新对话没开成")
                 }
-                reload()
             }
         }, "pet-newchat").apply { isDaemon = true }.start()
     }
@@ -519,8 +524,8 @@ class HistoryActivity : Activity() {
             }
             else -> {
                 pickerBack.visibility = View.VISIBLE
-                pickerTitle.text = pickerProject.ifBlank { "会话" }
-                loadSessions()
+                pickerTitle.text = pickerProject.ifBlank { PetSettings.pinnedTitle(this) }.ifBlank { "会话" }
+                syncPickerProject()
             }
         }
     }
@@ -572,6 +577,32 @@ class HistoryActivity : Activity() {
         }, "pet-projects").apply { isDaemon = true }.start()
     }
 
+    /**
+     * 三条杠进来时先问宿主「现在钉在哪」，拿项目 id 去查会话。
+     * 少了这一步就会拿上一个项目的 id（或空 id）去查，列出来的是别的项目。
+     */
+    private fun syncPickerProject() {
+        val client = PetClient { PetSettings.load(this) }
+        Thread({
+            val res = try { client.workspaces() } catch (_: Exception) { null }
+            val pinned = res?.json?.optJSONObject("pinned")
+            val id = pinned?.optString("id").orEmpty()
+            val title = pinned?.optString("title").orEmpty()
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) {
+                    if (id.isNotBlank()) pickerProjectId = id
+                    if (title.isNotBlank()) {
+                        pickerProject = title
+                        PetSettings.savePinnedTitle(this, title)
+                        refreshHeader()
+                    }
+                    pickerTitle.text = pickerProject.ifBlank { "会话" }
+                    loadSessions()
+                }
+            }
+        }, "pet-picker-project").apply { isDaemon = true }.start()
+    }
+
     private fun loadSessions() {
         pickerRows.clear()
         pickerRows.add(PickerRow.Head("载入中"))
@@ -599,6 +630,7 @@ class HistoryActivity : Activity() {
             runOnUiThread {
                 sessions = out
                 pickerRows.clear()
+                pickerRows.add(PickerRow.NewChat("新建对话"))
                 if (out.isEmpty()) {
                     pickerRows.add(PickerRow.Head("还没有会话"))
                 } else {
@@ -621,6 +653,10 @@ class HistoryActivity : Activity() {
                 pickProject(row.ws)
             }
             is PickerRow.SessRow -> pickSession(row.s)
+            is PickerRow.NewChat -> {
+                closePicker()
+                newChat()
+            }
             is PickerRow.Action -> toast("新建项目在电脑上做")
             else -> {}
         }
@@ -883,6 +919,11 @@ class HistoryActivity : Activity() {
                     val when_ = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(row.s.at))
                     text.text = "${row.s.title.ifBlank { "未命名" }}   $when_"
                     text.setTextColor(getColor(R.color.pet_text))
+                    text.textSize = 15f
+                }
+                is PickerRow.NewChat -> {
+                    text.text = row.text
+                    text.setTextColor(getColor(R.color.pet_accent))
                     text.textSize = 15f
                 }
                 is PickerRow.Action -> {

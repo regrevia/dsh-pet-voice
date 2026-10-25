@@ -7,7 +7,7 @@
 在电脑浏览器里打开更新页，点下载：
 
 - 更新页：`http://127.0.0.1:<端口>/pet-voice/`
-- 直连文件：仓库 `dist/jingling-0.9.24.apk`，或 GitHub Release 里的同一个文件
+- 直连文件：仓库 `dist/jingling-0.9.27.apk`，或 GitHub Release 里的同一个文件
 
 手机上打开这个 apk。系统会问「允许来自此来源的应用」，允许一次即可。
 

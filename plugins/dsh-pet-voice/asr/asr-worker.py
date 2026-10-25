@@ -95,6 +95,30 @@ def is_silent(samples) -> bool:
     return rms < SILENCE_RMS_INT16
 
 
+def keeps_any_speech(segments) -> bool:
+    """每段要靠「有人声」或「置信度够」站住脚，一条都不剩就当整段是幻听。
+
+    阈值取 whisper 自己的默认口径（no_speech 0.6 / avg_logprob -1.0），压得比默认更严一点：
+    录音里一旦混进 TTS 回声或空调声，base 模型很容易吐「请点赞、订阅、转发」这种话。
+    """
+    if not segments:
+        return True  # 老版本没有 segments 字段时别误杀
+    for seg in segments:
+        try:
+            no_speech = float(seg.get("no_speech_prob") or 0.0)
+            logprob = float(seg.get("avg_logprob") or 0.0)
+            compression = float(seg.get("compression_ratio") or 0.0)
+        except (TypeError, ValueError):
+            return True
+        if no_speech < 0.6 and logprob > -1.0:
+            return True
+        if compression > 3.0:
+            continue  # 复读机式输出，直接不信
+        if logprob > -0.6:
+            return True
+    return False
+
+
 class Worker:
     """把「模型 + 锁」封在一起，HTTP 层只负责收发 JSON。"""
 
@@ -149,6 +173,10 @@ class Worker:
         except Exception as error:  # noqa: BLE001 - 推理异常也要回 200 + ok:false
             return {"ok": False, "error": f"识别失败：{type(error).__name__}: {error}"}
         text = str(result.get("text") or "").strip()
+        if text and not keeps_any_speech(result.get("segments")):
+            # 整段都被判成「没人声 + 概率低」：模型在杂音上编的套话，宁可返回空
+            log(f"丢弃疑似幻听：{text[:40]}")
+            text = ""
         return {"ok": True, "text": text, "ms": int((time.monotonic() - started) * 1000)}
 
 
