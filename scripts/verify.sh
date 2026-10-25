@@ -19,6 +19,8 @@ for f in plugins/dsh-pet-voice/index.js mcp/pet-bridge/xiaoai.mjs mcp/pet-bridge
 done
 
 head_ "2. 插件自测（模拟 HOME，不碰真实配置）"
+# selftest 要求干净 HOME：上次跑剩的面板文件会让它以为在真机上，直接退出 2
+rm -rf /tmp/pvtest && mkdir -p /tmp/pvtest
 OUT=$(HOME=/tmp/pvtest node plugins/dsh-pet-voice/selftest.mjs 2>&1)
 LINE=$(printf '%s\n' "$OUT" | grep -oE 'selftest: [0-9]+/[0-9]+ 通过' | tail -1)
 # 已知基线：老用例「显式 sessionId 不存在 → 404，不乱派」在模拟 HOME 下恒失败，只认这一条，别的都算回归
