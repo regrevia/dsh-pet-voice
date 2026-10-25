@@ -31,3 +31,6 @@ scripts/.cache/
 
 # 基准测试的编译产物
 bench/build/
+
+# 手机上传的图片
+.pet-uploads/

@@ -92,7 +92,8 @@ https://xxx-xxx.trycloudflare.com/pet-voice/?k=<token>
 | --- | --- | --- |
 | GET | `state` | 项目列表、人设、最近会话、唤醒词、`petSession` / `dispatchTarget`；**只给 token 前 8 位**（`tokenHint`），永远不回明文 token。`current` 仅用于界面展示 |
 | POST | `new` | `{workspaceId?, projectPath?, preset?, fresh?}` → `{sessionId, reused}`；**不给项目时落到专属会话** |
-| POST | `dispatch` | `{text, sessionId?}` → 1.2s 内已受理返回 `202 {accepted:true, sessionId}`，已结束返回 `200`。**不带 `sessionId` 一律派给专属会话**（`pet-session.json` 那只，钉在 Pet 项目），绝不回退到界面当前会话；显式给了但不存在 → `404` |
+| POST | `dispatch` | `{text, sessionId?, attachments?}`（`attachments` 最多 6 条绝对路径，拼成 `[图片] …` 附在正文后）→ 1.2s 内已受理返回 `202 {accepted:true, sessionId}`，已结束返回 `200`。**不带 `sessionId` 一律派给专属会话**（`pet-session.json` 那只，钉在 Pet 项目），绝不回退到界面当前会话；显式给了但不存在 → `404` |
+| POST | `upload?name=` | 请求体是原图字节（`content-type` 只认 `image/jpeg`/`image/png`/`image/webp`/`image/gif`，≤12 MB），回 `{ok, path, name, bytes}`，`path` 可直接填进 `dispatch` 的 `attachments` |
 | POST | `say` | `{text, voice?, id?}` → `{ok, seq, queued}`；`text` 超 300 字截断并标 `truncated:true`；队列只留最近 20 条；同 `id` 重复投递只入队一次 |
 | GET | `pair` | `{ok, publicBase, source:"tunnel"|"lan"|"local", tunnelAt, alive?, note?}`；页面引导卡用它填「手机上能打开的地址」。**不含 token**：`tunnel` 取 `xiaoai-url.txt` 的 origin，`lan` 用本机非回环 IPv4+宿主端口，`local` 只有 127.0.0.1（手机打不开）。`tunnelAt` 里的 `?k=` 一律替换成 `<已省略>`；`tunnel` 档会**服务端探活**（`publicBase + api/pair`，1.5 s 超时、30 s 缓存、并发去重），401 也算活着；探不通时 `alive:false` + `note:"隧道域名可能已过期（cloudflared 重启会换域名）"`，**不会**降级到 lan（私网地址手机更打不开） |
 | GET | `say?since=` | `{items:[{seq,text,voice,at}], cursor}`，按 `seq` 升序，最多 20 条；`since=-1` 只对齐游标不回放（页面刷新不重播） |

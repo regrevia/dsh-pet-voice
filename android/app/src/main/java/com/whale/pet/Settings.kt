@@ -142,6 +142,8 @@ object PetSettings {
     private const val K_DISPLAY = "display_mode"
     private const val K_PINNED = "pinned_title"
     private const val K_CHAT_SESSION = "chat_session"
+    /** 上一次看到的「电脑上开着哪只对话」：用来发现桌面端换过会话。 */
+    private const val K_HOST_CURRENT = "host_current_seen"
     private const val K_PENDING_APK = "pending_apk_path"
     private const val K_PENDING_CODE = "pending_apk_code"
     private const val K_PENDING_NAME = "pending_apk_name"
@@ -273,6 +275,13 @@ object PetSettings {
 
     fun clearChatSession(context: Context) {
         prefs(context).edit().remove(K_CHAT_SESSION).apply()
+    }
+
+    /** 桌面端上一次停在哪只对话上（只用来发现「换过了」，不参与派发）。 */
+    fun hostCurrentSeen(context: Context): String = prefs(context).getString(K_HOST_CURRENT, "").orEmpty()
+
+    fun saveHostCurrentSeen(context: Context, sessionId: String) {
+        prefs(context).edit().putString(K_HOST_CURRENT, sessionId.trim()).apply()
     }
 
     /* ---------------- 自动更新：待安装的 APK ---------------- */

@@ -21,6 +21,10 @@ class PetTurn(
     private val cb: Callback,
     /** 为空 = 走宿主默认落点（专属会话）；非空 = 钉在这只会话上（「新对话」之后）。 */
     private val requestedSession: String = "",
+    /** 宿主回执里的落点和 App 钉的那只不一样时回调（上层持久化新指针 + 提示一次）。 */
+    private val onSession: ((String) -> Unit)? = null,
+    /** 这一问要带上的图片（宿主上已落盘的绝对路径），交给插件拼在正文后面。 */
+    private val attachments: List<String> = emptyList(),
 ) {
 
     interface Callback {
@@ -81,6 +85,26 @@ class PetTurn(
 
     @Volatile
     private var stream: PetClient.Stream? = null
+
+    /** 流实际订阅的会话；dispatch 回执改落点时跟着挪，重连也要用它（不能用死的 requestedSession）。 */
+    @Volatile
+    private var streamSession = ""
+
+    /** 已经报给上层的落点，避免同一只会话反复提示。 */
+    @Volatile
+    private var reportedSession = ""
+
+    /**
+     * 本轮是不是「钉的会话已经不在、改投默认落点」重发过。
+     *
+     * 这时真实落点有可能正好等于开流前探到的默认会话，看上去「没变」——但对 App 来说
+     * 指针确实换了：必须照样上报，否则本地钉的死 id 一直留着，下一句又是 404 再来一遍。
+     */
+    @Volatile
+    private var fellBack = false
+
+    /** 是否已经为「别的会话的帧被丢掉」记过一次日志。 */
+    private val foreignDropped = AtomicBoolean(false)
 
     /** 派发前对齐到的帧序号；SSE 一帧没到也靠它把这一轮的帧补回来。 */
     @Volatile
@@ -144,9 +168,10 @@ class PetTurn(
         }
 
         var sse: PetClient.Stream? = null
+        streamSession = requestedSession.ifBlank { expectedSession }
         try {
             // 钉了会话就订阅那只：订阅默认落点会收不到别的会话的增量，只能干等
-            sse = client.openStream(requestedSession.ifBlank { expectedSession }, latency)
+            sse = client.openStream(streamSession, latency)
         } catch (e: Exception) {
             post { cb.onStatus("SSE 不可用，改用轮询") }
         }
@@ -195,7 +220,7 @@ class PetTurn(
                 backoff = (backoff * 2).coerceAtMost(10_000L)
                 s = try {
                     NetLog.reconnect()
-                    client.openStream(requestedSession)
+                    client.openStream(streamSession)
                 } catch (_: Exception) {
                     null
                 }
@@ -228,11 +253,56 @@ class PetTurn(
      * 立刻改投专属会话，这一轮照样有回复；上层收到 404 再清偏好。
      */
     private fun send(text: String): PetClient.Result {
-        val first = client.dispatch(text, requestedSession)
+        val first = client.dispatch(text, requestedSession, attachments = attachments)
         if (first.code != 404 || requestedSession.isBlank()) return first
+        fellBack = true
         NetLog.record("POST /api/dispatch", 404, 0, "钉住的会话失效，改投专属会话")
         post { cb.onStatus("原会话不在了，换回专属会话") }
-        return client.dispatch(text, "")
+        return client.dispatch(text, "", attachments = attachments)
+    }
+
+    /** 派发回执里的落点：宿主把 `usedSessionId` 当准，老宿主没有它就用 `sessionId`。 */
+    private fun resolvedOf(res: PetClient.Result): String {
+        val j = res.json ?: return ""
+        return j.optString("usedSessionId").orEmpty().ifBlank { j.optString("sessionId").orEmpty() }
+    }
+
+    /**
+     * 采纳宿主回执里的落点。
+     *
+     * App 钉的那只可能已经被宿主换掉了（桌面端切了会话、原会话被删、宿主重启后换了默认落点）。
+     * 这时候如果还照着旧 id 收帧，就永远收不到——表现正是「明明在跑，手机一直『接收失败』」：
+     * 流订阅的是旧会话，别的会话的帧又被过滤掉，最后只能等超时。
+     * 所以拿到回执就把订阅、光标、过滤基准一起挪到真实落点，并且只通知上层一次。
+     */
+    /** 对比基准：钉的会话刚失效重发过，就按钉的那只比，落点相同也要上报一次。 */
+    private fun adoptionBaseline(): String =
+        if (fellBack && requestedSession.isNotBlank()) requestedSession else expectedSession.ifBlank { streamSession }
+
+    private fun adoptResolved(resolved: String, previous: String) {
+        if (resolved.isBlank()) return
+        val changed = resolved != previous
+        sessionId = resolved
+        expectedSession = resolved
+        if (streamSession != resolved) {
+            streamSession = resolved
+            // 光标按会话算：换了会话必须重新对齐，不能拿别的会话的序号当本会话的
+            runCatching {
+                client.poll(resolved, -1, 0).json?.let {
+                    val c = it.optInt("cursor", -1)
+                    if (c >= 0) turnCursor = c
+                }
+            }
+            NetLog.record("GET /api/stream", 0, 0, "会话落点变了，重新订阅")
+            dbg("resubscribe session=${resolved.take(8)}")
+            // 关掉旧流，readSse 会按 streamSession 自动重连到新会话
+            runCatching { stream?.close() }
+        }
+        if (changed && reportedSession != resolved) {
+            reportedSession = resolved
+            dbg("session adopted ${previous.take(8)} -> ${resolved.take(8)}")
+            onSession?.let { cb2 -> main.post { cb2(resolved) } }
+        }
     }
 
     private fun dispatchAndWait() {
@@ -252,9 +322,9 @@ class PetTurn(
             else postError("派发失败：${res.error()}")
             return
         }
-        sessionId = res.json?.optString("sessionId").orEmpty()
+        sessionId = resolvedOf(res)
+        adoptResolved(sessionId, adoptionBaseline())
         startPollFallback()
-        expectedSession = sessionId
         post { cb.onStatus("思考中…") }
         val deadline = System.currentTimeMillis() + 180_000
         while (!cancelled.get() && !ended.get() && System.currentTimeMillis() < deadline) {
@@ -291,8 +361,12 @@ class PetTurn(
             postError("派发失败：${res.error()}")
             return
         }
-        sessionId = res.json?.optString("sessionId").orEmpty()
-        expectedSession = sessionId
+        sessionId = resolvedOf(res)
+        adoptResolved(sessionId, adoptionBaseline())
+        if (sessionId.isBlank()) {
+            postError("派发失败：宿主没给会话")
+            return
+        }
         post { cb.onStatus("思考中…（轮询）") }
         val deadline = System.currentTimeMillis() + 185_000
         while (!cancelled.get() && !ended.get() && System.currentTimeMillis() < deadline) {
@@ -332,7 +406,14 @@ class PetTurn(
         // 别人的 start/end/final/delta 混进来就会把这一轮提前收尾（真机「想 4 秒就没输出」）。
         // 顺序要紧：**先按会话过滤，再按 seq 去重**——反过来的话，别的会话的 seq=7
         // 会先把本会话还没到的 seq=7 记成「已收」，本会话那一帧就被当成重复丢掉。
-        if (event != "hello" && event != "say" && expectedSession.isNotBlank() && evSession != expectedSession) return
+        if (event != "hello" && event != "say" && expectedSession.isNotBlank() && evSession != expectedSession) {
+            // 只在第一次落一条：会话绑错时这里会持续吞帧，没有这条日志就看不出「为什么没回复」
+            if (foreignDropped.compareAndSet(false, true)) {
+                NetLog.record("GET /api/stream", 0, 0, "丢弃 ${evSession.take(8)} 的帧，本轮=${expectedSession.take(8)}")
+                dbg("drop foreign session=${evSession.take(8)} want=${expectedSession.take(8)}")
+            }
+            return
+        }
         // 还没派发时不知道目标会话：广播流里别人的 start/end/final 一律不算
         if (expectedSession.isBlank() && event != "hello" && event != "delta") return
         // 同一帧可能从 SSE 和轮询各来一次：带 seq 就按「会话+seq」去重
@@ -533,20 +614,24 @@ class PetTurn(
                 var cursor = turnCursor
                 val deadline = System.currentTimeMillis() + 180_000
                 var failed = 0
+                var failedSince = 0L
                 var endSeenAtPoll = 0L
                 while (!cancelled.get() && !ended.get() && System.currentTimeMillis() < deadline) {
                     val resPoll = runCatching { client.poll(sid, cursor, 20_000) }.getOrNull()
                     if (resPoll == null || !resPoll.ok) {
-                        // 网络切换的那几秒：1s/2s 退避再试，三次不成就让上层给「重试」
+                        // 以前是「连挂三次就判死」：Wi-Fi↔移动网切那几秒正好三次，
+                        // 用户白丢一轮，看到的就是「接收失败」。现在要求「真断了 20 秒」才收。
                         failed += 1
-                        if (failed >= 3) {
-                            postError("没收到回复")
+                        if (failedSince == 0L) failedSince = System.currentTimeMillis()
+                        if (failed >= 3 && System.currentTimeMillis() - failedSince > 20_000) {
+                            postError("没收到回复，重试")
                             break
                         }
-                        Thread.sleep(if (failed == 1) 1_000 else 2_000)
+                        Thread.sleep(if (failed <= 2) 1_000 else 2_000)
                         continue
                     }
                     failed = 0
+                    failedSince = 0L
                     val json = resPoll.json ?: return@Thread
                     val frames = json.optJSONArray("frames")
                     if (frames == null || frames.length() == 0) {
@@ -639,7 +724,8 @@ class PetTurn(
     private fun recoverFromBuffer() {
         val sid = sessionId.ifBlank { expectedSession }
         if (sid.isBlank()) return
-        val frames = runCatching { client.poll(sid, turnCursor, 400).json?.optJSONArray("frames") }.getOrNull() ?: return
+        // 宿主刚把字写进会话、帧还没进广播缓冲的那一下也会空手而归：多等一点再捞。
+        val frames = runCatching { client.poll(sid, turnCursor, 900).json?.optJSONArray("frames") }.getOrNull() ?: return
         for (i in 0 until frames.length()) {
             val f = frames.optJSONObject(i) ?: continue
             val data = f.optJSONObject("data") ?: continue
@@ -649,7 +735,8 @@ class PetTurn(
                     assistant.append(it)
                     feedSentences(it)
                 }
-                "final" -> data.optString("text").takeIf { it.isNotEmpty() }?.let {
+                // message / final 带的是整段（累积）文本：以它为准，别把增量拼重了
+                "message", "final" -> data.optString("text").takeIf { it.isNotEmpty() }?.let {
                     assistant.setLength(0)
                     assistant.append(it)
                 }
@@ -668,6 +755,6 @@ class PetTurn(
         const val FINAL_COMPAT_MS = 1_500L
 
         /** 超过这个时间还没收到结束信号：只给用户一句能懂的提示，不报内部帧名。 */
-        const val TIMEOUT_TEXT = "等待回复超时"
+        const val TIMEOUT_TEXT = "电脑那边没回，再发一次"
     }
 }

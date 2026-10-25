@@ -40,7 +40,7 @@ import {
 } from 'node:fs'
 import { request as httpsRequest } from 'node:https'
 import { homedir, networkInterfaces } from 'node:os'
-import { dirname, extname, join, sep } from 'node:path'
+import { dirname, extname, isAbsolute, join, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 /** zstd 解压：Node 22.15 / 23.8 才加了 zstdDecompressSync。
  *
@@ -176,6 +176,22 @@ const ASR_LOG_PATH = join(ASR_DIR, 'worker.log')
 const ASR_PID_PATH = join(ASR_DIR, 'worker.pid')
 /** 10 s 的 16k/16bit 单声道只有 320 KB；4 MB 是给坏客户端的护栏，不是给正常请求的。 */
 const ASR_MAX_BYTES = 4 * 1024 * 1024
+
+/**
+ * 图片上传（手机拍照/相册直接发原图给电脑，模型再用 read 工具看）。
+ * 类型白名单只有四种，扩展名**只由 content-type 决定**：用户传的 ?name= 只当
+ * 人类可读前缀，绝不能让 `..%2f` 之类的东西决定落盘路径。
+ */
+const UPLOAD_MAX_BYTES = 12 * 1024 * 1024
+const UPLOAD_MAX_ATTACHMENTS = 6
+const UPLOAD_DIR_NAME = '.pet-uploads'
+const UPLOAD_EXTS = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+}
+const UPLOAD_EXT_LIST = 'JPG / PNG / WebP / GIF'
 /** 冷启动预算：base 实测 2.4 s（含 torch import）；large-v3-turbo 光载权重就要 5.1 s。 */
 const ASR_COLD_START_MS = 25000
 const ASR_HEALTH_TIMEOUT = 1500
@@ -1669,6 +1685,16 @@ export const __dispatchInternals = {
   newSessionRoute,
 }
 
+/** 图片上传 / 派发附图（单测用，见 plugins/dsh-pet-voice/test/upload.test.mjs）。 */
+export const __uploadInternals = {
+  extFor,
+  uploadDir,
+  saveUpload,
+  composeDispatchText,
+  normalizeAttachments,
+  MAX_UPLOAD_BYTES: UPLOAD_MAX_BYTES,
+}
+
 /** 写响应安全网（单测用，见 plugins/dsh-pet-voice/test/response-safety.test.mjs）。 */
 export const __netInternals = {
   resGone,
@@ -1685,6 +1711,161 @@ export const __netInternals = {
   NET_GUARD,
 }
 
+
+/* ---------- 图片上传 + 派发附图 ---------- */
+
+/**
+ * content-type → 扩展名。只认白名单；带 charset 之类的参数先剥掉。
+ * 不认识就回空串，调用方回 415。
+ */
+function extFor(contentType) {
+  const type = String(contentType ?? '').split(';')[0].trim().toLowerCase()
+  return UPLOAD_EXTS[type] ?? ''
+}
+
+/** 落盘目录：<项目 cwd>/.pet-uploads（base 显式传入，单测好造临时目录）。 */
+function uploadDir(base) {
+  const root = String(base ?? '').trim()
+  return join(root || process.cwd(), UPLOAD_DIR_NAME)
+}
+
+/** 本地时间戳 yyyyMMdd-HHmmss。 */
+function uploadStamp(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0')
+  return (
+    `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-` +
+    `${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
+  )
+}
+
+/**
+ * ?name= 只取「人类可读前缀」：去掉目录、扩展名和可疑字符，再截短。
+ * 返回空串表示不采用，最终文件名只留时间戳 + 随机段。
+ */
+function uploadNameHint(raw) {
+  const base = String(raw ?? '').replace(/\\/g, '/').split('/').pop() ?? ''
+  const stem = base.includes('.') ? base.slice(0, base.lastIndexOf('.')) : base
+  return stem
+    .replace(/[^0-9A-Za-z\u4e00-\u9fa5_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+}
+
+/**
+ * 保存一张图片（Buffer）。返回 {ok:true, path, name, bytes} 或 {ok:false, status, error}。
+ * 纯 IO，不碰 req/res：HTTP 层和单测共用同一份逻辑。
+ */
+function saveUpload(base, contentType, bytes, opts = {}) {
+  const ext = extFor(contentType)
+  if (!ext) return { ok: false, status: 415, error: `只支持 ${UPLOAD_EXT_LIST} 图片` }
+  const data = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes ?? [])
+  if (data.length > UPLOAD_MAX_BYTES) return { ok: false, status: 413, error: '图片太大（上限 12 MB）' }
+  if (!data.length) return { ok: false, status: 400, error: '图片是空的' }
+  const hint = uploadNameHint(opts.name)
+  const now = opts.now instanceof Date ? opts.now : new Date()
+  const name = `${hint ? `${hint}-` : ''}${uploadStamp(now)}-${randomBytes(3).toString('hex')}.${ext}`
+  // 优先落在项目目录；项目根不可写（只读挂载 / 权限）时退到插件自己的目录，
+  // 否则手机端会看到「图片没存下来」，而模型其实只是少看了一张图。
+  const dirs = [uploadDir(base)]
+  const fallback = String(opts.fallbackDir ?? '').trim()
+  if (fallback && fallback !== dirs[0]) dirs.push(fallback)
+  let lastError = null
+  for (const dir of dirs) {
+    try {
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, name), data)
+      return { ok: true, path: join(dir, name), name, bytes: data.length }
+    } catch (error) {
+      lastError = error
+    }
+  }
+  LOG('图片落盘失败：', lastError?.message ?? lastError)
+  return { ok: false, status: 500, error: '图片没存下来' }
+}
+
+/**
+ * 派发文本拼装：正文 + 空行 + 每张图一行 `[图片] <绝对路径>`。
+ * 没有附件时**原样返回**（老调用方行为不变）。
+ */
+function composeDispatchText(text, paths = []) {
+  const body = String(text ?? '')
+  const list = Array.isArray(paths) ? paths.filter(Boolean).map(String) : []
+  if (!list.length) return body
+  const tail = list.map((path) => `[图片] ${path}`).join('\n')
+  return body.trim() ? `${body}\n\n${tail}` : tail
+}
+
+/**
+ * 校验 attachments 入参：string[]（绝对路径）或 [{path,name}]，最多 6 条，每条必须存在。
+ * 返回 {ok:true, paths} / {ok:false, error}。失败由调用方回 400。
+ */
+function normalizeAttachments(raw) {
+  if (raw === undefined || raw === null) return { ok: true, paths: [] }
+  if (!Array.isArray(raw)) return { ok: false, error: 'attachments 必须是数组' }
+  if (raw.length > UPLOAD_MAX_ATTACHMENTS) {
+    return { ok: false, error: `最多带 ${UPLOAD_MAX_ATTACHMENTS} 张图片` }
+  }
+  const paths = []
+  for (const item of raw) {
+    const value = typeof item === 'string' ? item : String(item?.path ?? '')
+    const path = value.trim()
+    if (!path) return { ok: false, error: '图片路径为空' }
+    if (!isAbsolute(path)) return { ok: false, error: `图片路径必须是绝对路径：${path}` }
+    if (!existsSync(path)) return { ok: false, error: `图片不存在：${path}` }
+    paths.push(path)
+  }
+  return { ok: true, paths }
+}
+
+/**
+ * 图片落在「派发项目」里：优先 pet-session.json 记的 cwd，其次专属会话所属
+ * 项目的工作区路径，最后退回进程 cwd（极端情况也不让上传直接 500）。
+ */
+function petUploadBase(ctx) {
+  const stored = readPetSessionFile()
+  if (stored.cwd) return stored.cwd
+  try {
+    const row = workspaceRows(ctx).find((item) => item.id && item.id === stored.workspaceId)
+    if (row?.path) return row.path
+  } catch (error) {
+    LOG('找图片目录失败：', error?.message ?? error)
+  }
+  return process.cwd()
+}
+
+/**
+ * POST /pet-voice/api/upload?name=<文件名>
+ *
+ * body = 原始图片字节（不是 multipart）。content-type 必须是四种图片之一。
+ * 超 12 MiB → 413，类型不对 → 415，其余失败一律中文一句话。
+ */
+async function handleUpload(ctx, req, res, url) {
+  const declared = Number(req.headers?.['content-length'] ?? NaN)
+  if (Number.isFinite(declared) && declared > UPLOAD_MAX_BYTES) {
+    return sendJson(res, 413, { ok: false, error: '图片太大（上限 12 MB）' })
+  }
+  if (!extFor(req.headers?.['content-type'])) {
+    return sendJson(res, 415, { ok: false, error: `只支持 ${UPLOAD_EXT_LIST} 图片` })
+  }
+  let body
+  try {
+    body = await readBody(req, UPLOAD_MAX_BYTES)
+  } catch (error) {
+    const tooBig = error?.status === 413
+    return sendJson(res, tooBig ? 413 : 400, {
+      ok: false,
+      error: tooBig ? '图片太大（上限 12 MB）' : '读不到请求体',
+    })
+  }
+  const saved = saveUpload(petUploadBase(ctx), req.headers?.['content-type'], body, {
+    name: url.searchParams.get('name') ?? '',
+    fallbackDir: join(HOME_DIR, 'uploads'),
+  })
+  if (!saved.ok) return sendJson(res, saved.status, { ok: false, error: saved.error })
+  netLog('upload', { bytes: saved.bytes, path: saved.path })
+  return sendJson(res, 200, { ok: true, path: saved.path, name: saved.name, bytes: saved.bytes })
+}
 
 /** 项目里的上一只会话；找不到就新建一个。 */
 async function ensureSession(ctx, state, body) {
@@ -1867,7 +2048,11 @@ async function pairInfo(origin) {
 function readPetSessionFile() {
   try {
     const raw = JSON.parse(readFileSync(petSessionFile(), 'utf8'))
-    return { workspaceId: String(raw?.workspaceId ?? ''), sessionId: String(raw?.sessionId ?? '') }
+    return {
+      workspaceId: String(raw?.workspaceId ?? ''),
+      sessionId: String(raw?.sessionId ?? ''),
+      cwd: String(raw?.cwd ?? ''),
+    }
   } catch {
     return { workspaceId: '', sessionId: '' }
   }
@@ -2127,7 +2312,12 @@ async function dispatchToSession(ctx, state, body, req, deps) {
 
 async function dispatchToSessionInner(ctx, state, body, req, deps) {
   const text = String(body?.text ?? '').trim()
-  if (!text) return { status: 400, body: { ok: false, error: 'text 为空' } }
+  // 附件先校验再拼文本：路径不存在/超 6 条要在受理前就 400，别让手机以为发出去了。
+  const attachments = normalizeAttachments(body?.attachments)
+  if (!attachments.ok) return { status: 400, body: { ok: false, error: attachments.error } }
+  const attachmentPaths = attachments.paths
+  if (!text && !attachmentPaths.length) return { status: 400, body: { ok: false, error: 'text 为空' } }
+  const promptText = composeDispatchText(text, attachmentPaths)
   const controller = ctx.get?.('sessionController')
   if (!controller?.prompt) return { status: 503, body: { ok: false, error: '宿主缺少 sessionController' } }
 
@@ -2149,12 +2339,12 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
 
   // 切网重发：同一个 requestId 只落一轮，避免电脑端出现两条相同提问。
   const rid = String(body?.requestId ?? '').trim()
-  netLog('dispatch', { sessionId, chars: text.length, rid: rid.slice(0, 12) })
+  netLog('dispatch', { sessionId, chars: text.length, attachments: attachmentPaths.length, rid: rid.slice(0, 12) })
   if (rid) {
     const hit = DISPATCH_SEEN.get(rid)
     if (hit && Date.now() - hit.at < 120_000) {
       netLog('dispatch-dedupe', { sessionId: hit.sessionId })
-      return { status: 200, body: { ok: true, accepted: true, sessionId: hit.sessionId, usedSessionId: hit.sessionId, deduped: true } }
+      return { status: 200, body: { ok: true, accepted: true, sessionId: hit.sessionId, usedSessionId: hit.sessionId, deduped: true, attachments: attachmentPaths.length } }
     }
     DISPATCH_SEEN.set(rid, { at: Date.now(), sessionId })
     for (const [key, value] of DISPATCH_SEEN) {
@@ -2198,7 +2388,7 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
       requestId: rid || randomBytes(8).toString('hex'),
       sessionId,
       mode: 'queue',
-      content: [{ type: 'text', text: buildDispatchPrompt(text) }],
+      content: [{ type: 'text', text: buildDispatchPrompt(promptText) }],
       clientTimeZone: tzOf(req),
     },
     ac.signal,
@@ -2228,9 +2418,9 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
       LOG('prompt 异步失败：', error?.message ?? error)
       deps.emit(sessionId, 'error', { message: String(error?.message ?? error) })
     })
-    return { status: 202, body: { ok: true, accepted: true, sessionId, usedSessionId: sessionId } }
+    return { status: 202, body: { ok: true, accepted: true, sessionId, usedSessionId: sessionId, attachments: attachmentPaths.length } }
   }
-  return { status: 200, body: { ok: true, accepted: true, sessionId, usedSessionId: sessionId, value: first.value ?? null } }
+  return { status: 200, body: { ok: true, accepted: true, sessionId, usedSessionId: sessionId, value: first.value ?? null, attachments: attachmentPaths.length } }
 }
 
 /* ------------------------------------------------------------------ */
@@ -4469,6 +4659,7 @@ export function apply(ctx, config) {
       if (route === 'diag' && method === 'GET') {
         return sendJson(res, 200, { ok: true, streams: [...streams.keys()], events: NET_LOG.slice(-200) })
       }
+      if (route === 'upload' && method === 'POST') return handleUpload(ctx, req, res, url)
       if (route === 'asr' && method === 'POST') return handleAsr(req, res)
       if (route === 'asr' && method === 'GET') {
         const health = await asrHealth()

@@ -28,21 +28,39 @@
                 android:src="@drawable/ic_back"
                 android:tint="@color/pet_text_dim" />
 
-            <!-- 左上项目名：点它进一级（项目）列表 -->
-            <TextView
-                android:id="@+id/historyProject"
+            <!-- 左上：项目名 + 这一问落到哪个会话（会话名只在有时显示） -->
+            <LinearLayout
+                android:id="@+id/historyHead"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:background="?android:attr/selectableItemBackground"
-                android:ellipsize="end"
-                android:maxLines="1"
+                android:orientation="vertical"
                 android:paddingStart="4dp"
-                android:paddingTop="8dp"
+                android:paddingTop="7dp"
                 android:paddingEnd="4dp"
-                android:paddingBottom="8dp"
-                android:textColor="@color/pet_text"
-                android:textSize="15sp" />
+                android:paddingBottom="7dp">
+
+                <TextView
+                    android:id="@+id/historyProject"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:textColor="@color/pet_text"
+                    android:textSize="15sp" />
+
+                <TextView
+                    android:id="@+id/historySession"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="1dp"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:textColor="@color/pet_hint"
+                    android:textSize="11sp"
+                    android:visibility="gone" />
+            </LinearLayout>
 
             <ImageView
                 android:id="@+id/historySessions"
@@ -178,10 +196,21 @@
                 android:textSize="14sp" />
 
             <ImageView
+                android:id="@+id/chatAttach"
+                android:layout_width="40dp"
+                android:layout_height="46dp"
+                android:layout_marginStart="6dp"
+                android:background="?android:attr/selectableItemBackground"
+                android:contentDescription="发图片"
+                android:padding="10dp"
+                android:src="@drawable/ic_plus"
+                android:tint="@color/pet_text_dim" />
+
+            <ImageView
                 android:id="@+id/chatEmoji"
                 android:layout_width="46dp"
                 android:layout_height="46dp"
-                android:layout_marginStart="8dp"
+                android:layout_marginStart="6dp"
                 android:background="@drawable/bg_input"
                 android:contentDescription="表情"
                 android:padding="12dp"
@@ -192,7 +221,7 @@
                 android:id="@+id/chatMic"
                 android:layout_width="46dp"
                 android:layout_height="46dp"
-                android:layout_marginStart="8dp"
+                android:layout_marginStart="6dp"
                 android:background="@drawable/bg_input"
                 android:contentDescription="按住说话"
                 android:padding="12dp"
@@ -203,7 +232,7 @@
                 android:id="@+id/chatSend"
                 android:layout_width="46dp"
                 android:layout_height="46dp"
-                android:layout_marginStart="8dp"
+                android:layout_marginStart="6dp"
                 android:background="@drawable/bg_btn_primary"
                 android:contentDescription="发送"
                 android:padding="12dp"

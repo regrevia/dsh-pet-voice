@@ -7,8 +7,12 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.ColorDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -31,6 +35,7 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -46,6 +51,12 @@ class HistoryActivity : Activity() {
     private companion object {
         /** 扫码页的请求码（首页用的是 42，这里错开）。 */
         const val REQ_SCAN = 43
+        /** 从相册挑一张图。 */
+        const val REQ_PICK_IMAGE = 44
+        /** 发出去之前先把长边缩到这个像素以内，再压成 JPEG。 */
+        const val SEND_IMAGE_MAX_PX = 1600
+        /** 页面开着时多久问一次「电脑上还是那只对话吗」。 */
+        const val HOST_WATCH_MS = 20_000L
     }
 
 
@@ -61,6 +72,9 @@ class HistoryActivity : Activity() {
     private lateinit var micBtn: android.widget.ImageView
     private lateinit var projectBtn: TextView
     private lateinit var sessionsBtn: android.widget.ImageView
+    private lateinit var head: View
+    private lateinit var sessionLabel: TextView
+    private lateinit var attachBtn: android.widget.ImageView
 
     private lateinit var pickerScrim: View
     private lateinit var pickerSheet: View
@@ -78,6 +92,14 @@ class HistoryActivity : Activity() {
     /** 用户自己点了「停止」：这一轮不该再弹「没收到回复」。 */
     private var userStopped = false
     private var lastSent = ""
+    /** 上一次带出去的图片路径：重发要跟着一起重发。 */
+    private var lastAttachment = ""
+    /** 屏幕上这只对话的名字（宿主说叫什么就叫什么，查不到就空着）。 */
+    private var liveSessionTitle = ""
+    /** 桌面端换到别的对话了：给一行提醒，点一下这边跟过去。空 = 不用提示。 */
+    private var offerId = ""
+    private var offerTitle = ""
+    private var syncing = false
     private var tts: TtsPlayer? = null
     private var render: ChatRender? = null
 
@@ -101,6 +123,10 @@ class HistoryActivity : Activity() {
         data class Me(val text: String) : ChatRow()
         data class Pet(val text: String, val rich: Boolean) : ChatRow()
         data class Live(val text: String) : ChatRow()
+        /** 居中灰字提示（换过会话之类），不算谁说的话。 */
+        data class Note(val text: String) : ChatRow()
+        /** 电脑上换到别的对话去了：一行可点的提醒，点了这边就跟过去（不落库，不污染历史）。 */
+        data class Offer(val id: String, val title: String) : ChatRow()
     }
 
     private sealed class PickerRow {
@@ -134,6 +160,9 @@ class HistoryActivity : Activity() {
         micBtn = findViewById(R.id.chatMic)
         projectBtn = findViewById(R.id.historyProject)
         sessionsBtn = findViewById(R.id.historySessions)
+        head = findViewById(R.id.historyHead)
+        sessionLabel = findViewById(R.id.historySession)
+        attachBtn = findViewById(R.id.chatAttach)
 
         pickerScrim = findViewById(R.id.pickerScrim)
         pickerSheet = findViewById(R.id.pickerSheet)
@@ -147,11 +176,15 @@ class HistoryActivity : Activity() {
         adapter.registerDataSetObserver(object : android.database.DataSetObserver() {
             override fun onChanged() = scrollToBottom()
         })
+        // 条目点击交给列表自己派发：挂在子视图上的监听在复用行里靠不住
+        list.setOnItemClickListener { _, _, pos, _ -> adapter.tap(pos) }
         pickerList.adapter = pickerAdapter
         list.dividerHeight = 0
 
         findViewById<View>(R.id.historyBack).setOnClickListener { finish() }
         projectBtn.setOnClickListener { openPicker(1) }
+        // 标题整块可点：项目名和会话名都走同一个选择层
+        head.setOnClickListener { openPicker(if (liveSessionTitle.isBlank()) 1 else 2) }
         sessionsBtn.setOnClickListener { openPicker(2) }
         findViewById<View>(R.id.historyNew).setOnClickListener { newChat() }
         pickerClose.setOnClickListener { closePicker() }
@@ -162,6 +195,7 @@ class HistoryActivity : Activity() {
 
         sendBtn.setOnClickListener { sendChat() }
         emojiBtn.setOnClickListener { showEmojiPicker() }
+        attachBtn.setOnClickListener { pickImage() }
         runStop.setOnClickListener { stopTurn() }
         input.setOnEditorActionListener { _, actionId, ev ->
             if (actionId == EditorInfo.IME_ACTION_SEND || (ev?.keyCode == KeyEvent.KEYCODE_ENTER && ev.action == KeyEvent.ACTION_DOWN)) {
@@ -195,24 +229,60 @@ class HistoryActivity : Activity() {
 
         refreshHeader()
         reload()
+        takeSharedImage(intent)
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        if (intent == null) return
+        setIntent(intent)
+        takeSharedImage(intent)
+    }
+
+    /** 外面「分享 → 小精灵」进来的图：直接走发图，不弹相册。 */
+    private fun takeSharedImage(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_SEND) return
+        @Suppress("DEPRECATION")
+        val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM) ?: return
+        // 同一个 Intent 只接一次，转屏/回前台别重发
+        intent.removeExtra(Intent.EXTRA_STREAM)
+        window.decorView.post { sendImage(uri) }
     }
 
     override fun onResume() {
         super.onResume()
         refreshHeader()
         reload()
+        syncSession()
+        // 页面开着的时候电脑上换了会话，也要能看见（20 秒一次，够快也不费电）
+        ui.removeCallbacks(hostWatch)
+        ui.postDelayed(hostWatch, HOST_WATCH_MS)
+    }
+
+    private val hostWatch = object : Runnable {
+        override fun run() {
+            syncSession()
+            ui.postDelayed(this, HOST_WATCH_MS)
+        }
     }
 
     override fun onPause() {
         super.onPause()
+        ui.removeCallbacks(hostWatch)
         // 离开页面就别再录了，免得麦克风一直攥在手里
         micDown = false
         if (recorder?.isRecording == true) runCatching { recorder?.stop() }
-        stopTurn()
+        // 只是不再出声：这一轮还在电脑上跑，切回来照样接得住。
+        // 以前这里直接取消，用户去看一眼电脑再回来，回复就没了。
+        runCatching { tts?.release() }
+        tts = null
     }
 
     override fun onDestroy() {
+        ui.removeCallbacks(hostWatch)
         ui.removeCallbacksAndMessages(null)
+        turn?.cancel()
+        turn = null
         runCatching { tts?.release() }
         tts = null
         runCatching { render?.release() }
@@ -235,14 +305,189 @@ class HistoryActivity : Activity() {
     private fun refreshHeader() {
         val title = PetSettings.pinnedTitle(this)
         projectBtn.text = title.ifBlank { "项目" }
+        sessionLabel.text = liveSessionTitle
+        sessionLabel.visibility = if (liveSessionTitle.isBlank()) View.GONE else View.VISIBLE
+    }
+
+    /**
+     * 跟宿主核一次「屏幕上这只对话到底是哪只」。
+     *
+     * App 发消息会带上自己钉的会话 id，所以落点由这边说了算；但钉的那可能在电脑上被
+     * 删了/归档了。核对不上就跟着宿主的落点走，换过一次就在对话里留一行——
+     * 不能让人对着一个已经悄悄换了对象的窗口接着说话。
+     */
+    private fun syncSession(after: (() -> Unit)? = null) {
+        if (syncing) {
+            after?.invoke()
+            return
+        }
+        syncing = true
+        val client = PetClient { PetSettings.load(this) }
+        Thread({
+            val res = try { client.state() } catch (_: Exception) { null }
+            runOnUiThread {
+                syncing = false
+                if (!isFinishing && !isDestroyed) {
+                    res?.json?.let { adoptHostState(it) }
+                    after?.invoke()
+                }
+            }
+        }, "pet-session-sync").apply { isDaemon = true }.start()
+    }
+
+    /** 宿主现状 → 标题 + 本地指针。只在真的变了的时候动。 */
+    private fun adoptHostState(state: JSONObject) {
+        val target = state.optString("dispatchTarget").orEmpty()
+        val current = state.optJSONObject("current")
+        val hostId = target.ifBlank { current?.optString("id").orEmpty() }
+        watchHostCurrent(state, current)
+        val mine = PetSettings.chatSession(this)
+        val shown = mine.ifBlank { hostId }
+        val title = titleOf(state, shown)
+        if (title.isNotBlank() && niceTitle(title) != liveSessionTitle) {
+            liveSessionTitle = niceTitle(title)
+            refreshHeader()
+        }
+        // 本地没钉：从这一刻起明确钉在宿主当前落点上，之后电脑上再换也不会把它带走
+        if (mine.isBlank() && hostId.isNotBlank()) PetSettings.saveChatSession(this, hostId)
+        // 最近会话表里查不到名字（太老、掉出列表）：单独问这只一句，只补标题
+        if (title.isBlank() && shown.isNotBlank()) syncTitle(shown)
+    }
+
+    /**
+     * 电脑上开着的那只对话，和上次看到的不一样 = 用户在桌面端换过会话。
+     *
+     * 不自动把这边拽过去：App 钉的会话是用户在这边选的，被悄悄改掉更糟。只在对话末尾
+     * 留一行可点的提醒，点了才跟。识别用「上次看到的是哪只」，所以不会每次打开都唠叨。
+     */
+    private fun watchHostCurrent(state: JSONObject, current: JSONObject?) {
+        val id = current?.optString("id").orEmpty()
+        if (id.isBlank()) return
+        // 名字以会话表里那份为准（current 上常常还没有标题）；表里也没有就去问这只一句，
+        // 先按通用的话显示，名字回来再换。宁可不显示 id，也不把一串编号糊到脸上。
+        val known = titleOf(state, id)
+        if (known.isBlank()) refreshOfferTitle(id)
+        val title = niceTitle(known).ifBlank { "另一只对话" }
+        val seen = PetSettings.hostCurrentSeen(this)
+        val pin = PetSettings.chatSession(this)
+        val changed = seen.isNotBlank() && seen != id
+        if (seen != id) PetSettings.saveHostCurrentSeen(this, id)
+        if (id == pin) {
+            // 又回到这边钉的那只：提醒作废
+            if (offerId.isNotBlank()) {
+                offerId = ""
+                offerTitle = ""
+                reload()
+            }
+            return
+        }
+        if (changed && offerId != id) {
+            offerId = id
+            offerTitle = title
+            reload()
+        }
+    }
+
+    /** 会话表里没这只的名字：单独问一句，回来再刷新那行提醒。 */
+    private fun refreshOfferTitle(id: String) {
+        val client = PetClient { PetSettings.load(this) }
+        Thread({
+            val title = try {
+                client.sessionInfo(id).json?.optJSONObject("session")?.optString("title").orEmpty()
+            } catch (_: Exception) {
+                ""
+            }
+            if (title.isBlank()) return@Thread
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed && offerId == id && niceTitle(title) != offerTitle) {
+                    offerTitle = niceTitle(title)
+                    reload()
+                }
+            }
+        }, "pet-offer-title").apply { isDaemon = true }.start()
+    }
+
+    /** 跟到电脑上现在开着的那只：换指针、清提醒，从现在起这句窗口就对上了。 */
+    private fun followHostCurrent() {
+        val id = offerId
+        if (id.isBlank()) return
+        val title = offerTitle
+        PetSettings.saveChatSession(this, id)
+        offerId = ""
+        offerTitle = ""
+        liveSessionTitle = title
+        refreshHeader()
+        reload()
+        syncSession()
+    }
+
+    /**
+     * 宿主给的名字有时是原始提示词（开头一片「#」和空白），上屏前收拾成一句话。
+     * 太长就截断——名字是给人认的，不是给全文的。
+     */
+    private fun niceTitle(raw: String): String {
+        val t = raw.replace(Regex("[#*>`]+"), " ").replace(Regex("\\s+"), " ").trim()
+        return if (t.length <= 22) t else t.take(21).trimEnd() + "…"
+    }
+
+    /** 会话 id 在 state 里查名字；查不到回空串（宁可不显示，也不把 id 糊到脸上）。 */
+    private fun titleOf(state: JSONObject, id: String): String {
+        if (id.isBlank()) return ""
+        val cur = state.optJSONObject("current")
+        if (cur != null && cur.optString("id") == id) {
+            cur.optString("title").orEmpty().let { if (it.isNotBlank()) return it }
+        }
+        val arr = state.optJSONArray("sessions") ?: return ""
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            if (o.optString("id") == id) return o.optString("title").orEmpty()
+        }
+        return ""
+    }
+
+    /** 会话表里没这只（多半太老、掉出了最近列表）：单独问一句它的名字。 */
+    private fun syncTitle(id: String) {
+        val client = PetClient { PetSettings.load(this) }
+        Thread({
+            val title = try { client.sessionInfo(id).json?.optJSONObject("session")?.optString("title").orEmpty() } catch (_: Exception) { "" }
+            if (title.isBlank()) return@Thread
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed && id == PetSettings.chatSession(this) && niceTitle(title) != liveSessionTitle) {
+                    liveSessionTitle = niceTitle(title)
+                    refreshHeader()
+                }
+            }
+        }, "pet-session-title").apply { isDaemon = true }.start()
+    }
+
+    /**
+     * 这一问实际落在宿主的哪只上（[PetTurn] 从回执里读出来的）。
+     *
+     * 和本地钉的不一样 = 钉的那只不在了，宿主把它换掉了：跟过去、存下来、留一行提示。
+     */
+    private fun onSessionResolved(id: String) {
+        if (id.isBlank()) return
+        val mine = PetSettings.chatSession(this)
+        if (id == mine) return
+        val wasPinned = mine.isNotBlank()
+        PetSettings.saveChatSession(this, id)
+        liveSessionTitle = ""
+        refreshHeader()
+        if (wasPinned) {
+            PetHistory.append(this, PetHistory.ROLE_NOTE, "原来那只对话不在了，换了一只继续")
+            reload()
+        }
+        syncSession()
     }
 
     private fun reload() {
         val items = PetHistory.all(this)
-        val lastPet = items.indexOfLast { !it.isMe }
+        val lastPet = items.indexOfLast { !it.isMe && !it.isNote }
         val rows = ArrayList<ChatRow>(items.size + 2)
         items.forEachIndexed { i, item ->
-            if (item.isMe) {
+            if (item.isNote) {
+                rows.add(ChatRow.Note(item.text))
+            } else if (item.isMe) {
                 rows.add(ChatRow.Me(item.text))
             } else {
                 // 只有最后一条助手消息挂富文本渲染器：历史长列表里塞多个 WebView 会卡
@@ -251,6 +496,7 @@ class HistoryActivity : Activity() {
         }
         val live = liveText
         if (live.isNotBlank()) rows.add(ChatRow.Live(live))
+        if (offerId.isNotBlank()) rows.add(ChatRow.Offer(offerId, offerTitle))
         adapter.rows = rows
         adapter.notifyDataSetChanged()
         empty.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
@@ -357,20 +603,27 @@ class HistoryActivity : Activity() {
 
     private fun resendLast() {
         val text = lastSent
-        if (text.isBlank()) return
+        if (text.isBlank() && lastAttachment.isBlank()) return
         adapter.error = ""
         adapter.errorAction = null
         if (turn != null) return
-        send(text)
+        send(text, lastAttachment, if (text.isBlank()) "图片" else text)
     }
 
-    private fun send(text: String) {
+    /**
+     * 发一句出去。
+     *
+     * @param attachment 已经在宿主上落盘的图片路径（没发图就空着），插件把它拼在正文后面
+     * @param shownAs 气泡里显示的字：光发图时正文是空的，气泡上得有个「图片」
+     */
+    private fun send(text: String, attachment: String = "", shownAs: String = "") {
         lastSent = text
+        lastAttachment = attachment
         adapter.error = ""
         adapter.errorAction = null
         adapter.live = ""
         turnStart = System.currentTimeMillis()
-        PetHistory.append(this, PetHistory.ROLE_ME, text)
+        PetHistory.append(this, PetHistory.ROLE_ME, shownAs.ifBlank { text })
         reload()
         typing.visibility = View.VISIBLE
         runBar.visibility = View.VISIBLE
@@ -407,6 +660,8 @@ class HistoryActivity : Activity() {
                 }
             },
             PetSettings.chatSession(this),
+            onSession = { id -> onSessionResolved(id) },
+            attachments = if (attachment.isBlank()) emptyList() else listOf(attachment),
         )
         turn = t
         t.start()
@@ -449,6 +704,11 @@ class HistoryActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_PICK_IMAGE) {
+            val uri = data?.data
+            if (resultCode == RESULT_OK && uri != null) sendImage(uri)
+            return
+        }
         if (requestCode != REQ_SCAN) return
         if (resultCode == RESULT_OK) {
             adapter.error = ""
@@ -459,18 +719,99 @@ class HistoryActivity : Activity() {
 
     private val ticker = object : Runnable {
         override fun run() {
-            if (turn == null) return
+            val t = turn ?: return
             val ms = System.currentTimeMillis() - turnStart
-            // 线程卡在开流/长轮询里时回调可能永远不来：一路没字就自己收工，别让人对着「处理中」发呆
-            if (ms > 45_000 && adapter.live.isBlank()) {
+            // 慢不等于坏：电脑上真在跑（长命令、多步任务）就该继续等。
+            // 以前这里 45 s 没出字就自己收工，一轮长活干完却没人接了。
+            if (ms > 210_000) {
                 userStopped = false
-                turn?.cancel()
+                t.cancel()
                 finishTurn(null)
                 return
             }
-            runText.text = "处理中 ${ms / 1000} s"
+            runText.text = if (ms > 90_000) "还在跑 ${ms / 1000} s · 可中断" else "处理中 ${ms / 1000} s"
             ui.postDelayed(this, 1000)
         }
+    }
+
+    /* ---------------- 发图片 ---------------- */
+
+    private fun pickImage() {
+        if (turn != null) {
+            toast("上一轮还没结束")
+            return
+        }
+        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+            type = "image/*"
+            addCategory(Intent.CATEGORY_OPENABLE)
+        }
+        try {
+            startActivityForResult(Intent.createChooser(intent, "选一张图"), REQ_PICK_IMAGE)
+        } catch (_: Exception) {
+            toast("打不开相册")
+        }
+    }
+
+    /**
+     * 挑完图：先在本地缩到 1600 px、压成 JPEG 再传上去，传完的路径就是这一问的附件。
+     *
+     * 原图三五兆，走隧道传一遍再让电脑读一遍都是白等；模型看 1600 px 足够。
+     * 输入框里有字就一起发（那句话当正文），没字就只发图。
+     */
+    private fun sendImage(uri: Uri) {
+        val caption = input.text?.toString()?.trim().orEmpty()
+        val client = PetClient { PetSettings.load(this) }
+        runBar.visibility = View.VISIBLE
+        runText.text = "传图片"
+        Thread({
+            val bytes = try { scaledJpeg(uri) } catch (_: Exception) { null }
+            if (bytes == null) {
+                runOnUiThread {
+                    runBar.visibility = View.GONE
+                    toast("这张图读不出来")
+                }
+                return@Thread
+            }
+            val up = try {
+                client.uploadImage(bytes, "chat-${System.currentTimeMillis()}", "image/jpeg")
+            } catch (_: Exception) {
+                null
+            }
+            val path = up?.json?.optString("path").orEmpty()
+            val err = up?.json?.optString("error").orEmpty()
+            runOnUiThread {
+                runBar.visibility = View.GONE
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                when {
+                    up == null -> toast("图片没传上去，网络不通")
+                    path.isBlank() -> toast(err.ifBlank { "图片没传上去" })
+                    else -> {
+                        input.setText("")
+                        send(caption, path, if (caption.isBlank()) "图片" else caption)
+                    }
+                }
+            }
+        }, "pet-upload").apply { isDaemon = true }.start()
+    }
+
+    /** 读图 → 摆正 → 长边缩到 1600 px 以内 → JPEG q80。 */
+    private fun scaledJpeg(uri: Uri): ByteArray? {
+        val bmp = if (Build.VERSION.SDK_INT >= 28) {
+            val src = ImageDecoder.createSource(contentResolver, uri)
+            ImageDecoder.decodeBitmap(src) { decoder, info, _ ->
+                decoder.isMutableRequired = false
+                val long = maxOf(info.size.width, info.size.height)
+                if (long > SEND_IMAGE_MAX_PX) {
+                    decoder.setTargetSampleSize(Math.max(1, Math.ceil(long.toDouble() / SEND_IMAGE_MAX_PX).toInt()))
+                }
+            }
+        } else {
+            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+        } ?: return null
+        val out = ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.JPEG, 80, out)
+        bmp.recycle()
+        return out.toByteArray()
     }
 
     private fun stopTurn() {
@@ -497,6 +838,8 @@ class HistoryActivity : Activity() {
                 if (id.isNotBlank()) {
                     // 开成功了就把屏幕上的旧消息一并收掉，否则新对话里还挂着上一只的内容。
                     PetSettings.saveChatSession(this, id)
+                    liveSessionTitle = PetSettings.pinnedTitle(this)
+                    refreshHeader()
                     PetHistory.clear(this)
                     liveText = ""
                     reload()
@@ -692,6 +1035,8 @@ class HistoryActivity : Activity() {
             }
             runOnUiThread {
                 PetSettings.saveChatSession(this, s.id)
+                liveSessionTitle = s.title
+                refreshHeader()
                 reload()
             }
         }, "pet-pick-session").apply { isDaemon = true }.start()
@@ -819,6 +1164,15 @@ class HistoryActivity : Activity() {
         override fun getItem(position: Int): Any? = rows.getOrNull(position)
         override fun getItemId(position: Int): Long = position.toLong()
 
+        /** 点了一行：失败行 = 重发，换会话的提醒 = 跟过去，其余不动。 */
+        fun tap(position: Int) {
+            if (position >= rows.size) {
+                (errorAction ?: onRetry)()
+                return
+            }
+            if (rows[position] is ChatRow.Offer) followHostCurrent()
+        }
+
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
             if (position >= rows.size) {
                 // 发送失败的那一行：可点，点一下重发
@@ -830,7 +1184,8 @@ class HistoryActivity : Activity() {
                 (v as android.widget.LinearLayout).gravity = Gravity.START
                 bubble.background = null
                 bubble.setPadding(0, 0, 0, 0)
-                v.setOnClickListener { (errorAction ?: onRetry)() }
+                plainRow(v)
+                text.setOnClickListener { (errorAction ?: onRetry)() }
                 return v
             }
             val row = rows[position]
@@ -838,14 +1193,65 @@ class HistoryActivity : Activity() {
                 is ChatRow.Me -> bindText(convertView, parent, row.text, mine = true)
                 is ChatRow.Pet -> if (row.rich) bindRich(convertView, parent, row.text) else bindText(convertView, parent, row.text, mine = false)
                 is ChatRow.Live -> bindText(convertView, parent, row.text, mine = false)
+                is ChatRow.Note -> bindNote(convertView, parent, row.text)
+                is ChatRow.Offer -> bindOffer(convertView, parent, row.title)
             }
+        }
+
+        /** 居中的灰字提示行：换过会话才出现，几行而已，不复用行视图免得串字号。 */
+        private fun bindNote(convertView: View?, parent: ViewGroup, raw: String): View {
+            val v = convertView ?: layoutInflater.inflate(R.layout.item_history, parent, false)
+            plainRow(v)
+            val bubble = v.findViewById<FrameLayout>(R.id.itemBubble)
+            val text = v.findViewById<TextView>(R.id.itemText)
+            if (bubble.childCount > 1) bubble.removeViews(1, bubble.childCount - 1)
+            (v as android.widget.LinearLayout).gravity = Gravity.CENTER
+            bubble.background = null
+            bubble.setPadding(0, dp(3), 0, dp(3))
+            text.visibility = View.VISIBLE
+            text.text = raw
+            text.textSize = 12.5f
+            text.setTextColor(getColor(R.color.pet_hint))
+            text.maxWidth = resources.displayMetrics.widthPixels - dp(48)
+            text.setOnLongClickListener(null)
+            return v
+        }
+
+        /** 桌面端换过会话的那一行：一眼看得见，点一下就跟过去。 */
+        private fun bindOffer(convertView: View?, parent: ViewGroup, title: String): View {
+            val v = convertView ?: layoutInflater.inflate(R.layout.item_history, parent, false)
+            val bubble = v.findViewById<FrameLayout>(R.id.itemBubble)
+            val text = v.findViewById<TextView>(R.id.itemText)
+            if (bubble.childCount > 1) bubble.removeViews(1, bubble.childCount - 1)
+            (v as android.widget.LinearLayout).gravity = Gravity.CENTER
+            bubble.background = bubble(getColor(R.color.pet_hint_bg), 0)
+            bubble.setPadding(dp(12), dp(7), dp(12), dp(7))
+            text.visibility = View.VISIBLE
+            text.text = "电脑上切到了「" + title + "」· 跟过去"
+            text.textSize = 13f
+            text.setTextColor(getColor(R.color.pet_accent))
+            text.maxWidth = resources.displayMetrics.widthPixels - dp(56)
+            text.setOnLongClickListener(null)
+            plainRow(v)
+            text.setOnClickListener { followHostCurrent() }
+            return v
+        }
+
+        /** 普通气泡不吃点击：复用行上可能还挂着别的监听。 */
+        private fun plainRow(v: View) {
+            v.setOnClickListener(null)
+            v.isClickable = false
+            v.findViewById<TextView>(R.id.itemText)?.setOnClickListener(null)
         }
 
         private fun bindText(convertView: View?, parent: ViewGroup, raw: String, mine: Boolean): View {
             val v = convertView ?: layoutInflater.inflate(R.layout.item_history, parent, false)
+            plainRow(v)
             val bubble = v.findViewById<FrameLayout>(R.id.itemBubble)
             val text = v.findViewById<TextView>(R.id.itemText)
             text.visibility = View.VISIBLE
+            // 行视图会复用：字体大小也必须显式回到正文尺寸，否则接着上一条提示行就是小字
+            text.textSize = 15f
             text.text = if (mine) raw else MdPlain.of(raw)
             // 复刻桌面端：我说的靠右、短气泡；鱼回的不带气泡、占满整行
             (v as android.widget.LinearLayout).gravity = if (mine) Gravity.END else Gravity.START
@@ -868,6 +1274,7 @@ class HistoryActivity : Activity() {
 
         private fun bindRich(convertView: View?, parent: ViewGroup, raw: String): View {
             val v = bindText(convertView, parent, raw, mine = false)
+            plainRow(v)
             val bubble = v.findViewById<FrameLayout>(R.id.itemBubble)
             val text = v.findViewById<TextView>(R.id.itemText)
             val renderer = render ?: return v

@@ -75,10 +75,17 @@ class PetClient(private val config: () -> PetConfig) {
         text: String,
         sessionId: String = "",
         requestId: String = java.util.UUID.randomUUID().toString(),
+        /** 宿主上已落盘的图片绝对路径；插件把路径拼在这一问后面，模型自己去看图。 */
+        attachments: List<String> = emptyList(),
     ): Result {
         // requestId 跟着这一次发送走：重发时同一句不会被当成两问，桌面端也不会复读
         val body = JSONObject().put("text", text).put("requestId", requestId)
         if (sessionId.isNotBlank()) body.put("sessionId", sessionId)
+        if (attachments.isNotEmpty()) {
+            val arr = org.json.JSONArray()
+            attachments.forEach { arr.put(it) }
+            body.put("attachments", arr)
+        }
         return request(
             "dispatch",
             emptyMap(),
@@ -88,6 +95,10 @@ class PetClient(private val config: () -> PetConfig) {
             attempts = 2,
         )
     }
+
+    /** 单独问一只会话的头（标题、工作目录）；`limit=1` 只取一条转录，够轻。 */
+    fun sessionInfo(id: String, limit: Int = 1): Result =
+        get("session", mapOf("id" to id, "limit" to limit.toString()))
 
     /** `fresh=true` 强制新开一只会话；不带 fresh 则复用宿主记住的那只。 */
     fun newSession(fresh: Boolean = false): Result =
@@ -281,6 +292,29 @@ class PetClient(private val config: () -> PetConfig) {
                 TurnLatency.TAG,
                 "asr ${(System.nanoTime() - t0) / 1_000_000}ms wav=${wav.size}B http=$code",
             )
+            return Result(code, text, text.toJsonOrNull())
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    /**
+     * 发图：原始字节丢给宿主 `POST /api/upload`，宿主落到项目目录里并回绝对路径。
+     * 走原始字节而不是 multipart —— 宿主那边不用解析表单，App 这边也不用拼边界。
+     */
+    fun uploadImage(bytes: ByteArray, name: String, mime: String): Result {
+        val t0 = System.nanoTime()
+        val conn = open("upload", mapOf("name" to name), "POST", 60_000)
+        try {
+            conn.doOutput = true
+            conn.setFixedLengthStreamingMode(bytes.size)
+            conn.setRequestProperty("Content-Type", mime)
+            conn.outputStream.use { it.write(bytes) }
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.use { it.readBytes().toString(Charsets.UTF_8) }.orEmpty()
+            val ms = (System.nanoTime() - t0) / 1_000_000
+            NetLog.record("POST /api/upload", code, ms, "${bytes.size / 1024}KB $mime")
             return Result(code, text, text.toJsonOrNull())
         } finally {
             conn.disconnect()

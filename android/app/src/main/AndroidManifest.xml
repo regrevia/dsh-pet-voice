@@ -90,13 +90,20 @@
             </intent-filter>
         </activity>
 
+        <!-- 别的 App 里「分享图片」可以直送这边：在相册长按一张图选小精灵就行 -->
         <activity
             android:name=".HistoryActivity"
-            android:exported="false"
+            android:exported="true"
             android:label="对话"
             android:windowSoftInputMode="adjustResize"
             android:launchMode="singleTop"
-            android:theme="@style/AppTheme" />
+            android:theme="@style/AppTheme">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+        </activity>
 
         <activity
             android:name=".SessionActivity"

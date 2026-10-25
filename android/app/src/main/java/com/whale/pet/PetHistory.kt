@@ -17,6 +17,8 @@ object PetHistory {
 
     const val ROLE_ME = "me"
     const val ROLE_PET = "pet"
+    /** 系统提示行（比如「跟着电脑切到了另一只会话」），居中、灰色，不属于任何一方说的话。 */
+    const val ROLE_NOTE = "note"
     const val MAX = 200
 
     private const val FILE = "pet_history"
@@ -24,6 +26,7 @@ object PetHistory {
 
     data class Item(val role: String, val text: String, val ts: Long, val sid: String = "") {
         val isMe: Boolean get() = role == ROLE_ME
+        val isNote: Boolean get() = role == ROLE_NOTE
     }
 
     private val lock = Any()
