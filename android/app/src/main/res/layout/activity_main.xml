@@ -110,38 +110,6 @@
                 android:textSize="20sp" />
         </LinearLayout>
 
-        <!-- 项目入口：按项目翻会话，和「对话」页同级 -->
-        <LinearLayout
-            android:id="@+id/projectsRow"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:background="@drawable/bg_card"
-            android:clickable="true"
-            android:focusable="true"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingStart="18dp"
-            android:paddingTop="14dp"
-            android:paddingEnd="18dp"
-            android:paddingBottom="14dp">
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="项目"
-                android:textColor="@color/pet_text"
-                android:textSize="15sp" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="\u203a"
-                android:textColor="@color/pet_text_dim"
-                android:textSize="20sp" />
-        </LinearLayout>
-
         <LinearLayout
             android:id="@+id/permBox"
             android:visibility="gone"

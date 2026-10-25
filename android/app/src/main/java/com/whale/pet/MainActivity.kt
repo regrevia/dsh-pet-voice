@@ -208,9 +208,6 @@ class MainActivity : Activity() {
         }
 
         findViewById<LinearLayout>(R.id.historyRow).setOnClickListener { openHistory() }
-        findViewById<LinearLayout>(R.id.projectsRow).setOnClickListener {
-            startActivity(ProjectsActivity.intent(this))
-        }
         findViewById<LinearLayout>(R.id.displayModeRow).setOnClickListener { pickDisplayMode() }
         findViewById<Button>(R.id.scanBtn).setOnClickListener { startScan() }
         findViewById<View>(R.id.launchBtn).setOnClickListener { chatClicked() }

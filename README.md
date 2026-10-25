@@ -16,7 +16,7 @@
 
 | 项 | 状态 |
 | --- | --- |
-| APK | `0.9.30`（versionCode 100），Android 8.0+（API 26），targetSdk 35 |
+| APK | `0.9.31`（versionCode 101），Android 8.0+（API 26），targetSdk 35 |
 | 验证环境 | Android 11 模拟器（1080×2340）跑通全链路：配对、语音、回复、动作、历史、检查更新 |
 | 真机 | 厂商权限跳转与硬件麦克风只在 AOSP 页面验证过，各家 ROM 仍可能不同，欢迎回报 |
 | Android 14/15 | 未做实机验证：后台恢复、麦克风前台服务在收紧后的行为【需真机确认】，见 [docs/android-app.md](docs/android-app.md) 的兼容边界一节 |

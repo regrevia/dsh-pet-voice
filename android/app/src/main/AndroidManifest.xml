@@ -99,22 +99,6 @@
             android:theme="@style/AppTheme" />
 
         <activity
-            android:name=".ProjectsActivity"
-            android:exported="false"
-            android:label="项目"
-            android:windowSoftInputMode="adjustResize"
-            android:launchMode="singleTop"
-            android:theme="@style/AppTheme" />
-
-        <activity
-            android:name=".SessionsActivity"
-            android:exported="false"
-            android:label="会话"
-            android:windowSoftInputMode="adjustResize"
-            android:launchMode="singleTop"
-            android:theme="@style/AppTheme" />
-
-        <activity
             android:name=".SessionActivity"
             android:exported="false"
             android:label="对话"
