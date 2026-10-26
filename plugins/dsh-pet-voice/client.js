@@ -816,6 +816,7 @@ window.__ModuleLoader__.load({
                 ),
               )
             : h('div', { style: { ...S.device, color: C.dim, fontSize: 13 } }, '还没有手机连上'),
+      h('div', { style: { ...S.rowSub, paddingLeft: 0 } }, '移出一台会让所有手机都断开，手机要重新扫码'),
         ),
       )
 
