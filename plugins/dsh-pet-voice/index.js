@@ -57,6 +57,7 @@ try {
   zstdDecompressSync = null
 }
 import { getPanelConfig, normalizeTransport, panelState, qrSvg, setPanelConfig, removeDevice, clearDevices, touchDevice } from './panel.mjs'
+import { listLocalVoices, localTtsReady, normalizeTtsProvider, pickDefaultLocalVoice, synthesizeHttp, synthesizeLocal } from './tts/providers.mjs'
 import { connectPublic, disconnectPublic, publicState, setPublicConfig, stopPublic } from './public.mjs'
 import { startLan, lanState, stopLan } from './lan.mjs'
 
@@ -802,13 +803,28 @@ function sendFile(res, fileName, extraHeaders = {}) {
   }
 }
 
-/** 神经语音是否可用：venv 里的解释器 + 合成脚本都在才算装好。 */
-function ttsReady() {
+/**
+ * 当前语音来源能不能出声。
+ *
+ * 微软在线看 venv 装没装；本机看 say 在不在；自己的接口只看地址填没填——
+ * 「能不能连上」留到真合成时再说，面板不该为了探活去连用户的服务器。
+ */
+function ttsReady(provider = 'edge') {
+  if (provider === 'local') return localTtsReady()
+  if (provider === 'http') return Boolean(String(getPanelConfig().ttsUrl ?? '').trim())
   try {
     return existsSync(TTS_PYTHON) && existsSync(TTS_SCRIPT)
   } catch {
     return false
   }
+}
+
+/** 本机音色列表随手查一遍就够（say -v ? 是瞬时命令），一分钟内复用同一份。 */
+let localVoicesCache = { at: 0, list: [] }
+function localVoices() {
+  const now = Date.now()
+  if (now - localVoicesCache.at > 60000) localVoicesCache = { at: now, list: listLocalVoices() }
+  return localVoicesCache.list
 }
 
 /** 只接受白名单形状的 rate/pitch，别的一律回默认值（防参数注入）。 */
@@ -3318,9 +3334,9 @@ export function renderMarkdown(input) {
 
 const MAXWORDS_LEVELS = ['短', '中', '长']
 const MAXWORDS_LINES = {
-  短: '回复控制在 80 字内，先说结论，像聊天一样自然。',
-  中: '回复控制在 300 字内，先说结论，再自然补充几句。',
-  长: '可以展开说明，先说结论，再自然补充细节。',
+  '短': '回复控制在 80 字内，先说结论，像聊天一样自然。',
+  '中': '回复控制在 300 字内，先说结论，再自然补充几句。',
+  '长': '可以展开说明，先说结论，再自然补充细节。',
 }
 
 /** 说话方式：对话要像真人聊天，不要输出测试报告式的清单（状态/延迟/下一句之类）。 */
@@ -4025,7 +4041,7 @@ export function apply(ctx, config) {
   let ttsCacheBytes = 0
 
   // v2：句间停顿压到 120ms 之后的老缓存听着还喘，带版本号让它自然过期
-  const ttsCacheKey = (voice, text, rate, pitch) => `v2|${voice}|${rate}|${pitch}|${text}`
+  const ttsCacheKey = (provider, voice, text, rate, pitch) => `v2|${provider}|${voice}|${rate}|${pitch}|${text}`
 
   function ttsCacheGet(key) {
     const buf = ttsCache.get(key)
@@ -4047,7 +4063,7 @@ export function apply(ctx, config) {
     }
   }
 
-  const handleTts = (req, res, url) => {
+  const handleTts = async (req, res, url) => {
     // 合成前先剥 Markdown：缓存键、长度校验、edge-tts 入参全用剥离后的文本
     const text = stripForSpeech(String(url.searchParams.get('text') ?? '')).trim()
     if (!text) return sendJson(res, 400, { ok: false, error: 'text 为空（剥离 Markdown 后没有可朗读内容）' })
@@ -4068,10 +4084,20 @@ export function apply(ctx, config) {
         presets: TTS_PRESETS.map((item) => item.id),
       })
     }
-    const voice = String(url.searchParams.get('voice') ?? '').trim() || preset?.voice || TTS_DEFAULT_VOICE
+    const cfg = getPanelConfig()
+    const provider = normalizeTtsProvider(cfg.ttsProvider)
+    // 三种来源各有各的音色：微软只认白名单 id；本机是 say 的音色名；自己的接口原样透传。
+    let voice = ''
+    if (provider === 'local') {
+      voice = String(cfg.ttsVoice || '').trim() || pickDefaultLocalVoice(localVoices())
+    } else if (provider === 'http') {
+      voice = String(cfg.ttsVoice || url.searchParams.get('voice') || '').trim()
+    } else {
+      voice = String(url.searchParams.get('voice') ?? '').trim() || preset?.voice || TTS_DEFAULT_VOICE
+    }
     // 记下「马上要塞进用户耳朵的话」：手机麦克风可能把它录回来（见 echoOfRecentTts）。
     rememberTtsText(text)
-    if (!TTS_VOICES.some((item) => item.id === voice)) {
+    if (provider === 'edge' && !TTS_VOICES.some((item) => item.id === voice)) {
       return sendJson(res, 400, {
         ok: false,
         error: `未知音色：${voice}`,
@@ -4080,15 +4106,16 @@ export function apply(ctx, config) {
     }
     const rate = normRate(url.searchParams.get('rate'), /^[+-]?\d{1,3}%$/, preset?.rate ?? '+0%')
     const pitch = normRate(url.searchParams.get('pitch'), /^[+-]?\d{1,3}Hz$/, preset?.pitch ?? '+0Hz')
-    if (!ttsReady()) {
-      return sendJson(res, 503, {
-        ok: false,
-        error: '神经语音还没装好',
-        hint: '在电脑上运行 plugins/dsh-pet-voice/tts/setup.sh（建 ~/.dsh/pet-voice/tts-venv 并装 edge-tts）',
-      })
+    if (!ttsReady(provider)) {
+      const missing = provider === 'local'
+        ? { error: '本机语音不可用', hint: '这台电脑上要能跑 say 和 ffmpeg（brew install ffmpeg）' }
+        : provider === 'http'
+          ? { error: '还没填接口地址', hint: '面板「语音来源」选自己的接口后，把地址填上' }
+          : { error: '神经语音还没装好', hint: '在电脑上运行 plugins/dsh-pet-voice/tts/setup.sh（建 ~/.dsh/pet-voice/tts-venv 并装 edge-tts）' }
+      return sendJson(res, 503, { ok: false, ...missing })
     }
 
-    const cacheKey = ttsCacheKey(voice, text, rate, pitch)
+    const cacheKey = ttsCacheKey(provider, voice, text, rate, pitch)
     const cached = ttsCacheGet(cacheKey)
     if (cached) {
       LOG(`神经语音：${voice} ${text.length} 字 → 缓存命中 ${cached.length} B`)
@@ -4100,6 +4127,34 @@ export function apply(ctx, config) {
           'x-tts-cache': 'hit',
         })
         res.end(cached)
+      } catch {
+        /* 断开 */
+      }
+      return
+    }
+
+    // 本机 / 自己的接口：一次拿整段再回，音频统一成 mp3（手机和缓存都按 audio/mpeg 认）。
+    if (provider !== 'edge') {
+      let out
+      try {
+        out = provider === 'local'
+          ? await synthesizeLocal({ text, voice, rate, fallbackVoice: pickDefaultLocalVoice(localVoices()) })
+          : await synthesizeHttp({ text, voice, rate, url: cfg.ttsUrl })
+      } catch (error) {
+        return sendJson(res, 502, { ok: false, error: `合成失败：${error?.message ?? error}` })
+      }
+      if (!out?.buffer?.length) return sendJson(res, 502, { ok: false, error: '合成失败：没有音频' })
+      ttsCachePut(cacheKey, out.buffer)
+      LOG(`语音（${provider}）：${voice || '默认'} ${text.length} 字 → ${out.buffer.length} B`)
+      if (!writeHead(res, 200, {
+        'content-type': out.contentType || 'audio/mpeg',
+        'content-length': String(out.buffer.length),
+        'cache-control': 'private, max-age=86400',
+        'x-tts-cache': 'miss',
+      })) return
+      if (!safeWrite(res, out.buffer)) return
+      try {
+        res.end()
       } catch {
         /* 断开 */
       }
@@ -4437,7 +4492,8 @@ export function apply(ctx, config) {
     const snapshot = async () => ({
       ...(await panelState({ origin, pairing: await pairInfo(origin) })),
       pluginVersion: PLUGIN_VERSION,
-      ttsReady: ttsReady(),
+      ttsReady: ttsReady(normalizeTtsProvider(getPanelConfig().ttsProvider)),
+      localVoices: normalizeTtsProvider(getPanelConfig().ttsProvider) === 'local' ? localVoices() : [],
       asrReady: asrReady(),
       // 面板里「装到新手机上」的去处：优先给推广过的那一版（在线升级看到的就是它），
       // 这台机器还没推广过任何版本时退回 GitHub 的 releases 页，至少能手动挑一版。
@@ -4450,7 +4506,7 @@ export function apply(ctx, config) {
       })(),
     })
     try {
-    // 面板：DSH 网页里那一页（配对码 / 设备 / 参数）。网页既没有也不该有手机令牌,
+    // 面板：DSH 网页里那一页（配对码 / 设备 / 参数）。网页既没有也不该有手机令牌，
     // 门禁换成回环地址——只有本机打得开，公网侧永远 403。
         try {
         // 「经自己的服务器转发」：配置只存这台电脑，仓库里没有任何默认服务器。
@@ -5010,7 +5066,7 @@ export function apply(ctx, config) {
             : rows.map((w) => w.title).slice(0, 5)
           return sendJson(res, 404, {
             ok: false,
-            error: `没有这个项目: ${want}`,
+            error: `没有这个项目：${want}`,
             candidates,
           })
         }

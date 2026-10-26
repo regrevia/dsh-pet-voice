@@ -42,9 +42,14 @@ const DEFAULT_CONFIG = {
   bubble: true,
   // auto = 先开流、拿不到立即转轮询；poll = 只在网络挡 SSE 时才用得上，强制锁轮询
   transport: 'auto',
+  // 语音来源：edge = 微软在线（默认，装 tts-venv）；local = 这台 Mac 的 say；http = 自己的接口
+  ttsProvider: 'edge',
+  ttsUrl: '',
+  ttsVoice: '',
 }
 
 const TRANSPORTS = ['auto', 'poll']
+const TTS_PROVIDER_IDS = ['edge', 'local', 'http']
 export function normalizeTransport(value) {
   const v = String(value ?? '').trim()
   return TRANSPORTS.includes(v) ? v : DEFAULT_CONFIG.transport
@@ -287,6 +292,11 @@ function readPanelConfig() {
       : DEFAULT_CONFIG.maxWords,
     bubble: raw?.bubble === undefined ? DEFAULT_CONFIG.bubble : raw.bubble !== false,
     transport: normalizeTransport(raw?.transport),
+    ttsProvider: TTS_PROVIDER_IDS.includes(String(raw?.ttsProvider ?? '').trim())
+      ? String(raw.ttsProvider).trim()
+      : DEFAULT_CONFIG.ttsProvider,
+    ttsUrl: isHttpUrl(String(raw?.ttsUrl ?? '').trim()) ? String(raw.ttsUrl).trim() : '',
+    ttsVoice: String(raw?.ttsVoice ?? '').trim(),
   }
 }
 
@@ -332,6 +342,17 @@ export function setPanelConfig(patch) {
     if (!TRANSPORTS.includes(transport)) throw new Error('传输方式只能选自动或轮询')
     next.transport = transport
   }
+  if (input.ttsProvider !== undefined) {
+    const provider = String(input.ttsProvider ?? '').trim()
+    if (!TTS_PROVIDER_IDS.includes(provider)) throw new Error('语音来源只能选微软、本机或自己的接口')
+    next.ttsProvider = provider
+  }
+  if (input.ttsUrl !== undefined) {
+    const url = String(input.ttsUrl ?? '').trim()
+    if (url && !isHttpUrl(url)) throw new Error('接口地址要以 http 或 https 开头')
+    next.ttsUrl = url
+  }
+  if (input.ttsVoice !== undefined) next.ttsVoice = String(input.ttsVoice ?? '').trim()
 
   writeJson(CONFIG_PATH, next)
   // 旧版把上限存在设备表里，两处写同一个值，读哪份都不会互相打脸。
@@ -413,6 +434,9 @@ export function panelState({ origin, pairing } = {}) {
     maxWords: config.maxWords,
     bubble: config.bubble,
     transport: config.transport,
+    ttsProvider: config.ttsProvider,
+    ttsUrl: config.ttsUrl,
+    ttsVoice: config.ttsVoice,
   }
 }
 

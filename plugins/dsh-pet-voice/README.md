@@ -44,7 +44,7 @@ plugin_manager action=set_plugin target=include:dsh-pet-voice enabled=true
 
 | 能力 | 从哪来 | 装法 | 不装的后果 |
 |---|---|---|---|
-| 神经语音（音色） | 微软 edge-tts，免 key、免账号，联网直接合成 | `bash plugins/dsh-pet-voice/tts/setup.sh`（建 `~/.dsh/pet-voice/tts-venv`） | 面板「音色」下面会有一行提示；照样能打字对话，只是不出声 |
+| 神经语音（音色） | 微软 edge-tts，免 key、免账号，联网直接合成 | `bash plugins/dsh-pet-voice/tts/setup.sh`（建 `~/.dsh/pet-voice/tts-venv`） | 面板「音色」下面会有一行提示；照样能打字对话，只是不出声。也可以把「语音来源」换成本机或自己的接口，那两档不依赖这个 venv |
 | 本机识别（ASR） | openai-whisper 常驻进程，只监听回环 | `bash plugins/dsh-pet-voice/asr/setup.sh`（建 `~/.dsh/pet-voice/asr-venv`，torch 首次几 GB） | 默认走手机自己的语音识别，电脑端不做识别 |
 
 两个脚本都是幂等的，重复跑只检查不重装；venv 和模型都落在 `~/.dsh/pet-voice/`，不在仓库里，换目录不会丢。
@@ -114,7 +114,7 @@ https://xxx-xxx.trycloudflare.com/pet-voice/?k=<token>
 | GET | `link` | 当前生效的完整配对链接（要已登录的 cookie） |
 | GET | `selfcheck` | 只读探针；`?prompt=<sessionId>` 时额外跑一次真实 LLM 往返（会计费） |
 | GET | `tts/voices` | `{ok, ready, default, defaultPreset, presets[], voices[], hint?}`；`presets` 是 4 个形象档位（见下）；`ready:false` 时页面回退系统语音 |
-| GET | `tts?text=&preset=` | 神经语音（Edge `edge-tts`）直出 `audio/mpeg`；`preset` 由服务端解析成 voice+rate+pitch；也可显式传 `&voice=&rate=+16%&pitch=+22Hz` 覆盖；未知档位 → 400；需先跑 `tts/setup.sh` |
+| GET | `tts?text=&preset=` | 按面板「语音来源」出声，直出 `audio/mpeg`：微软在线走 `edge-tts`（需先跑 `tts/setup.sh`），这台电脑走系统 `say`，自己的接口转发到你填的地址；`preset` 解析成 voice+rate+pitch，也可显式传 `&voice=&rate=+16%&pitch=+22Hz` 覆盖；未知档位 → 400；对应来源没备好 → 503 并说清缺什么 |
 | POST | `asr` | 请求体就是 44 字节头 + 16 kHz 单声道 PCM 的 WAV；转发给常驻 worker（`asr/asr-worker.py` → `127.0.0.1:52399`，默认 `large-v3-turbo` + `beam_size=5`）→ `{ok, text, ms}`，响应头带 `X-Asr-Ms`。**识别结果命中最近 5 分钟内播报过的句子时回 `{ok:true,text:"",echo:true}`**（手机外放把自己说的话录回来，不能当成用户发言，见下）。空音频/坏音频 → 400，超过 4 MB → 413；worker 没装 → 503 + `hint`；worker 被杀了下次请求会自动拉起并完成本次识别（冷启动 11 s，预算 25 s） |
 | GET | `asr` | 只读探针：`{ok, ready, running, model, pid?}`。`ready:false` 说明缺 venv 或 worker 脚本，`hint` 里给缺的路径 |
 | GET | `update` | 更新通道（兜底那一档）：读 `~/.dsh/pet-voice/update/latest.json` → `{ok, versionCode, versionName, size, sha256, file, notes, publishedAt, minPlugin?, url}`；还没发布过 → `versionCode:0` + 可读 `hint` |
@@ -181,6 +181,25 @@ scripts/tunnel.sh --stop           # 停掉本脚本上次起的隧道（读 tun
 - 隧道进程 `nohup` 到 `~/.dsh/pet-voice/tunnel.log`，脚本**只打印 PID 与日志路径**就退出（不会把隧道挂在前台）；
 - `?k=` 只写进文件，任何输出里都不出现；公网地址（不含令牌）会打印，可以截图；
 - 写完后的 30 s 内 `/api/pair` 会读到新域名（探活结果有缓存，30 s 后自动刷新）。
+
+## 语音来源（面板「人设 → 语音来源」）
+
+| 选项 | 谁在出声 | 需要什么 | 说明 |
+|---|---|---|---|
+| 微软在线（默认） | 本机 `edge-tts` 子进程 | 跑过一次 `tts/setup.sh` | 免 key，联网；音色 / 语速 / 音高档位都按 `TTS_PRESETS` 来 |
+| 这台电脑 | macOS `say` + `ffmpeg` | 系统自带，断网也行 | 音色下拉列的是本机真装了的 zh_CN 声音；默认按 Tingting → Meijia → Sinji 顺序挑 |
+| 自己的接口 | 你填的 HTTP 地址 | 地址从本机可达 | POST JSON `{text, voice, speed}`，回音频字节 / `{audio: base64}` / `{url}` 三种都认 |
+
+三档共用同一条 `/pet-voice/api/tts`，手机端拿到的永远是 `audio/mpeg`，所以 App 不用改。
+
+> 本机合成有个坑：macOS 的音色清单里会列一些没下载的新声音（Eddy / Flo 这类），
+> 用它们念中文出来是 0.1 秒静音。所以合成结果小于 8 KB 就当“没出声”，自动换默认音色重来一次；
+> 还是不行就报「这台电脑的「X」发不出声」，不会让手机播一段空白。
+
+> 剪映（JianYingPro）里的音色没有接：它的声音全部走自家云接口 + 私有 `libspeechsdk`，
+> 本地没有可调用的端口或 CLI，token 还是每次安装生成的一份 `tts_local_auth_code`。
+> 想用那几把嗓子，现实做法是自己搭一个 TTS 服务（GPT-SoVITS / CosyVoice / 火山引擎等），
+> 把地址填进「自己的接口」——插件这边只约定 `POST {text, voice, speed}` → 音频。
 
 ## 音色档位（形象 = 声音）
 

@@ -184,6 +184,9 @@ window.__ModuleLoader__.load({
       mode: s.mode,
       customUrl: s.customUrl,
       voice: s.voice,
+      ttsProvider: s.ttsProvider ?? 'edge',
+      ttsUrl: s.ttsUrl ?? '',
+      ttsVoice: s.ttsVoice ?? '',
       wakeName: s.wakeName,
       persona: s.persona ?? '',
       maxWords: s.maxWords ?? '短',
@@ -217,6 +220,12 @@ window.__ModuleLoader__.load({
       { id: 'zh-CN-YunxiNeural', label: '云希' },
       { id: 'zh-CN-YunjianNeural', label: '云健' },
       { id: 'zh-CN-liaoning-XiaobeiNeural', label: '晓北' },
+    ]
+
+    const TTS_PROVIDERS = [
+      { id: 'edge', label: '微软在线' },
+      { id: 'local', label: '这台电脑' },
+      { id: 'http', label: '自己的接口' },
     ]
 
     const MAXWORD_OPTIONS = [
@@ -331,6 +340,20 @@ window.__ModuleLoader__.load({
           setError(String(e?.message || '保存失败'))
         }
       }, [])
+
+      // 本机音色是开机状态里带上来的（say 的音色名），和微软那份白名单不是一套。
+      const LOCAL_VOICES = Array.isArray(state?.localVoices) ? state.localVoices : []
+      const voiceList = draft?.ttsProvider === 'local' ? LOCAL_VOICES : VOICES
+      const voiceValue = draft?.ttsProvider === 'local' ? draft.ttsVoice : draft?.voice
+      const setVoice = (id) => {
+        if (draft?.ttsProvider === 'local') {
+          setDraft((d) => ({ ...d, ttsVoice: id }))
+          save({ ttsVoice: id })
+        } else {
+          field('voice')(id)
+          save({ voice: id })
+        }
+      }
 
       const field = (key) => (value) => setDraft((d) => ({ ...d, [key]: value }))
       const commit = (key) => () => {
@@ -586,7 +609,41 @@ window.__ModuleLoader__.load({
               placeholder: '大肥鱼',
             }),
           ),
-          state.ttsReady === false
+          paramRow(
+            '语音来源',
+            h(
+              'select',
+              {
+                value: draft.ttsProvider,
+                style: { ...S.input, width: 140 },
+                onChange: (e) => {
+                  const ttsProvider = e.target.value
+                  setDraft((d) => ({ ...d, ttsProvider }))
+                  save({ ttsProvider })
+                },
+              },
+              TTS_PROVIDERS.map((item) => h('option', { key: item.id, value: item.id }, item.label)),
+            ),
+          ),
+          draft.ttsProvider === 'http' && !String(draft.ttsUrl || '').trim()
+            ? h(
+                'div',
+                { style: { ...S.row, color: 'var(--dsw-alias-state-warning-primary, #b7791f)', fontSize: 12 } },
+                '填上接口地址，手机才会出声。',
+              )
+            : null,
+          draft.ttsProvider === 'http'
+            ? paramRow(
+                '接口地址',
+                h(Input, {
+                  value: draft.ttsUrl,
+                  onChange: field('ttsUrl'),
+                  onCommit: commit('ttsUrl'),
+                  placeholder: 'http://127.0.0.1:9880/tts',
+                }),
+              )
+            : null,
+          state.ttsReady === false && draft.ttsProvider === 'edge'
             ? h(
                 'div',
                 { style: { ...S.row, color: 'var(--dsw-alias-state-warning-primary, #b7791f)', fontSize: 12 } },
@@ -595,21 +652,26 @@ window.__ModuleLoader__.load({
             : null,
           paramRow(
             '音色',
-            h(
-              'select',
-              {
-                value: draft.voice,
-                style: { ...S.input, width: 140 },
-                onChange: (e) => {
-                  field('voice')(e.target.value)
-                  save({ voice: e.target.value })
-                },
-              },
-              (VOICES.some((item) => item.id === draft.voice)
-                ? VOICES
-                : [...VOICES, { id: draft.voice, label: draft.voice }]
-              ).map((item) => h('option', { key: item.id, value: item.id }, item.label)),
-            ),
+            draft.ttsProvider === 'http'
+              ? h(Input, {
+                  value: draft.ttsVoice,
+                  onChange: field('ttsVoice'),
+                  onCommit: commit('ttsVoice'),
+                  placeholder: '接口默认',
+                  width: 140,
+                })
+              : h(
+                  'select',
+                  {
+                    value: voiceValue,
+                    style: { ...S.input, width: 140 },
+                    onChange: (e) => setVoice(e.target.value),
+                  },
+                  (voiceList.some((item) => item.id === voiceValue)
+                    ? voiceList
+                    : [...voiceList, { id: voiceValue, label: voiceValue || '默认' }]
+                  ).map((item) => h('option', { key: item.id, value: item.id }, item.label)),
+                ),
           ),
           h(
             'div',
