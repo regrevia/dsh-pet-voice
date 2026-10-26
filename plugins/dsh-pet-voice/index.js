@@ -34,6 +34,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  unlinkSync,
   readSync,
   statSync,
   writeFileSync,
@@ -193,7 +194,17 @@ const UPLOAD_EXTS = {
 }
 const UPLOAD_EXT_LIST = 'JPG / PNG / WebP / GIF'
 /** 冷启动预算：base 实测 2.4 s（含 torch import）；large-v3-turbo 光载权重就要 5.1 s。 */
-const ASR_COLD_START_MS = 25000
+/**
+ * 冷启动总预算。large-v3-turbo 首次载入实测 187 s（缓存命中约 6 s），
+ * 所以这个数必须按「最慢一次」给；进程在后台慢慢载，请求侧另用短预算，不等这么久。
+ */
+const ASR_COLD_START_MS = 240000
+/** 启动锁：跨插件实例（热重载会同时存在两个模块）串行化，防三个 4 GB worker 一起抢内存。 */
+const ASR_START_LOCK_PATH = join(ASR_DIR, 'start.lock')
+/** 锁超过这个时间还没释放、进程也没了，就当上次启动被强杀，允许接手。 */
+const ASR_START_LOCK_TTL_MS = 300000
+/** 请求侧最多等这么久看它起没起来，超了就先回「还在准备」，让 App 立刻给用户回话。 */
+const ASR_START_WAIT_MS = 15000
 const ASR_HEALTH_TIMEOUT = 1500
 const ASR_REQUEST_TIMEOUT = 30_000
 /** 一次 /api/asr 从头到尾的总预算：冷启动 + 重试都算在内，别让 App 干等两分钟。 */
@@ -868,6 +879,56 @@ async function asrHealth(timeout = ASR_HEALTH_TIMEOUT) {
   }
 }
 
+/* ---- 启动锁：一个模型 4.3 GB，绝不能并载 ---- */
+
+function asrLockRead() {
+  try {
+    const raw = JSON.parse(readFileSync(ASR_START_LOCK_PATH, 'utf8'))
+    return raw && typeof raw === 'object' ? raw : null
+  } catch {
+    return null
+  }
+}
+
+/** 锁还在不在「有人正在载」的状态：进程活着且没超时。 */
+function asrLockHeld(lock = asrLockRead()) {
+  const pid = Number(lock?.pid)
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  if (Date.now() - Number(lock?.at ?? 0) > ASR_START_LOCK_TTL_MS) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function asrLockTake(pid) {
+  try {
+    mkdirSync(ASR_DIR, { recursive: true, mode: 0o700 })
+    writeFileSync(ASR_START_LOCK_PATH, JSON.stringify({ pid, at: Date.now() }), { flag: 'wx', mode: 0o600 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function asrLockUpdate(pid) {
+  try {
+    writeFileSync(ASR_START_LOCK_PATH, JSON.stringify({ pid, at: Date.now() }), { mode: 0o600 })
+  } catch {
+    /* 写不进去也不影响主流程 */
+  }
+}
+
+function asrLockDrop() {
+  try {
+    unlinkSync(ASR_START_LOCK_PATH)
+  } catch {
+    /* 已经不在了 */
+  }
+}
+
 /**
  * 懒启动 worker（detached）。
  *
@@ -878,14 +939,52 @@ async function asrHealth(timeout = ASR_HEALTH_TIMEOUT) {
  * 并发去重：同一个时刻只允许一次冷启动（手机连点两下不该拉起两个 worker 抢端口）。
  */
 let asrStarting = null
-function asrStartWorker() {
+
+/** 等一个正在载入的 worker 就绪；成功顺手把启动锁清掉。 */
+async function asrWaitReady(waitMs) {
+  const deadline = Date.now() + waitMs
+  while (Date.now() < deadline) {
+    const health = await asrHealth(800)
+    if (health?.ok) {
+      asrLockDrop()
+      return { ok: true, pid: health.pid, cold: true }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400))
+  }
+  return {
+    ok: false,
+    error: `ASR worker 还在载模型（>${Math.round(waitMs / 1000)} s）`,
+    hint: `看 ${ASR_LOG_PATH} 里的 [asr] 行`,
+  }
+}
+
+function asrStartWorker(waitMs = ASR_COLD_START_MS) {
   if (asrStarting) return asrStarting
   asrStarting = (async () => {
     if (!asrReady()) return { ok: false, error: `ASR 还没装好：缺 ${ASR_PYTHON} 或 ${asrScriptPath()}` }
+    // 第一件事是探活：热重载换了个模块实例，旧 worker 通常还在跑，别重复拉。
+    const pre = await asrHealth(800)
+    if (pre?.ok) {
+      asrLockDrop()
+      return { ok: true, pid: pre.pid, cold: false }
+    }
+    // 别的实例（上一次热重载、另一个并发请求）正在载：跟着等，绝不并载第二个 4.3 GB。
+    const lock = asrLockRead()
+    if (asrLockHeld(lock)) {
+      LOG(`ASR worker 正由 pid ${lock.pid} 载入，跟着等不重拉`)
+      const waited = await asrWaitReady(waitMs)
+      return waited.ok ? waited : { ...waited, starting: true }
+    }
+    if (lock) asrLockDrop() // 上次启动被强杀留下的死锁
     try {
       mkdirSync(ASR_DIR, { recursive: true, mode: 0o700 })
     } catch {
       /* 建不了目录也让下面的 spawn 自己报错，这里不抢先抛 */
+    }
+    // 抢占启动锁：抢不到说明另一个实例刚进来，等它的结果就好。
+    if (!asrLockTake(0)) {
+      const waited = await asrWaitReady(Math.min(waitMs, ASR_START_WAIT_MS))
+      return waited.ok ? waited : { ...waited, starting: true }
     }
     let fd
     try {
@@ -906,7 +1005,9 @@ function asrStartWorker() {
         },
       )
       child.unref()
+      if (child.pid) asrLockUpdate(child.pid)
     } catch (error) {
+      asrLockDrop()
       return { ok: false, error: `拉起 ASR worker 失败：${error?.message ?? error}` }
     } finally {
       if (typeof fd === 'number') {
@@ -925,21 +1026,27 @@ function asrStartWorker() {
       LOG(`ASR worker 启动失败：${error?.message ?? error}`)
     })
     LOG(`ASR worker 已拉起：pid ${child.pid}，日志 ${ASR_LOG_PATH}`)
-    const deadline = Date.now() + ASR_COLD_START_MS
+    const deadline = Date.now() + waitMs
     while (Date.now() < deadline) {
       if (spawnError) {
+        asrLockDrop()
         return { ok: false, error: `拉起 ASR worker 失败：${spawnError?.message ?? spawnError}`, hint: `检查 ${ASR_PYTHON} 是否存在` }
       }
       const health = await asrHealth(800)
       if (health?.ok) {
+        asrLockDrop()
         LOG(`ASR worker 就绪（${health.model ?? ASR_MODEL}，pid ${health.pid ?? child.pid}）`)
         return { ok: true, pid: health.pid ?? child.pid }
       }
-      await new Promise((resolve) => setTimeout(resolve, 150))
+      await new Promise((resolve) => setTimeout(resolve, 300))
     }
+    // 超时不杀：它还在老老实实载模型，杀了下次还得从零再来。锁继续指着它，
+    // 后面来的请求（包括重载后的新实例）只会跟着等，不会再拉第二个。
     return {
       ok: false,
-      error: `ASR worker 冷启动超时（>${ASR_COLD_START_MS} ms）`,
+      starting: true,
+      pid: child.pid,
+      error: `ASR worker 还在载模型（>${Math.round(waitMs / 1000)} s）`,
       hint: `看 ${ASR_LOG_PATH} 里的 [asr] 日志`,
     }
   })().finally(() => {
@@ -978,20 +1085,25 @@ async function asrKillWorker(pid) {
   await new Promise((resolve) => setTimeout(resolve, 150))
 }
 
+/** 脚本换了触发的重启节流：不节流的话每次 ensure 都会「发现旧进程→杀掉→重启」，叠起来又是并载。 */
+let asrRestartAt = 0
+
 /** 先探活再决定拉不拉：绝大多数请求会走到「已经在跑」这条快路。 */
-async function asrEnsure() {
+async function asrEnsure(waitMs = ASR_COLD_START_MS) {
   const health = await asrHealth()
   if (health?.ok) {
     // 改了 worker 脚本、老进程还活着：不主动重启就永远跑旧代码，补丁等于没打。
     const startedAt = Number.isFinite(health.uptimeMs) ? Date.now() - health.uptimeMs : 0
-    if (startedAt && asrScriptMtime() > startedAt + 2000) {
+    if (startedAt && asrScriptMtime() > startedAt + 2000 && Date.now() - asrRestartAt > 60_000) {
+      asrRestartAt = Date.now()
       LOG(`ASR worker 比脚本旧，重启一次（pid ${health.pid}）`)
       await asrKillWorker(health.pid)
-      return asrStartWorker()
+      asrLockDrop()
+      return asrStartWorker(waitMs)
     }
     return { ok: true, pid: health.pid, cold: false }
   }
-  return asrStartWorker()
+  return asrStartWorker(waitMs)
 }
 
 /**
@@ -1004,7 +1116,7 @@ function warmAsrInBackground() {
   if (asrWarmAt && now - asrWarmAt < 60_000) return
   asrWarmAt = now
   Promise.resolve()
-    .then(() => asrEnsure())
+    .then(() => asrEnsure(ASR_COLD_START_MS))
     .then((r) => { if (!r?.ok) LOG('ASR 预热没起来：', r?.error ?? '') })
     .catch((e) => LOG('ASR 预热失败：', e?.message ?? e))
 }
@@ -4034,11 +4146,13 @@ export function apply(ctx, config) {
         hint: `需要 ${ASR_PYTHON} 和 scripts/asr-worker.py（venv 里要有 openai-whisper）`,
       })
     }
-    const startup = await asrEnsure()
+    // 请求侧不等满整个载入时间：15 s 还没好就先让 App 拿到回话，进程继续在后台载。
+    const startup = await asrEnsure(Math.min(ASR_HANDLE_BUDGET_MS, ASR_START_WAIT_MS))
     if (!startup.ok) {
       return sendJson(res, 503, {
         ok: false,
-        error: startup.error ?? 'ASR worker 起不来',
+        starting: startup.starting === true,
+        error: startup.starting ? '识别在准备，等十几秒再说' : (startup.error ?? 'ASR worker 起不来'),
         hint: startup.hint ?? `看 ${ASR_LOG_PATH} 里的 [asr] 那几行`,
         coldStartMs: ASR_COLD_START_MS,
       })
@@ -4052,7 +4166,7 @@ export function apply(ctx, config) {
     for (let attempt = 0; attempt < 2 && result.dead; attempt += 1) {
       if (Date.now() > budget) break
       LOG(`ASR worker 无响应，第 ${attempt + 1} 次重试：${result.error}`)
-      await asrStartWorker()
+      await asrStartWorker(Math.min(12_000, left()))
       await new Promise((resolve) => setTimeout(resolve, 250))
       result = await asrForward(body, Math.min(12_000, left()))
     }
