@@ -1,12 +1,12 @@
 {
-  "versionCode": 125,
-  "versionName": "0.9.55",
-  "size": 29986138,
-  "sha256": "8ec51c2cc75b3e9b2a48237dfc82f3d4de685ee59190bf26a565e6caf5189fa7",
+  "versionCode": 128,
+  "versionName": "0.9.58",
+  "size": 29987566,
+  "sha256": "8441261a01bf3c3359cbd892f5c2ee80b8fd0cb5ef6382f953c6e536d6d36085",
   "file": "app-release.apk",
-  "url": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.55/app-release.apk",
-  "notes": "对话页去掉分割线；会话原文里的工具步骤改成一句人话",
+  "url": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.58/app-release.apk",
+  "notes": "原文页的工具步骤改成桌面那种一行：› 运行命令 · 具体命令，一行看完、不展开；消息只拉最新 20 条，滑到顶点「加载更早」再向服务端要更早的",
   "minPlugin": "0.1.12",
-  "publishedAt": "2026-10-26T09:42:14.993Z",
-  "promotedAt": "2026-10-26T09:42:16.620Z"
+  "publishedAt": "2026-10-26T10:07:10.845Z",
+  "promotedAt": "2026-10-26T10:07:12.385Z"
 }
