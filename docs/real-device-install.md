@@ -161,3 +161,25 @@ adb logcat -s PetLatency:I PetService:I AndroidRuntime:E > /tmp/jingling.log
   （要 cookie），发布用 `node scripts/publish-apk.mjs`，细节见 `plugins/dsh-pet-voice/README.md`。
 - 想彻底停：`更多 → 关闭全部服务`（停唤醒 / 录音 / TTS / 播放，取消自启动，移除悬浮窗，退出前台服务）。
   下次从桌面图标打开即可重新开启。
+
+## 被「平板管家」拦下时怎么装（root 设备）
+
+小米/红米平板（HyperOS）把安装器换成了平板管家，`adb install` 经常直接返回
+`Failure [INSTALL_FAILED_USER_RESTRICTED: Install canceled by user]`——即使开发者选项里
+「USB 安装」「USB 调试（安全设置）」都开了。设备 root 过（Magisk 的 `su` 能用）时不用折腾
+安全中心，绕开安装界面即可：
+
+```bash
+bash scripts/install-device.sh dist/jingling-0.9.36.apk 15ca9736
+```
+
+脚本先试普通 `adb install`；被拦下就 `adb push` 到 `/data/local/tmp/`，再用
+`su -c pm install -r -t` 由 PackageManager 直接装（不弹安装界面，管家拦不到）。
+顺手把 `verifier_verify_adb_installs` / `package_verifier_enable` 关掉，后续 adb 安装也顺一点。
+**这是本机调试口子，不是给最终用户的路**——普通用户仍走 App 内「检查更新」。
+
+平板连着线做真机调试时记得别让它睡：
+
+```bash
+adb -s <序列号> shell svc power stayon true
+```

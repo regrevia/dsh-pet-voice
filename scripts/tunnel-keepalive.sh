@@ -6,13 +6,12 @@
 #   bash scripts/tunnel-keepalive.sh --status   # 打印当前状态
 #   bash scripts/tunnel-keepalive.sh --stop
 #
-# 判据只有一条：local/tunnel.pid 里的进程还活着吗。隧道自己断网时 ssh 会因为
-# ServerAliveInterval=30/ServerAliveCountMax=3 在 ~90 s 内退出，pid 变死，这里再拉起。
+# 判据只有一条：公网探测（curl 打公网 /pet-voice/api/pair）回 401/200 就算通。
+# 断了就调 pv-public.sh start 把 8443 反代 + ssh -R 一起拉起来。
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SELF_DIR/.." && pwd)"
-PID_FILE="${ROOT}/local/tunnel.pid"
 KPID_FILE="${ROOT}/local/keepalive.pid"
 LOG_FILE="${ROOT}/local/keepalive.log"
 INTERVAL="${KEEPALIVE_INTERVAL:-20}"
@@ -20,20 +19,28 @@ TUNNEL="${ROOT}/scripts/tunnel-ssh.sh"
 
 say() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >>"$LOG_FILE"; }
 
-tunnel_alive() {
-  [ -f "$PID_FILE" ] || return 1
-  local pid; pid="$(cat "$PID_FILE" 2>/dev/null || true)"
-  [ -n "$pid" ] || return 1
-  kill -0 "$pid" 2>/dev/null
+# 隧道、8443 反代、公网口子一起看：都在且公网回 401/200 才算健康。
+# （pid 文件归 pv-public.sh 管，这里不再自己记一份，免得两边对不上。）
+relay_status() { bash "$ROOT/scripts/pv-public.sh" status 2>/dev/null || true; }
+
+relay_alive() {
+  local out; out="$(relay_status)"
+  printf '%s' "$out" | grep -q '8443 反代 在跑' && printf '%s' "$out" | grep -q 'ssh -R 在跑'
+}
+
+healthy() {
+  local code
+  code=$(relay_status | sed -n 's/.*公网 HTTP \([0-9]*\).*/\1/p' | tail -1)
+  [ "$code" = "401" ] || [ "$code" = "200" ]
 }
 
 ensure() {
-  if tunnel_alive; then
+  if healthy; then
     return 0
   fi
-  say "隧道不在，拉起…"
-  if bash "$TUNNEL" --daemon >>"$LOG_FILE" 2>&1; then
-    say "已拉起，pid $(cat "$PID_FILE" 2>/dev/null || echo '?')"
+  say "公网不通，拉起 8443 反代 + ssh -R…"
+  if bash "$ROOT/scripts/pv-public.sh" start >>"$LOG_FILE" 2>&1; then
+    say "已拉起：$(bash "$ROOT/scripts/pv-public.sh" status 2>/dev/null | tr '\n' ' ')"
   else
     say "拉起失败，下一轮再试"
   fi
@@ -41,7 +48,8 @@ ensure() {
 
 case "${1:---daemon}" in
   --status)
-    if tunnel_alive; then echo "隧道在跑，pid $(cat "$PID_FILE")"; else echo "隧道没在跑"; fi
+    relay_status
+    if healthy; then echo "· 中转链路通（手机能连）"; else echo "· 中转链路不通，下一轮会自己拉起"; fi
     ;;
   --once)
     ensure

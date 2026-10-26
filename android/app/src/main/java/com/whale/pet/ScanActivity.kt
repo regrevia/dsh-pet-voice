@@ -7,7 +7,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.SurfaceTexture
 import android.graphics.RectF
 import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraCaptureSession
@@ -24,8 +26,7 @@ import android.text.InputType
 import android.util.Size
 import android.view.Gravity
 import android.view.Surface
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
@@ -53,7 +54,7 @@ import kotlin.math.min
  */
 class ScanActivity : Activity() {
 
-    private lateinit var preview: SurfaceView
+    private lateinit var preview: TextureView
     private lateinit var overlay: ScanOverlayView
     private lateinit var statusText: TextView
     private lateinit var hintText: TextView
@@ -69,6 +70,9 @@ class ScanActivity : Activity() {
     private var cameraId: String? = null
     private var chars: CameraCharacteristics? = null
     private var surfaceReady = false
+    /** 相机实际出图尺寸：预览按它做中心裁切，避免平板/竖屏被拉变形。 */
+    private var previewSize: Size = Size(1280, 720)
+    private var previewSurface: Surface? = null
     private var cameraReady = false
     private var flashAvailable = false
     private var torchOn = false
@@ -136,7 +140,7 @@ class ScanActivity : Activity() {
     private fun buildUi() {
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
 
-        preview = SurfaceView(this)
+        preview = TextureView(this)
         root.addView(
             preview,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
@@ -263,25 +267,50 @@ class ScanActivity : Activity() {
 
     private fun maybeStartCamera() {
         surfaceReady = false
-        preview.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) {
+        preview.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
                 surfaceReady = true
-                if (cameraReady && !closing) return
+                applyPreviewTransform()
+                if (cameraReady) return
                 if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
                     openCamera()
                 }
             }
 
-            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
-
-            override fun surfaceDestroyed(holder: SurfaceHolder) {
-                surfaceReady = false
+            override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) {
+                applyPreviewTransform()
             }
-        })
-        if (preview.holder.surface != null && preview.holder.surface.isValid) {
+
+            override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+                surfaceReady = false
+                return true
+            }
+
+            override fun onSurfaceTextureUpdated(st: SurfaceTexture) = Unit
+        }
+        if (preview.isAvailable) {
             surfaceReady = true
             openCamera()
         }
+    }
+
+    /** 相机出的是横向帧，竖屏/不同宽高比的视图里按「中心裁切」铺满，不拉伸。 */
+    private fun applyPreviewTransform() {
+        val vw = preview.width.toFloat()
+        val vh = preview.height.toFloat()
+        if (vw <= 0f || vh <= 0f) return
+        val sw = previewSize.width.toFloat()
+        val sh = previewSize.height.toFloat()
+        val rotate = (vw > vh) != (sw > sh)
+        val bw = if (rotate) sh else sw
+        val bh = if (rotate) sw else sh
+        val scale = maxOf(vw / bw, vh / bh)
+        val cx = vw / 2f
+        val cy = vh / 2f
+        val m = Matrix()
+        m.postRotate(if (rotate) 90f else 0f, cx, cy)
+        m.postScale(scale, scale, cx, cy)
+        preview.setTransform(m)
     }
 
     private fun openCamera() {
@@ -323,6 +352,7 @@ class ScanActivity : Activity() {
             null
         }
         val size = pickDecodeSize(yuvSizes)
+        previewSize = size
         try {
             reader?.close()
             reader = ImageReader.newInstance(size.width, size.height, android.graphics.ImageFormat.YUV_420_888, 2)
@@ -337,7 +367,10 @@ class ScanActivity : Activity() {
                 override fun onOpened(camera: CameraDevice) {
                     device = camera
                     cameraReady = true
-                    if (surfaceReady) startPreview()
+                    if (surfaceReady) {
+                        runOnUiThread { applyPreviewTransform() }
+                        startPreview()
+                    }
                 }
 
                 override fun onDisconnected(camera: CameraDevice) {
@@ -371,8 +404,8 @@ class ScanActivity : Activity() {
     private fun startPreview() {
         val camera = device ?: return
         val imageReader = reader ?: return
-        val surface = preview.holder.surface ?: return
-        if (!surface.isValid) return
+        val texture = preview.surfaceTexture ?: return
+        val surface = previewSurface ?: Surface(texture).also { previewSurface = it }
         val targets = listOf(surface, imageReader.surface)
         try {
             camera.createCaptureSession(targets, object : CameraCaptureSession.StateCallback() {
@@ -413,7 +446,7 @@ class ScanActivity : Activity() {
         torchOn = !torchOn
         val camera = device ?: return
         val s = session ?: return
-        val surface = preview.holder.surface ?: return
+        val surface = previewSurface ?: return
         val imageReader = reader ?: return
         try {
             val req = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
@@ -535,14 +568,19 @@ class ScanActivity : Activity() {
         Thread {
             var ok = false
             var reason = ""
-            try {
-                val r = PetClient { cfg }.state()
-                ok = r.ok
-                if (!r.ok) {
-                    reason = if (r.code == 401) "HTTP 401（令牌不对）" else "HTTP ${r.code} ${r.error()}"
+            // 中转刚醒、隧道刚重连时第一下常被拒（Connection reset），连不上就再试一次。
+            for (attempt in 1..2) {
+                try {
+                    val r = PetClient { cfg }.state()
+                    ok = r.ok
+                    if (!r.ok) {
+                        reason = if (r.code == 401) "HTTP 401（令牌不对）" else "HTTP ${r.code} ${r.error()}"
+                    }
+                } catch (e: Exception) {
+                    reason = "连不上电脑：${e.message ?: e.javaClass.simpleName}"
                 }
-            } catch (e: Exception) {
-                reason = "连不上电脑：${e.message ?: e.javaClass.simpleName}"
+                if (ok || reason.startsWith("HTTP 401")) break
+                if (attempt == 1) Thread.sleep(900)
             }
             runOnUiThread {
                 if (ok) {
@@ -594,6 +632,11 @@ class ScanActivity : Activity() {
         } catch (_: Exception) {
         }
         reader = null
+        try {
+            previewSurface?.release()
+        } catch (_: Exception) {
+        }
+        previewSurface = null
         torchOn = false
     }
 
