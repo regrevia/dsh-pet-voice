@@ -182,7 +182,6 @@ window.__ModuleLoader__.load({
     const draftOf = (s) => ({
       mode: s.mode,
       customUrl: s.customUrl,
-      maxDevices: String(s.maxDevices),
       voice: s.voice,
       wakeName: s.wakeName,
       persona: s.persona ?? '',
@@ -199,9 +198,16 @@ window.__ModuleLoader__.load({
 
     /** 选中的连法还没有地址时，二维码位置说什么。 */
     const MODE_HINT = {
-      server: '内网穿透还没连上，开了再回来。',
-      lan: '局域网地址现在连不通，换一种连法。',
-      domain: '填好域名地址，二维码就出来。',
+      server: '服务器还没连上。',
+      lan: '这台电脑现在没有局域网地址。',
+      domain: '填好域名，二维码就出来。',
+    }
+
+    /** 每种方案要用户先准备好什么，只有一行。 */
+    const MODE_NEED = {
+      server: '要一台能 SSH 的服务器',
+      lan: '手机和电脑连同一个 Wi-Fi',
+      domain: '要已经能打开的域名',
     }
 
     const VOICES = [
@@ -330,7 +336,7 @@ window.__ModuleLoader__.load({
         if (!draft || !state) return
         const raw = draft[key]
         if (String(raw) === String(state[key])) return
-        save(key === 'maxDevices' ? { maxDevices: Number(raw) || 1 } : { [key]: raw })
+        save({ [key]: raw })
       }
 
       if (!state || !draft) {
@@ -362,218 +368,7 @@ window.__ModuleLoader__.load({
         }
       }
 
-      /* ---------------- 连上手机：先选连法，能用了才给二维码 ---------------- */
-
-      const pairSection = h(
-        Section,
-        { title: '连上手机' },
-        h(
-          'div',
-          { style: S.card },
-          state.modes.map((m, index) => {
-            const active = m.id === draft.mode
-            const address = m.id === 'domain' ? draft.customUrl : m.url
-            return h(
-              'div',
-              {
-                key: m.id,
-                style: { ...S.mode(active), ...(index ? S.rowBorder : null) },
-                onClick: () => {
-                  if (active) return
-                  field('mode')(m.id)
-                  save({ mode: m.id })
-                },
-              },
-              h('span', { style: S.radio(active) }, active ? h('span', { style: S.radioDot }) : null),
-              h(
-                'div',
-                { style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 } },
-                h('span', { style: S.name }, m.label),
-                h(
-                  'span',
-                  { style: { ...S.meta, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-                  address || (m.id === 'domain' ? '填上你自己的域名' : '现在用不了'),
-                ),
-              ),
-            )
-          }),
-          draft.mode === 'domain'
-            ? h(
-                'div',
-                { style: { ...S.row, ...S.rowBorder }, onClick: (e) => e.stopPropagation() },
-                h(Input, {
-                  value: draft.customUrl,
-                  onChange: field('customUrl'),
-                  onCommit: commit('customUrl'),
-                  width: '100%',
-                  placeholder: 'https://你的域名',
-                }),
-              )
-            : null,
-        ),
-        qr
-          ? h(
-              'div',
-              { style: S.pair },
-              h('div', { style: S.qrCard, dangerouslySetInnerHTML: { __html: qr } }),
-              h(
-                'div',
-                { style: S.pairSide },
-                h('input', {
-                  value: pairingUrl,
-                  readOnly: true,
-                  onFocus: (e) => e.target.select(),
-                  style: { ...S.input, width: '100%', color: C.dim },
-                }),
-                h(
-                  'div',
-                  { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
-                  h('button', { style: S.primary, onClick: copyLink }, copied ? '已复制' : '复制链接'),
-                  h('button', { style: S.button, onClick: rotate }, confirmRotate ? '再点一次' : '换新链接'),
-                ),
-              ),
-            )
-          : h('div', { style: S.hint }, MODE_HINT[draft.mode] || '先选一种连法'),
-      )
-
-      /* ---------------- 设备 ---------------- */
-
-      const devices = state.devices ?? []
-      const deviceSection = h(
-        Section,
-        { title: '已连上的手机' },
-        h(
-          'div',
-          { style: S.card },
-          devices.length
-            ? devices.map((d, index) =>
-                h(
-                  'div',
-                  { key: d.id, style: { ...S.device, ...(index ? S.rowBorder : null) } },
-                  h('span', { style: S.name }, d.label || (d.platform === 'android' ? 'Android 手机' : '手机')),
-                  h('span', { style: S.grow }),
-                  h('span', { style: S.meta }, ago(d.lastSeen)),
-                  h(
-                    'button',
-                    {
-                      style: S.button,
-                      onClick: async () => {
-                        try {
-                          setState(await request('/unbind', { id: d.id }))
-                        } catch {
-                          setError('移出失败')
-                        }
-                      },
-                    },
-                    '移出',
-                  ),
-                ),
-              )
-            : h('div', { style: { ...S.device, color: C.dim, fontSize: 13 } }, '还没有手机连上'),
-          h(
-            'div',
-            { style: { ...S.row, ...S.rowBorder } },
-            h('span', { style: S.label }, '同时绑定'),
-            h(Input, {
-              type: 'number',
-              value: draft.maxDevices,
-              onChange: field('maxDevices'),
-              onCommit: commit('maxDevices'),
-              width: 68,
-            }),
-            h('span', { style: S.meta }, '台'),
-          ),
-        ),
-      )
-
-      /* ---------------- 对话 ---------------- */
-
-      const paramRow = (label, control) =>
-        h('div', { style: { ...S.row, ...S.rowBorder } }, h('span', { style: S.label }, label), control)
-
-      const paramsSection = h(
-        Section,
-        { title: '对话' },
-        h(
-          'div',
-          { style: S.card },
-          paramRow(
-            '唤醒词',
-            h(Input, {
-              value: draft.wakeName,
-              onChange: field('wakeName'),
-              onCommit: commit('wakeName'),
-              placeholder: '小鱼',
-            }),
-          ),
-          paramRow(
-            '音色',
-            h(
-              'select',
-              {
-                value: draft.voice,
-                style: { ...S.input, width: 140 },
-                onChange: (e) => {
-                  field('voice')(e.target.value)
-                  save({ voice: e.target.value })
-                },
-              },
-              (VOICES.some((item) => item.id === draft.voice)
-                ? VOICES
-                : [...VOICES, { id: draft.voice, label: draft.voice }]
-              ).map((item) => h('option', { key: item.id, value: item.id }, item.label)),
-            ),
-          ),
-          h(
-            'div',
-            { style: { ...S.row, ...S.rowBorder, flexDirection: 'column', alignItems: 'stretch', gap: 8 } },
-            h('span', { style: { ...S.label, minWidth: 0 } }, '人设'),
-            h('textarea', {
-              value: draft.persona,
-              rows: 4,
-              placeholder: '它该怎么说话',
-              style: { ...S.input, width: '100%', resize: 'vertical', lineHeight: 1.6 },
-              onChange: (e) => field('persona')(e.target.value),
-              onBlur: () => commit('persona')(),
-            }),
-          ),
-          paramRow(
-            '输出长度',
-            h(
-              'select',
-              {
-                value: draft.maxWords,
-                style: { ...S.input, width: 84 },
-                onChange: (e) => {
-                  field('maxWords')(e.target.value)
-                  save({ maxWords: e.target.value })
-                },
-              },
-              MAXWORD_OPTIONS.map((item) => h('option', { key: item.id, value: item.id }, item.label)),
-            ),
-          ),
-          h(
-            'div',
-            { style: { ...S.row, ...S.rowBorder, justifyContent: 'space-between' } },
-            h('span', { style: S.label }, '气泡'),
-            h(
-              'button',
-              {
-                style: S.switch(draft.bubble),
-                'aria-label': '气泡',
-                onClick: () => {
-                  const next = !draft.bubble
-                  field('bubble')(next)
-                  save({ bubble: next })
-                },
-              },
-              h('span', { style: S.knob(draft.bubble) }),
-            ),
-          ),
-        ),
-      )
-
-      /* ---------------- 经自己的服务器转发 ---------------- */
+      /* ---------------- 自己的服务器：只有选了这个方案才展开 ---------------- */
 
       const pubField = (key) => (value) => setPubDraft((d) => ({ ...(d ?? {}), [key]: value }))
 
@@ -636,87 +431,271 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const pubFixHint = pub?.running || pubBusy ? '' : pubError || pub?.lastError ? '服务器要允许端口转发，并放行这个公网地址。' : ''
-
       const pubStatus = !pub
         ? ''
         : pub.running
-          ? `在用 ${pub.url}`
+          ? '正在转发'
           : pub.lastError
-            ? `${pub.lastError}，改好再连`
+            ? String(pub.lastError)
             : pub.configured
-              ? '没在跑'
-              : '填好再连'
+              ? '没有在跑'
+              : ''
 
-      const pubRow = (label, control) =>
+      const pubInline = h(
+        'div',
+        { style: { ...S.mode(false), flexDirection: 'column', alignItems: 'stretch', gap: 8, cursor: 'default' } },
         h(
           'div',
-          { style: { ...S.row, ...S.rowBorder } },
-          h('span', { style: S.label }, label),
-          h('div', { style: { flex: 1, minWidth: 0, display: 'flex' } }, control),
-        )
+          { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+          h('span', { style: S.label }, '服务器'),
+          h(Input, {
+            value: pubDraft?.account ?? '',
+            onChange: pubField('account'),
+            onCommit: commitAccount,
+            placeholder: 'ubuntu@1.2.3.4',
+            width: '100%',
+          }),
+        ),
+        h(
+          'div',
+          { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+          h('span', { style: S.label }, '公网地址'),
+          h(Input, {
+            value: pubDraft?.addr ?? '',
+            onChange: pubField('addr'),
+            onCommit: commitAddr,
+            placeholder: 'https://1.2.3.4:8443',
+            width: '100%',
+          }),
+        ),
+        h(
+          'div',
+          { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+          h('span', { style: S.label }, '私钥'),
+          h(Input, {
+            value: pubDraft?.keyPath ?? '',
+            onChange: pubField('keyPath'),
+            onCommit: () => postPub({ keyPath: String(pubDraft?.keyPath ?? '') }),
+            placeholder: '~/.ssh/id_ed25519',
+            width: '100%',
+          }),
+        ),
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+          pub?.running
+            ? h('button', { style: S.button, disabled: pubBusy, onClick: disconnectPub }, '断开')
+            : h('button', { style: S.button, disabled: pubBusy, onClick: connectPub }, pubBusy ? '正在连…' : '连接'),
+          h('span', { style: { ...S.hint, flex: 1, minWidth: 0 } }, pubError || pubStatus),
+        ),
+      )
 
-      const pubSection = h(
+      /* ---------------- 连上手机：三种方案，选一个填好就出二维码 ---------------- */
+
+      const pairSection = h(
         Section,
-        { title: '经自己的服务器转发' },
+        { title: '连上手机' },
         h(
           'div',
           { style: S.card },
-          pubRow(
-            '账号',
+          state.modes.map((m, index) => {
+            const active = m.id === draft.mode
+            const address = m.id === 'domain' ? draft.customUrl : m.url
+            return h(
+              'div',
+              {
+                key: m.id,
+                style: { ...S.mode(active), ...(index ? S.rowBorder : null) },
+                onClick: () => {
+                  if (active) return
+                  field('mode')(m.id)
+                  save({ mode: m.id })
+                },
+              },
+              h('span', { style: S.radio(active) }, active ? h('span', { style: S.radioDot }) : null),
+              h(
+                'div',
+                { style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 } },
+                h('span', { style: S.name }, m.label),
+                h(
+                  'span',
+                  { style: { ...S.meta, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                  active && address ? address : MODE_NEED[m.id] || '',
+                ),
+              ),
+            )
+          }),
+          draft.mode === 'domain'
+            ? h(
+                'div',
+                { style: { ...S.row, ...S.rowBorder }, onClick: (e) => e.stopPropagation() },
+                h(Input, {
+                  value: draft.customUrl,
+                  onChange: field('customUrl'),
+                  onCommit: commit('customUrl'),
+                  width: '100%',
+                  placeholder: 'https://你的域名',
+                }),
+              )
+            : null,
+          draft.mode === 'server' ? pubInline : null,
+        ),
+        qr
+          ? h(
+              'div',
+              { style: S.pair },
+              h('div', { style: S.qrCard, dangerouslySetInnerHTML: { __html: qr } }),
+              h(
+                'div',
+                { style: S.pairSide },
+                h('input', {
+                  value: pairingUrl,
+                  readOnly: true,
+                  onFocus: (e) => e.target.select(),
+                  style: { ...S.input, width: '100%', color: C.dim },
+                }),
+                h(
+                  'div',
+                  { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+                  h('button', { style: S.primary, onClick: copyLink }, copied ? '已复制' : '复制链接'),
+                  h('button', { style: S.button, onClick: rotate }, confirmRotate ? '再点一次' : '换新链接'),
+                ),
+              ),
+            )
+          : h('div', { style: S.hint }, MODE_HINT[draft.mode] || '选一种连法'),
+      )
+
+      /* ---------------- 人设 ---------------- */
+
+      const paramRow = (label, control) =>
+        h('div', { style: { ...S.row, ...S.rowBorder } }, h('span', { style: S.label }, label), control)
+
+      const paramsSection = h(
+        Section,
+        { title: '人设' },
+        h(
+          'div',
+          { style: S.card },
+          paramRow(
+            '怎么叫它',
             h(Input, {
-              value: pubDraft?.account ?? '',
-              onChange: pubField('account'),
-              onCommit: commitAccount,
-              placeholder: 'ubuntu@服务器',
-              width: '100%',
+              value: draft.wakeName,
+              onChange: field('wakeName'),
+              onCommit: commit('wakeName'),
+              placeholder: '大肥鱼',
             }),
           ),
-          pubRow(
-            '公网地址',
-            h(Input, {
-              value: pubDraft?.addr ?? '',
-              onChange: pubField('addr'),
-              onCommit: commitAddr,
-              placeholder: 'https://服务器:8443',
-              width: '100%',
-            }),
-          ),
-          pubRow(
-            '私钥',
-            h(Input, {
-              value: pubDraft?.keyPath ?? '',
-              onChange: pubField('keyPath'),
-              onCommit: () => postPub({ keyPath: String(pubDraft?.keyPath ?? '') }),
-              placeholder: '~/.ssh/id_ed25519',
-              width: '100%',
-            }),
+          paramRow(
+            '音色',
+            h(
+              'select',
+              {
+                value: draft.voice,
+                style: { ...S.input, width: 140 },
+                onChange: (e) => {
+                  field('voice')(e.target.value)
+                  save({ voice: e.target.value })
+                },
+              },
+              (VOICES.some((item) => item.id === draft.voice)
+                ? VOICES
+                : [...VOICES, { id: draft.voice, label: draft.voice }]
+              ).map((item) => h('option', { key: item.id, value: item.id }, item.label)),
+            ),
           ),
           h(
             'div',
-            { style: { ...S.row, ...S.rowBorder, justifyContent: 'space-between', gap: 8 } },
-            h('span', { style: { ...S.hint, flex: 1, minWidth: 0 } }, pubStatus),
-            pub?.running
-              ? h('button', { style: S.button, disabled: pubBusy, onClick: disconnectPub }, '断开')
-              : h('button', { style: S.button, disabled: pubBusy, onClick: connectPub }, pubBusy ? '正在连…' : '连接'),
+            { style: { ...S.row, ...S.rowBorder, flexDirection: 'column', alignItems: 'stretch', gap: 8 } },
+            h('span', { style: { ...S.label, minWidth: 0 } }, '说话方式'),
+            h('textarea', {
+              value: draft.persona,
+              rows: 4,
+              placeholder: '它该怎么说话',
+              style: { ...S.input, width: '100%', resize: 'vertical', lineHeight: 1.6 },
+              onChange: (e) => field('persona')(e.target.value),
+              onBlur: () => commit('persona')(),
+            }),
           ),
-          pubError ? h('div', { style: S.hint }, pubError) : null,
-          pub && !pub.cert?.ok
-            ? h('div', { style: S.hint }, '还没有证书，先跑 scripts/tls-ca.sh')
-            : null,
-          pubFixHint ? h('div', { style: S.hint }, pubFixHint) : null,
+          paramRow(
+            '一句话长短',
+            h(
+              'select',
+              {
+                value: draft.maxWords,
+                style: { ...S.input, width: 84 },
+                onChange: (e) => {
+                  field('maxWords')(e.target.value)
+                  save({ maxWords: e.target.value })
+                },
+              },
+              MAXWORD_OPTIONS.map((item) => h('option', { key: item.id, value: item.id }, item.label)),
+            ),
+          ),
+          h(
+            'div',
+            { style: { ...S.row, ...S.rowBorder, justifyContent: 'space-between' } },
+            h('span', { style: S.label }, '气泡'),
+            h(
+              'button',
+              {
+                style: S.switch(draft.bubble),
+                'aria-label': '气泡',
+                onClick: () => {
+                  const next = !draft.bubble
+                  field('bubble')(next)
+                  save({ bubble: next })
+                },
+              },
+              h('span', { style: S.knob(draft.bubble) }),
+            ),
+          ),
         ),
-        h('div', { style: S.hint }, '只存在这台电脑，别人装的时候填自己的。'),
+      )
+
+      /* ---------------- 已连上的手机 ---------------- */
+
+      const devices = state.devices ?? []
+      const deviceSection = h(
+        Section,
+        { title: '已连上的手机' },
+        h(
+          'div',
+          { style: S.card },
+          devices.length
+            ? devices.map((d, index) =>
+                h(
+                  'div',
+                  { key: d.id, style: { ...S.device, ...(index ? S.rowBorder : null) } },
+                  h('span', { style: S.name }, d.label || (d.platform === 'android' ? 'Android 手机' : '手机')),
+                  h('span', { style: S.grow }),
+                  h('span', { style: S.meta }, ago(d.lastSeen)),
+                  h(
+                    'button',
+                    {
+                      style: S.button,
+                      onClick: async () => {
+                        try {
+                          setState(await request('/unbind', { id: d.id }))
+                        } catch {
+                          setError('移出失败')
+                        }
+                      },
+                    },
+                    '移出',
+                  ),
+                ),
+              )
+            : h('div', { style: { ...S.device, color: C.dim, fontSize: 13 } }, '还没有手机连上'),
+        ),
       )
 
       return h(
         'div',
         { style: S.view, 'data-dsh-panel': PANEL_ID },
         error ? h('div', { style: S.error }, error) : null,
-        pairSection,
-        pubSection,
-        deviceSection,
         paramsSection,
+        pairSection,
+        deviceSection,
       )
     }
 

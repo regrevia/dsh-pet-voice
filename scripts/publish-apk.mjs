@@ -31,11 +31,20 @@ const UPDATE_DIR = resolve(process.env.DSH_PET_UPDATE_DIR || join(homedir(), '.d
 /** 公开更新源：和 App 里的 PUBLIC_META_URL 必须一致，换仓库两边一起改。 */
 const GITHUB_REPO = process.env.DSH_PET_GITHUB_REPO || 'regrevia/dsh-pet-voice'
 const GITHUB_BASE = `https://github.com/${GITHUB_REPO}/releases`
+/** 国内镜像：cnb.cool 同名仓库，Release 附件与 GitHub 一一对应；App 先查这里，连不上才回 GitHub。 */
+const CNB_REPO = process.env.DSH_PET_CNB_REPO || '2022090087/dsh-pet-voice'
+const CNB_WEB = `https://cnb.cool/${CNB_REPO}/-/releases`
+const CNB_API = `https://api.cnb.cool/${CNB_REPO}`
+/** 固定入口：`latest` 这个 Release 只放一份 latest.json，地址永远不变。 */
+const CNB_META_TAG = 'latest'
 /** 和插件里的白名单保持一致：没有 `/`、不以 `.` 开头。 */
 const APK_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.apk$/i
 const USAGE = `用法：
   node scripts/publish-apk.mjs <apk 路径> [--notes "更新说明"] [--version-code 5] [--version-name 0.3.0]
 
+  --promote         放给用户：同步国内镜像 cnb.cool，并把「当前推广版」改成这版
+  --rollback <版本>  用户可见版本退回某个已推广过的版本（如 0.9.44）
+  --min-plugin <版本> 这版 App 要求的最低插件版本（App 会先提示更新插件）
   --no-github       只写本地兜底目录，不建 GitHub Release（离线/自测用）
   --dir <目录>      发布到别处（默认 ${UPDATE_DIR}）
   --version-code N  显式指定 versionCode（不给就自己读 APK）
@@ -53,7 +62,7 @@ function fail(message, hint) {
 }
 
 function parseArgs(argv) {
-  const options = { notes: '', versionCode: null, versionName: null, dir: UPDATE_DIR, apk: null, github: true }
+  const options = { notes: '', versionCode: null, versionName: null, dir: UPDATE_DIR, apk: null, github: true, promote: false, minPlugin: '', rollback: null }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     const next = () => {
@@ -78,6 +87,13 @@ function parseArgs(argv) {
       options.dir = resolve(next())
     } else if (arg === '--no-github') {
       options.github = false
+    } else if (arg === '--promote') {
+      options.promote = true
+    } else if (arg === '--min-plugin') {
+      options.minPlugin = String(next()).trim()
+    } else if (arg === '--rollback') {
+      options.rollback = String(next()).trim()
+      if (!/^\d+\.\d+\.\d+$/.test(options.rollback)) fail(`--rollback 要版本号，例如 0.9.44，收到 ${options.rollback}`)
     } else if (arg.startsWith('-')) {
       fail(`不认识的参数 ${arg}`, USAGE)
     } else if (options.apk) {
@@ -85,6 +101,10 @@ function parseArgs(argv) {
     } else {
       options.apk = arg
     }
+  }
+  if (options.rollback) {
+    if (options.apk) fail('--rollback 不带 APK', USAGE)
+    return options
   }
   if (!options.apk) fail('缺 APK 路径', USAGE)
   return options
@@ -273,7 +293,8 @@ function assertZipMagic(apkPath) {
 
 function runGh(args) {
   try {
-    return execFileSync('gh', args, { encoding: 'utf8', timeout: 600_000, stdio: ['ignore', 'pipe', 'pipe'] })
+    // 30 MB 上行遇到慢网要十几分钟，超时按小时算，别让传到一半被掐。
+    return execFileSync('gh', args, { encoding: 'utf8', timeout: 3_600_000, stdio: ['ignore', 'pipe', 'pipe'] })
   } catch (error) {
     fail(
       `gh ${args.slice(0, 2).join(' ')} 失败：${String(error?.stderr ?? error?.message ?? error).trim()}`,
@@ -305,9 +326,188 @@ function hasAsset(tag, name, size) {
 }
 
 // ---------------------------------------------------------------------------
+// 国内镜像：cnb.cool 同名仓库（附件上传 = 申请地址 → PUT → 确认三步）
+// ---------------------------------------------------------------------------
+
+/** 凭据：优先 CNB_TOKEN，其次系统钥匙串里 cnb.cool 的 git 密码（也是个人访问令牌）。 */
+function cnbToken() {
+  const fromEnv = String(process.env.CNB_TOKEN ?? '').trim()
+  if (fromEnv) return fromEnv
+  try {
+    const out = execFileSync('git', ['credential-osxkeychain', 'get'], {
+      input: 'protocol=https\nhost=cnb.cool\n\n',
+      encoding: 'utf8',
+      timeout: 10_000,
+    })
+    const line = out.split('\n').find((item) => item.startsWith('password='))
+    if (line) return line.slice('password='.length).trim()
+  } catch {
+    /* 交给调用方报 */
+  }
+  return ''
+}
+
+async function cnbApi(token, path, { method = 'GET', body } = {}) {
+  const res = await fetch(`${CNB_API}${path}`, {
+    method,
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: 'application/vnd.cnb.api+json',
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(60_000),
+  })
+  const text = await res.text()
+  let json = null
+  try {
+    json = text ? JSON.parse(text) : null
+  } catch {
+    json = null
+  }
+  return { status: res.status, ok: res.ok, json }
+}
+
+/** 按 tag 找 Release，没有就建一个；返回 release id。 */
+async function cnbEnsureRelease(token, tag, name, body) {
+  const listed = await cnbApi(token, '/-/releases?page=1&page_size=100')
+  if (!listed.ok) fail(`CNB 查 Release 失败：HTTP ${listed.status} ${JSON.stringify(listed.json)}`)
+  const list = Array.isArray(listed.json) ? listed.json : (listed.json?.releases ?? [])
+  const hit = list.find((item) => item.tag_name === tag)
+  if (hit) return String(hit.id)
+  const created = await cnbApi(token, '/-/releases', {
+    method: 'POST',
+    body: { tag_name: tag, name, target_commitish: 'main', body, make_latest: 'false' },
+  })
+  if (!created.ok || !created.json?.id) {
+    fail(`CNB 建 Release ${tag} 失败：HTTP ${created.status} ${JSON.stringify(created.json)}`)
+  }
+  return String(created.json.id)
+}
+
+/** 附件已在且字节数一致就不重传（30 MB 重发一次就是白等）。 */
+async function cnbHasAsset(token, releaseId, fileName, size) {
+  const detail = await cnbApi(token, `/-/releases/${releaseId}`)
+  if (!detail.ok) return false
+  const assets = detail.json?.assets ?? []
+  return assets.some((item) => item.name === fileName && Number(item.size) === size)
+}
+
+async function cnbUploadAsset(token, releaseId, fileName, bytes) {
+  const signed = await cnbApi(token, `/-/releases/${releaseId}/asset-upload-url`, {
+    method: 'POST',
+    body: { asset_name: fileName, size: bytes.length, overwrite: true },
+  })
+  if (!signed.ok || !signed.json?.upload_url || !signed.json?.verify_url) {
+    fail(`CNB 申请上传地址失败：HTTP ${signed.status} ${JSON.stringify(signed.json)}`)
+  }
+  const put = await fetch(signed.json.upload_url, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/octet-stream' },
+    body: bytes,
+    signal: AbortSignal.timeout(600_000),
+  })
+  if (!put.ok) fail(`CNB 上传 ${fileName} 失败：HTTP ${put.status}`)
+  const confirmed = await fetch(signed.json.verify_url, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.cnb.api+json' },
+    signal: AbortSignal.timeout(120_000),
+  })
+  if (!confirmed.ok) fail(`CNB 确认上传 ${fileName} 失败：HTTP ${confirmed.status}`)
+}
+
+function cnbMetaFor({ fileName, size, sha256, versionCode, versionName, notes, minPlugin, base }) {
+  return {
+    versionCode,
+    versionName,
+    size,
+    sha256,
+    file: fileName,
+    url: `${base}/${fileName}`,
+    notes,
+    ...(minPlugin ? { minPlugin } : {}),
+    publishedAt: new Date().toISOString(),
+  }
+}
+
+/** 改 CNB 的固定入口：这一份换了，用户「检查更新」才算看到新版。 */
+async function cnbPointLatest(token, meta) {
+  const metaRelease = await cnbEnsureRelease(token, CNB_META_TAG, CNB_META_TAG, '检查更新入口')
+  await cnbUploadAsset(token, metaRelease, 'latest.json', Buffer.from(`${JSON.stringify(meta, null, 2)}\n`))
+  console.log(`✓ 检查更新地址 → ${CNB_WEB}/download/${CNB_META_TAG}/latest.json`)
+}
+
+/** 推广记录进仓库（update/latest.json）：App 在 CNB 不可达时用 jsDelivr/raw 读同一份。 */
+function writePromotionRecord(githubMeta, versionName) {
+  const file = join(REPO_ROOT, 'update', 'latest.json')
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+  writeJsonAtomic(file, { ...githubMeta, promotedAt: new Date().toISOString() })
+  try {
+    execFileSync('git', ['add', 'update/latest.json'], { cwd: REPO_ROOT, stdio: 'ignore', timeout: 60_000 })
+    execFileSync('git', ['commit', '-m', `推广 ${versionName}`, '--no-verify'], { cwd: REPO_ROOT, stdio: 'ignore', timeout: 120_000 })
+  } catch {
+    console.warn('⚠ 推广记录没有新提交（内容没变或 git 失败），继续')
+  }
+  try {
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: REPO_ROOT, stdio: 'ignore', timeout: 300_000 })
+    console.log('✓ 推广记录已推送 → update/latest.json')
+  } catch {
+    console.warn('⚠ update/latest.json 没推上去：CNB 那条通道仍然有效，GitHub 兜底查不到这版')
+  }
+}
+
+/** 放给用户：CNB 传包 + 每版自带一份 meta（回滚要用）+ 换固定入口 + 改仓库里的推广记录。 */
+async function promote({ apkPath, fileName, size, sha256, versionCode, versionName, notes, minPlugin, github }) {
+  const token = cnbToken()
+  if (!token) {
+    fail('没有 CNB 凭据，放不出去', 'CNB_TOKEN=... 或确认 git credential 里有 cnb.cool 的密码')
+  }
+  const tag = `v${versionName}`
+  const releaseId = await cnbEnsureRelease(token, tag, `鲸灵 ${versionName}`, notes || `鲸灵 ${versionName}`)
+  if (await cnbHasAsset(token, releaseId, fileName, size)) {
+    console.log(`· 国内镜像 ${tag} 已有同名同大小附件，跳过重传`)
+  } else {
+    console.log(`· 同步国内镜像 ${CNB_REPO} ${tag}（cnb.cool 比 GitHub 快得多，几秒就好）`)
+    await cnbUploadAsset(token, releaseId, fileName, readFileSync(apkPath))
+  }
+  const cnbMeta = cnbMetaFor({ fileName, size, sha256, versionCode, versionName, notes, minPlugin, base: `${CNB_WEB}/download/${tag}` })
+  // 每版 Release 自己留一份 meta：--rollback 直接取回来，不依赖本机缓存。
+  await cnbUploadAsset(token, releaseId, 'latest.json', Buffer.from(`${JSON.stringify(cnbMeta, null, 2)}\n`))
+  await cnbPointLatest(token, cnbMeta)
+  if (github) {
+    const ghMeta = { ...cnbMeta, url: `${GITHUB_BASE}/download/${tag}/${fileName}` }
+    writePromotionRecord(ghMeta, versionName)
+  }
+  console.log(`✓ 用户现在能看到 ${versionName} → ${cnbMeta.url}`)
+}
+
+/** 回滚：把固定入口指回某个已推广过的版本；那版的 meta 存在它自己的 Release 里。 */
+async function rollback(versionName) {
+  const token = cnbToken()
+  if (!token) fail('没有 CNB 凭据，退不回去', 'CNB_TOKEN=... 或确认 git credential 里有 cnb.cool 的密码')
+  const tag = `v${versionName}`
+  const res = await fetch(`${CNB_WEB}/download/${tag}/latest.json`, {
+    headers: { accept: 'application/json' },
+    signal: AbortSignal.timeout(30_000),
+  })
+  if (!res.ok) {
+    fail(`CNB 上没有 ${tag} 的推广记录（HTTP ${res.status}）`, '只能退回推广过的版本；第一次推广之前没有记录')
+  }
+  const old = JSON.parse(await res.text())
+  const cnbMeta = { ...old, url: `${CNB_WEB}/download/${tag}/${old.file}` }
+  await cnbPointLatest(token, cnbMeta)
+  writePromotionRecord({ ...cnbMeta, url: `${GITHUB_BASE}/download/${tag}/${old.file}` }, versionName)
+  console.log(`✓ 用户可见版本退回 ${versionName}（versionCode ${old.versionCode}）`)
+}
+
+// ---------------------------------------------------------------------------
 
 async function main() {
   const options = parseArgs(process.argv.slice(2))
+  if (options.rollback) {
+    await rollback(options.rollback)
+    return
+  }
   const apkPath = resolve(options.apk)
   if (!existsSync(apkPath)) fail(`找不到 APK：${apkPath}`)
   const stat = statSync(apkPath)
@@ -371,6 +571,7 @@ async function main() {
     sha256,
     file: fileName,
     notes: options.notes,
+    ...(options.minPlugin ? { minPlugin: options.minPlugin } : {}),
     publishedAt: new Date().toISOString(),
   }
   writeJsonAtomic(join(options.dir, 'latest.json'), meta)
@@ -383,19 +584,42 @@ async function main() {
   if (options.github) {
     const tag = `v${versionName}`
     const assetUrl = `${GITHUB_BASE}/download/${tag}/${fileName}`
-    const publicMeta = { ...meta, url: assetUrl, file: fileName, publishedAt: meta.publishedAt }
-    console.log(`· 发布到公开源 ${GITHUB_REPO} ${tag}（30 MB 左右，慢是正常的）`)
-    // 先确保 Release 存在再传资产：上传要几十秒到几分钟，不能在前台等。
-    hasRelease(tag) || runGh(['release', 'create', tag, '-R', GITHUB_REPO, '-t', `鲸灵 ${versionName}`, '-n', options.notes || `鲸灵 ${versionName}`])
+    const githubMeta = { ...meta, url: assetUrl, publishedAt: meta.publishedAt }
+    console.log(`· 存档到 GitHub ${GITHUB_REPO} ${tag}（30 MB 左右，慢是正常的；这一步用户还看不到）`)
+    // 先建草稿再传：上传的几分钟里 /releases/latest 不会指向「资产还没齐」的版本（那会让 App 拿到 404）。
+    if (!hasRelease(tag)) {
+      runGh(['release', 'create', tag, '-R', GITHUB_REPO, '-t', `鲸灵 ${versionName}`, '-n', options.notes || `鲸灵 ${versionName}`, '--draft'])
+    }
     if (!hasAsset(tag, fileName, size)) {
       runGh(['release', 'upload', tag, apkPath, '--clobber', '-R', GITHUB_REPO])
     }
-    // latest.json 最后传：资产没齐就让手机看到新版本，会下到 404。
-    const publicPath = join(options.dir, 'latest.json')
-    writeJsonAtomic(publicPath, publicMeta)
-    runGh(['release', 'upload', tag, publicPath, '--clobber', '-R', GITHUB_REPO])
-    console.log(`✓ 公开源已发布 → ${assetUrl}`)
-    console.log(`✓ 检查更新地址 → ${GITHUB_BASE}/latest/download/latest.json`)
+    const githubMetaPath = join(options.dir, 'latest.json')
+    writeJsonAtomic(githubMetaPath, githubMeta)
+    runGh(['release', 'upload', tag, githubMetaPath, '--clobber', '-R', GITHUB_REPO])
+    try {
+      runGh(['release', 'edit', tag, '-R', GITHUB_REPO, '--draft=false'])
+    } catch {
+      console.warn('⚠ 切成正式 Release 失败（可能已经是正式的了），继续')
+    }
+    mkdirSync(join(REPO_ROOT, 'dist', 'mirror', 'github'), { recursive: true, mode: 0o700 })
+    writeJsonAtomic(join(REPO_ROOT, 'dist', 'mirror', 'github', 'latest.json'), githubMeta)
+    console.log(`✓ GitHub 存档 → ${assetUrl}`)
+  }
+
+  if (options.promote) {
+    await promote({
+      apkPath,
+      fileName,
+      size,
+      sha256,
+      versionCode,
+      versionName,
+      notes: options.notes,
+      minPlugin: options.minPlugin,
+      github: options.github,
+    })
+  } else {
+    console.log('· 用户还看不到这版；要放出去再跑一次同一条命令加 --promote')
   }
 }
 

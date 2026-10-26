@@ -713,8 +713,20 @@ SERIAL=emulator-5554 PET_HOST=https://pet.example.com/pet-voice/ bash scripts/ve
 
 ## 20. 版本与验收记录（更新通道）
 
-发布用 `node scripts/publish-apk.mjs dist/jingling-<ver>.apk --version-code N --version-name <ver> --notes "…"`，
-落盘 `~/.dsh/pet-voice/update/`，`latest.json` 原子更新；App「检查更新」读 `/api/update`。版本只升不降。
+发版分两步，互不牵连：
+
+1. **存档**（每版都做）：`node scripts/publish-apk.mjs dist/jingling-<ver>.apk --notes "…"`。
+   只推 GitHub Release（草稿 → 传 APK → 传 `latest.json` → 转正式），用户看不到。
+   草稿这一步是为了消掉「`/releases/latest` 已指向新版、`latest.json` 还没传完」的 404 窗口。
+2. **放给用户**（想放的时候）：同一条命令加 `--promote`。把 APK 镜像到 CNB、上传该版自带的
+   `latest.json`、换掉 CNB `latest` 入口，并把推广记录写进仓库 `update/latest.json`（jsDelivr / raw 兜底同一份）。
+   两个渠道的 meta 都只在 `--promote` 时变，所以「什么时候给用户」是人的决定。
+
+`--rollback 0.9.44` 把 CNB 固定入口指回某个已推广过的版本（那版的 meta 存在它自己的 Release 里）。
+
+App「检查更新」通道顺序：CNB → jsDelivr `update/latest.json` → raw.githubusercontent → 宿主 `/api/update`（兜底，相对地址）。
+meta 可带 `minPlugin`（`--min-plugin 0.1.8`）：本机插件版本更低时 App 只显示「先更新插件」，不下载。
+默认不带 = 不拿插件版本拦 App；只有 App 真用到新接口时才标。插件版本由 `/api/state` 的 `pluginVersion` 上报。
 
 | 版本 | code | 体积 | sha256（前 16） | 这一版验了什么 |
 | --- | --- | --- | --- | --- |
@@ -737,6 +749,9 @@ SERIAL=emulator-5554 PET_HOST=https://pet.example.com/pet-voice/ bash scripts/ve
 | 0.9.24 | 94 | 28.56 MB | `ceff8243c7f15552` | 新装第一条就能绑定：把面板给的配对链接整条粘进「电脑地址」，地址和令牌一起拆出来；局域网连法由插件在电脑上另起一层监听（`0.0.0.0`，只放行私有网段与 api 路径） |
 | 0.9.23 | 93 | 28.56 MB | `f8522e9e4552d791` | 打开 App 时悬浮窗收起、不再压住对话页且不再吃掉点击；退回桌面/别的应用时悬浮窗照常出现（模拟器两种状态实测） |
 | 0.9.22 | 92 | 28.56 MB | `b402b52ce24b214b` | 「立即对话」图标与文字一起居中；扫码/重新扫码走通（含相机授权）；经自有公网服务器 8443 实测发出并收到回复 | 对话页输入栏加表情按钮（24 个常用表情）；表情不进 TTS；模拟器实测发 ❤️/🎉 都收到顺着情绪的回应 |
+| 0.9.44 | 114 | 28.59 MB | `89e22596394987b9` | 配置页只留三种连法和人设；检查更新先看国内镜像（CNB 无数据才退 GitHub / 宿主） |
+| 0.9.45 | 115 | 28.59 MB | `b94d826304a1fc17` | 发版拆两步：GitHub 每版存档，`--promote` 才动 CNB `latest` 与仓库 `update/latest.json`；meta 支持 `minPlugin` 门槛。实测：GitHub 已发但未推广时，线上仍是上一版 |
+| 0.9.46 | 116 | 28.59 MB | `1881a867be41cc9d` | 门槛实测：CNB 写 `minPlugin 0.1.9` 时，插件 0.1.8 的机器只显示「先更新插件 0.1.9」不下载；改回无门槛后同一台机器检查更新 → 自动从 CNB 下载 30 MB 并装到 116，配对与气泡设置都保住 |
 
 模拟器实测环境：`emulator-5554`，Android 11 / API 30（`sdk_gphone_arm64`），1080×2340。
 

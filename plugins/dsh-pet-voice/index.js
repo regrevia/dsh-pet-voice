@@ -71,6 +71,14 @@ export const name = 'dsh-pet-voice'
 export const inject = ['webServer']
 
 const HERE = dirname(fileURLToPath(import.meta.url))
+/** 插件自身版本（给 App 判断「这版 App 要的插件够不够新」）。 */
+const PLUGIN_VERSION = (() => {
+  try {
+    return String(JSON.parse(readFileSync(join(HERE, 'package.json'), 'utf8')).version ?? '')
+  } catch {
+    return ''
+  }
+})()
 const PUBLIC_DIR = join(HERE, 'public')
 const HOME_DIR = join(homedir(), '.dsh', 'pet-voice')
 const TOKEN_PATH = join(HOME_DIR, 'token')
@@ -4423,7 +4431,7 @@ export function apply(ctx, config) {
     const route = reqUrl.pathname.slice(PANEL.length + 1).replace(/\/+$/, '')
     const method = String(req.method ?? 'GET').toUpperCase()
     const origin = ctx.webServer.getOrigin?.() ?? ''
-    const snapshot = async () => panelState({ origin, pairing: await pairInfo(origin) })
+    const snapshot = async () => ({ ...(await panelState({ origin, pairing: await pairInfo(origin) })), pluginVersion: PLUGIN_VERSION })
     try {
     // 面板：DSH 网页里那一页（配对码 / 设备 / 参数）。网页既没有也不该有手机令牌,
     // 门禁换成回环地址——只有本机打得开，公网侧永远 403。
@@ -4617,6 +4625,8 @@ export function apply(ctx, config) {
         }
         return sendJson(res, 200, {
           ok: true,
+          // App 靠这个判断「这版 App 要的插件够不够新」，别删。
+          pluginVersion: PLUGIN_VERSION,
           // 绝不回显完整 token：只给前 8 位，让用户能比对「现在生效的是哪一把」。
           tokenHint: currentToken().slice(0, 8),
           linkHint: `在电脑上执行 cat ${TOKEN_PATH} 可查看完整配对链接里的 token`,

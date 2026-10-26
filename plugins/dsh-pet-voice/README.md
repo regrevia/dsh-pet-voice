@@ -106,7 +106,7 @@ https://xxx-xxx.trycloudflare.com/pet-voice/?k=<token>
 | GET | `tts?text=&preset=` | 神经语音（Edge `edge-tts`）直出 `audio/mpeg`；`preset` 由服务端解析成 voice+rate+pitch；也可显式传 `&voice=&rate=+16%&pitch=+22Hz` 覆盖；未知档位 → 400；需先跑 `tts/setup.sh` |
 | POST | `asr` | 请求体就是 44 字节头 + 16 kHz 单声道 PCM 的 WAV；转发给常驻 worker（`asr/asr-worker.py` → `127.0.0.1:52399`，默认 `large-v3-turbo` + `beam_size=5`）→ `{ok, text, ms}`，响应头带 `X-Asr-Ms`。**识别结果命中最近 5 分钟内播报过的句子时回 `{ok:true,text:"",echo:true}`**（手机外放把自己说的话录回来，不能当成用户发言，见下）。空音频/坏音频 → 400，超过 4 MB → 413；worker 没装 → 503 + `hint`；worker 被杀了下次请求会自动拉起并完成本次识别（冷启动 11 s，预算 25 s） |
 | GET | `asr` | 只读探针：`{ok, ready, running, model, pid?}`。`ready:false` 说明缺 venv 或 worker 脚本，`hint` 里给缺的路径 |
-| GET | `update` | 更新通道：读 `~/.dsh/pet-voice/update/latest.json` → `{ok, versionCode, versionName, size, sha256, file, notes, publishedAt, url}`；还没发布过 → `versionCode:0` + 可读 `hint` |
+| GET | `update` | 更新通道（兜底那一档）：读 `~/.dsh/pet-voice/update/latest.json` → `{ok, versionCode, versionName, size, sha256, file, notes, publishedAt, minPlugin?, url}`；还没发布过 → `versionCode:0` + 可读 `hint` |
 | GET / HEAD | `../download/<file>.apk` | 下载已发布的 APK（**同样要 cookie**）；支持 `Range`（206 / 越界 416），`HEAD` 只回头，路径穿越 → 400/404，非 GET/HEAD → 405 |
 
 ### 语音识别（ASR）细节
@@ -133,10 +133,23 @@ JAVA_HOME=~/jdk17/Contents/Home ~/.gradle/wrapper/dists/gradle-8.13-bin/*/gradle
   -p android :app:assembleRelease --offline \
   -Pandroid.aapt2FromMavenOverride=/opt/homebrew/share/android-commandlinetools/build-tools/35.0.0/aapt2
 
-# 2. 发布（算 sha256、原子写 latest.json；手机下一次检查就能看到）
-node scripts/publish-apk.mjs android/app/build/outputs/apk/release/app-release.apk \
-  --version-code 6 --version-name 0.3.1 --notes "这一版改了什么"
+# 2. 存档（算 sha256、原子写本地 latest.json、推到 GitHub Release 草稿→正式）。这一步用户看不到。
+node scripts/publish-apk.mjs dist/jingling-0.9.46.apk --notes "这一版改了什么"
+
+# 3. 放给用户（想放的时候）：镜像到 cnb.cool + 换掉 CNB 的 latest 入口 + 提交仓库 update/latest.json
+node scripts/publish-apk.mjs dist/jingling-0.9.46.apk --notes "…" --promote
+
+# 这一版 App 真用到新插件接口时，加门槛：插件版本不够的机器只显示「先更新插件」，不下载
+node scripts/publish-apk.mjs dist/jingling-0.9.46.apk --notes "…" --promote --min-plugin 0.1.9
+
+# 想退回上一版（那版推广过、自带 meta 才能退）
+node scripts/publish-apk.mjs --rollback 0.9.44
 ```
+
+更新通道优先级由高到低：CNB `latest` → 仓库 `update/latest.json`（jsDelivr → raw）→ 宿主这个
+`~/.dsh/pet-voice/update/latest.json`（相对地址兜底）。前两个只在 `--promote` 时变，所以「什么时候给用户」
+是人的决定，GitHub 上的每版存档都不会漏到用户那边。meta 带 `minPlugin`（`--min-plugin 0.1.8`）时，
+App 发现本机插件版本更低就只提示「先更新插件」，不下载；插件版本随 `/api/state` 的 `pluginVersion` 上报。
 
 手机端：`更多 → 检查更新` → `下载并安装`。走的是 `PackageInstaller`（零 androidx 的代价），
 同一个包名 + 同一个签名 ⇒ **覆盖安装**，`pet_prefs` 里的地址/token/唤醒词/尺寸全部保留，

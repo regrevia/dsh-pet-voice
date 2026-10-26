@@ -86,6 +86,8 @@ class MainActivity : Activity() {
     private var connected: Boolean? = null
     /** 插件回话但脑子（宿主会话）没回话：这种不算「已连接」，别骗人。 */
     private var hostLost = false
+    /** 插件自报的版本；公开源要求更高时先让用户更新插件，不硬装新版 App。 */
+    private var pluginVersion = ""
     private val presetKeys = PetConfig.PRESETS.map { it.first }
 
     private var tts: TtsPlayer? = null
@@ -501,7 +503,10 @@ class MainActivity : Activity() {
             var ok: Boolean? = null
             for (attempt in 0..1) {
                 ok = try {
-                    PetClient { cfg }.state().ok
+                    val st = PetClient { cfg }.state()
+                    val v = st.json?.optString("pluginVersion").orEmpty()
+                    if (v.isNotBlank()) pluginVersion = v
+                    st.ok
                 } catch (e: Exception) {
                     false
                 }
@@ -907,6 +912,10 @@ class MainActivity : Activity() {
                     row.visibility = android.view.View.GONE
                     if (u.lastCheck == "none") u.dropCache()
                     if (!quiet) updateState.text = if (u.lastCheck == "error") "连接失败" else "已是最新"
+                } else if (UpdateManager.pluginTooOld(pluginVersion, info.requiredPlugin)) {
+                    pendingUpdate = null
+                    row.visibility = android.view.View.GONE
+                    if (!quiet) updateState.text = "先更新插件 ${info.requiredPlugin}"
                 } else {
                     txt.text = "新版本 ${info.versionName}"
                     row.visibility = android.view.View.VISIBLE
@@ -1100,22 +1109,6 @@ class MainActivity : Activity() {
         if (!openFirst(*pages.toTypedArray())) toast("请在设置里允许大肥鱼自启动")
     }
 
-    /** 一个入口列全部系统授权；具体落到哪家系统的页面由上面的探测决定。 */
-    private fun permissionChooser() {
-        val labels = arrayOf("悬浮窗权限", "电池不受限", "自启动", "通知")
-        AlertDialog.Builder(this)
-            .setTitle("去系统设置授权")
-            .setItems(labels) { _, which ->
-                when (which) {
-                    0 -> openOverlayPermission()
-                    1 -> openBattery()
-                    2 -> openAutoStart()
-                    3 -> openNotificationSettings()
-                }
-            }
-            .show()
-    }
-
     /** 权限逐项申请：状态本身可点，未授权才用强调色。 */
     private fun refreshPerms() {
         val ov = findViewById<TextView>(R.id.permOverlay)
@@ -1161,6 +1154,11 @@ class MainActivity : Activity() {
                     } else {
                         updateState.text = "连接失败"
                     }
+                } else if (UpdateManager.pluginTooOld(pluginVersion, info.requiredPlugin)) {
+                    // 新版 App 要的插件本机还没有：先让用户更新插件，不硬装（装了也是坏接口）。
+                    pendingUpdate = null
+                    findViewById<LinearLayout>(R.id.updateRow).visibility = View.GONE
+                    updateState.text = "先更新插件 ${info.requiredPlugin}"
                 } else {
                     pendingUpdate = info
                     findViewById<TextView>(R.id.updateRowText).text = "新版本 ${info.versionName}"

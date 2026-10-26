@@ -39,6 +39,8 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
         val sha256: String,
         val size: Long,
         val notes: String,
+        /** 这版 App 要求的最低插件版本；空 = 不挑插件。 */
+        val requiredPlugin: String = "",
     )
 
     companion object {
@@ -47,11 +49,48 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
         const val EXTRA_STATUS = "status"
         const val EXTRA_MESSAGE = "message"
         private const val PREFS_LAST_CHECK = "last_update_check"
-        /** 公开更新源：仓库 Releases 的 latest.json 固定地址，谁都能查。 */
-        private const val PUBLIC_META_URL =
-            "https://github.com/regrevia/dsh-pet-voice/releases/latest/download/latest.json"
-        private const val PUBLIC_ASSET_BASE =
-            "https://github.com/regrevia/dsh-pet-voice/releases/latest/download/"
+        /**
+         * 公开更新源：先看国内镜像（cnb.cool），连不上再看 GitHub 上的推广记录。
+         *
+         * 三处 meta 都只在「我们决定放给用户」那一刻才改：CNB 的 latest 附件、
+         * 仓库里的 update/latest.json（jsDelivr / raw 兜底是同一份文件）。
+         * 所以 GitHub 上永远有每一版的 Release 存档，但没推广的版本用户看不到。
+         */
+        private data class Channel(val meta: String, val assetBase: String)
+
+        private val PUBLIC_CHANNELS = listOf(
+            Channel(
+                "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/latest/latest.json",
+                "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/latest/",
+            ),
+            Channel(
+                "https://cdn.jsdelivr.net/gh/regrevia/dsh-pet-voice@main/update/latest.json",
+                "https://github.com/regrevia/dsh-pet-voice/releases/latest/download/",
+            ),
+            Channel(
+                "https://raw.githubusercontent.com/regrevia/dsh-pet-voice/main/update/latest.json",
+                "https://github.com/regrevia/dsh-pet-voice/releases/latest/download/",
+            ),
+        )
+
+        /** 插件版本够不够：required 为空不挑；插件没上报版本就当太旧。 */
+        fun pluginTooOld(pluginVersion: String, required: String): Boolean {
+            if (required.isBlank()) return false
+            if (pluginVersion.isBlank()) return true
+            return compareVersion(pluginVersion, required) < 0
+        }
+
+        /** 只比数字段：0.1.10 > 0.1.8（字符串比较会反过来）。 */
+        fun compareVersion(a: String, b: String): Int {
+            val pa = a.split('.', '-', '+')
+            val pb = b.split('.', '-', '+')
+            for (i in 0 until maxOf(pa.size, pb.size)) {
+                val na = pa.getOrNull(i)?.toIntOrNull() ?: 0
+                val nb = pb.getOrNull(i)?.toIntOrNull() ?: 0
+                if (na != nb) return if (na > nb) 1 else -1
+            }
+            return 0
+        }
     }
 
     fun currentVersionCode(): Int = try {
@@ -72,10 +111,10 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
     /** 有没有比本机新的版本：先问公开源，问不到再问宿主；都问不到当「没有」，静默。 */
     fun check(): Info? = publicInfo() ?: hostInfo()
 
-    private fun publicMeta(): JSONObject? {
+    private fun publicMeta(channel: Channel): JSONObject? {
         var conn: HttpURLConnection? = null
         try {
-            conn = (URL(PUBLIC_META_URL).openConnection() as HttpURLConnection).apply {
+            conn = (URL(channel.meta).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = 8_000
                 readTimeout = 10_000
@@ -98,7 +137,15 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
     }
 
     private fun publicInfo(): Info? {
-        val j = publicMeta() ?: return null
+        for (channel in PUBLIC_CHANNELS) {
+            val info = channelInfo(channel) ?: continue
+            return info
+        }
+        return null
+    }
+
+    private fun channelInfo(channel: Channel): Info? {
+        val j = publicMeta(channel) ?: return null
         val code = j.optInt("versionCode", 0)
         if (code <= currentVersionCode()) {
             lastCheck = "none"
@@ -106,7 +153,7 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
         }
         val name = j.optString("versionName")
         val file = j.optString("file").ifBlank { "jingling-$name.apk" }
-        val url = j.optString("url").ifBlank { PUBLIC_ASSET_BASE + file }
+        val url = j.optString("url").ifBlank { channel.assetBase + file }
         lastCheck = "ok"
         return Info(
             versionCode = code,
@@ -115,6 +162,7 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
             sha256 = j.optString("sha256"),
             size = j.optLong("size", 0),
             notes = j.optString("notes"),
+            requiredPlugin = j.optString("minPlugin"),
         )
     }
 

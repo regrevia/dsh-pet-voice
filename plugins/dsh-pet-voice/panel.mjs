@@ -365,11 +365,11 @@ export function panelState({ origin, pairing } = {}) {
   const modes = [
     {
       id: 'server',
-      label: '内网穿透',
+      label: '自己的服务器',
       url: source.source === 'tunnel' ? String(source.publicBase ?? '').trim() : '',
     },
-    { id: 'lan', label: '局域网', url: lanBase(origin) },
-    { id: 'domain', label: '自建域名', url: config.customUrl },
+    { id: 'lan', label: '同一个 Wi-Fi', url: lanBase(origin) },
+    { id: 'domain', label: '自己的域名', url: config.customUrl },
   ]
   const base = normalizeBase(modes.find((item) => item.id === config.mode)?.url)
   // 配对走 ?k=：pageHandler 校验后 303 下发 cookie，和 /panel/link 的链接同一形状。
