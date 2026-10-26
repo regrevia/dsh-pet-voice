@@ -29,6 +29,7 @@ class SessionActivity : Activity() {
         val role: String,
         val text: String,
         val tool: String,
+        val toolName: String = "",
     )
 
     private val ui = Handler(Looper.getMainLooper())
@@ -69,7 +70,7 @@ class SessionActivity : Activity() {
         more = TextView(this).apply {
             text = "加载更早"
             setTextColor(getColor(R.color.pet_accent))
-            textSize = 13f
+            textSize = 12.5f
             gravity = Gravity.CENTER
             val pad = (10 * resources.displayMetrics.density).toInt()
             setPadding(pad, pad, pad, pad)
@@ -170,7 +171,8 @@ class SessionActivity : Activity() {
                 val name = toolObj?.optString("name").orEmpty().ifBlank { o.optString("name") }
                 val args = toolObj?.optJSONObject("args")
                     ?: runCatching { JSONObject(toolObj?.opt("args")?.toString().orEmpty()) }.getOrNull()
-                out.add(Msg(o.optLong("seq", 0), "tool", text, toolLabel(name, args, text)))
+                val parts = toolParts(name, args, text)
+                out.add(Msg(o.optLong("seq", 0), "tool", parts.second, parts.second, parts.first))
                 continue
             }
             if (role != "user" && role != "assistant") continue
@@ -185,42 +187,43 @@ class SessionActivity : Activity() {
     }
 
     /**
-     * 工具那行只说人话：命令就留命令本身，参数别原样糊出来。
-     * 「bash {"command":"git log …"}」这种对看对话的人就是噪音。
+     * 工具行照桌面那套排：左边一个短标签（运行命令 / 读取文件 / 搜索…），后面跟它干的那句话。
+     * 一行看完、不展开，所以命令本身留着，别换成「跑了一下」这种说法。
      */
-    private fun toolLabel(name: String, args: JSONObject?, fallback: String): String {
+    private fun toolParts(name: String, args: JSONObject?, fallback: String): Pair<String, String> {
+        val label = when (name) {
+            "bash", "sh", "shell", "exec", "command", "run" -> "运行命令"
+            "read", "read_file", "view" -> "读取文件"
+            "write", "edit", "write_file", "multiedit", "apply_patch" -> "修改文件"
+            "grep", "search", "rg" -> "搜索"
+            "glob", "find", "ls", "list_dir" -> "查找文件"
+            "web_fetch", "web_search", "fetch" -> "读取网页"
+            "subagent", "subagent_fork", "task", "agent" -> "子代理"
+            "todo_write", "todo_read" -> "待办"
+            "list_agents", "list_tasks", "team_task_list" -> "代理列表"
+            "ask_user_question" -> "问你"
+            "update_goal", "create_goal", "get_goal" -> "目标"
+            else -> name.ifBlank { "工具" }
+        }
         val cmd = args?.optString("command").orEmpty().ifBlank { args?.optString("cmd").orEmpty() }
-        if (cmd.isNotBlank()) return "跑了 " + cleanCommand(cmd)
+        val desc = args?.optString("description").orEmpty()
         val path = args?.optString("file_path").orEmpty().ifBlank { args?.optString("path").orEmpty() }
-        if (path.isNotBlank()) {
-            val verb = if (name in setOf("write", "edit", "write_file", "apply_patch", "multiedit")) "改了" else "看了"
-            return verb + " " + path.substringAfterLast('/')
-        }
         val q = args?.optString("query").orEmpty().ifBlank { args?.optString("pattern").orEmpty() }
-        if (q.isNotBlank()) return "搜了 " + q.lineSequence().first().trim()
         val url = args?.optString("url").orEmpty()
-        if (url.isNotBlank()) {
-            return "查了 " + url.removePrefix("https://").removePrefix("http://").take(40)
-        }
-        val agent = args?.optString("prompt").orEmpty()
-        if (agent.isNotBlank()) return "叫了一只帮忙看"
-        return when (name) {
-            "list_agents" -> "看了自己在忙什么"
-            "todo_write" -> "记了下一步"
-            "" -> "动了一下手"
-            else -> "用了 $name"
-        }
-    }
-
-    /** 命令只留第一段：管道、重定向、拼接都是给机器的，念出来没人听得懂。 */
-    private fun cleanCommand(raw: String): String {
-        var cut = raw.lineSequence().first().trim()
-        for (sep in listOf(" && ", " || ", "; ", " | ", " 2>", " >", " 2>&1")) {
-            val at = cut.indexOf(sep)
-            if (at > 0) cut = cut.substring(0, at)
-        }
-        cut = cut.trim()
-        return if (cut.length <= 48) cut else cut.take(47).trimEnd() + "…"
+        val prompt = args?.optString("prompt").orEmpty()
+        val detail = when {
+            cmd.isNotBlank() -> cmd
+            desc.isNotBlank() -> desc
+            path.isNotBlank() -> path
+            q.isNotBlank() -> q
+            url.isNotBlank() -> url
+            prompt.isNotBlank() -> prompt
+            else -> fallback
+        }.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }.orEmpty()
+        // 参数本身是 JSON 的（没解析出来），贴出来就是噪音，不如只留标签。
+        if (detail.startsWith("{") || detail.startsWith("[")) return label to ""
+        val line = if (detail.length <= 200) detail else detail.take(199).trimEnd() + "…"
+        return label to line
     }
 
     /** 老的旁听尾巴：从标记起整段不要，别在对话里露出系统腔。 */
@@ -386,13 +389,28 @@ class SessionActivity : Activity() {
             when (row.role) {
                 "tool" -> {
                     bubbleRow.gravity = Gravity.START
-                    bubble.background = bubble(getColor(R.color.pet_hint_bg))
-                    bubble.setPadding(dp(9), dp(5), dp(9), dp(5))
+                    bubble.background = null
+                    bubble.setPadding(0, 0, 0, 0)
                     text.maxLines = 1
                     text.ellipsize = TextUtils.TruncateAt.END
-                    text.textSize = 12f
+                    text.textSize = 12.5f
                     text.setTextColor(getColor(R.color.pet_hint))
-                    text.text = row.tool
+                    val label = row.toolName.ifBlank { "工具" }
+                    val ssb = android.text.SpannableStringBuilder("› ")
+                    val at = ssb.length
+                    ssb.append(label)
+                    ssb.setSpan(
+                        android.text.style.ForegroundColorSpan(getColor(R.color.pet_text_dim)),
+                        at, ssb.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                    )
+                    if (row.tool.isNotBlank()) ssb.append("  ·  ")
+                    val from = ssb.length
+                    ssb.append(row.tool)
+                    ssb.setSpan(
+                        android.text.style.ForegroundColorSpan(getColor(R.color.pet_hint)),
+                        from, ssb.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                    )
+                    text.text = ssb
                 }
                 "user" -> {
                     bubbleRow.gravity = Gravity.END
