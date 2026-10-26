@@ -1,0 +1,11 @@
+{
+  "versionCode": 115,
+  "versionName": "0.9.45",
+  "size": 29983922,
+  "sha256": "b94d826304a1fc174a1474eb53f692462b3ec948fc12f92b6b86dcf5a1b2cbe7",
+  "file": "jingling-0.9.45.apk",
+  "url": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.45/jingling-0.9.45.apk",
+  "notes": "更新分两步：GitHub 只存档，放给用户靠 --promote；检查更新先看国内镜像",
+  "publishedAt": "2026-10-26T07:11:48.708Z",
+  "promotedAt": "2026-10-26T07:11:50.280Z"
+}
