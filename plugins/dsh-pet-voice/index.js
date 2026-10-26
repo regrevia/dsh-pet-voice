@@ -2434,8 +2434,11 @@ async function sessionKnownToHost(ctx, sessionId, rowsHint) {
  * 不出现在手机上显示的文字里（App 的气泡还是用户自己说的那句），也不写那只会话。
  */
 
-const PEEK_TEXT_MAX = 2600
-const PEEK_GIT_MAX = 1200
+// 材料会整段贴在手机那句话后面，宿主界面上就是这条提问的正文。所以要小：
+// 一句话能带的量（三四行），够回答「进展怎么样」，不再糊一屏。
+const PEEK_TEXT_MAX = 300
+const PEEK_GIT_MAX = 90
+const PEEK_LINE_MAX = 100
 /** 「在问另一边进展」的几种说法。整句超过 400 字就不认，避免长文里偶然出现「进度」。 */
 const PEEK_ASK = /(进展|进度|做到哪|做到什么程度|到哪一步|卡在哪|最近在(干|做|忙)|最近怎么样|现在怎么样|忙什么呢|下一步)/
 
@@ -2484,8 +2487,8 @@ function peekTranscriptLines(detail, maxChars = PEEK_TEXT_MAX) {
   const lines = []
   for (const m of msgs) {
     const role = String(m?.role ?? '')
-    if (role === 'user') lines.push(`用户：${clipText(m?.text ?? '', 400)}`)
-    else if (role === 'assistant') lines.push(`助手：${clipText(m?.text ?? '', 500)}`)
+    if (role === 'user') lines.push(`用户：${clipText(m?.text ?? '', PEEK_LINE_MAX)}`)
+    else if (role === 'assistant') lines.push(`助手：${clipText(m?.text ?? '', PEEK_LINE_MAX)}`)
     else if (role === 'tool' && m?.tool?.name) lines.push(`（用了 ${m.tool.name}）`)
   }
   const kept = []
@@ -2518,36 +2521,36 @@ function gitDigest(cwd, maxChars = PEEK_GIT_MAX) {
       return ''
     }
   }
-  const head = run(['log', '--oneline', '-12'])
+  // 只要一行：最新一条提交 + 有没有未提交改动。原来贴 12 条提交加 diff --stat，
+  // 占了整段材料的一大半，读的人（和手机界面）都只需要知道「动到哪了」。
+  const head = run(['log', '--oneline', '-1'])
   const status = run(['status', '--short'])
-  const stat = run(['diff', '--stat'])
-  const out = []
-  if (head) out.push(`最近提交：\n${head}`)
-  if (status) out.push(`未提交的改动：\n${status}`)
-  else if (head) out.push('未提交的改动：没有')
-  if (stat) out.push(`改动量：\n${stat}`)
-  const text = out.join('\n')
+  const changed = status ? status.split('\n').filter(Boolean).length : 0
+  const bits = []
+  if (head) bits.push(`最新提交：${head}`)
+  if (status) bits.push(`未提交的改动：${changed} 个文件`)
+  else if (head) bits.push('未提交的改动：没有')
+  if (!bits.length) return ''
+  const text = bits.join('；')
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text
 }
 
 /** 把旁听材料拼成一段，边界写清楚，免得模型把它当成这条对话里的内容。 */
 function buildPeekBlock(peek) {
-  const lines = ['【旁听材料：同项目里另一只会话的最近进展，只读，不属于这条对话】']
   const title = String(peek?.title ?? '')
-  const when = toMs(peek?.updatedAt) ? new Date(toMs(peek.updatedAt)).toLocaleString('zh-CN', { hour12: false }) : ''
-  lines.push(`那是：${title || String(peek?.id ?? '')}${when ? `（最后活跃 ${when}）` : ''}`)
+  const when = toMs(peek?.updatedAt)
+    ? new Date(toMs(peek.updatedAt)).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
+    : ''
+  // 头一行就要说清「这不是这条对话里的内容」，但只用一行。
+  const head = `【旁听·不属于这条对话】${title || String(peek?.id ?? '')}${when ? ` · ${when}` : ''}`
+  const lines = [head]
   const body = Array.isArray(peek?.lines) ? peek.lines : []
-  if (body.length) {
-    lines.push('最近的对话：')
-    lines.push(...body)
-  }
-  const git = String(peek?.git ?? '')
-  if (git) {
-    lines.push('代码现状：')
-    lines.push(git)
-  }
-  lines.push('回答就用这些材料；材料里没有的直说没看到，别猜。')
-  return lines.join('\n')
+  if (body.length) lines.push(`最近的对话：${body.join(' / ')}`)
+  const git = String(peek?.git ?? '').replace(/\s*\n\s*/g, '；')
+  if (git) lines.push(`代码现状：${git}`)
+  lines.push('材料里没有的就说没看到，别猜。')
+  const text = lines.join('\n')
+  return text.length > 400 ? `${text.slice(0, 400)}…` : text
 }
 
 /** 派发时调用：不是问进展就返回空串，任何异常都只记日志、不影响这句话发出去。 */

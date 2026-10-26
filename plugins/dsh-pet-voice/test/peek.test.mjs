@@ -85,10 +85,9 @@ test('git 现状：真仓库里读得到最近提交与未提交改动', () => {
     execFileSync('git', ['commit', '-qm', '第一条'], { cwd: dir })
     writeFileSync(join(dir, 'a.txt'), 'two\n')
     const digest = gitDigest(dir)
-    assert.match(digest, /最近提交/)
+    assert.match(digest, /最新提交/)
     assert.match(digest, /第一条/)
-    assert.match(digest, /未提交的改动/)
-    assert.match(digest, /a\.txt/)
+    assert.match(digest, /未提交的改动：1 个文件/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -113,13 +112,43 @@ test('旁听材料：边界写清楚，带上来源与「别猜」提醒', () =>
     lines: ['用户：先看登录', '助手：改完了'],
     git: '最近提交：\nabc 修登录',
   })
-  assert.match(block, /旁听材料/)
+  assert.match(block, /旁听/)
   assert.match(block, /不属于这条对话/)
   assert.match(block, /修登录/)
   assert.match(block, /最近的对话：/)
   assert.match(block, /代码现状：/)
   assert.match(block, /别猜/)
   assert.ok(!block.includes('session-abc'), '有标题时不该把 id 塞进去占地方')
+  assert.ok(!block.includes('\n代码现状：\n'), '代码现状要压成一行，不能换行铺开')
+  assert.ok(block.length <= 400, `材料不能糊一屏：${block.length}`)
+})
+
+test('旁听材料：量要小——转录再多也压到 400 字以内', () => {
+  const lines = []
+  for (let i = 0; i < 200; i++) lines.push(`助手：${'很长的进展描述'.repeat(10)}${i}`)
+  const block = buildPeekBlock({ id: 's', title: '大活', updatedAt: 1_700_000_000_000, lines, git: 'x'.repeat(2000) })
+  assert.ok(block.length <= 401, `实际 ${block.length} 字`)
+  assert.ok(block.split('\n').length <= 4, '头一行 + 对话一行 + 代码一行 + 别猜一行，超出就被截断')
+})
+
+test('git 现状：只留一行（最新一条提交 + 未提交改动计数）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pet-peek-git-'))
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: dir })
+    execFileSync('git', ['config', 'user.email', 'a@b.c'], { cwd: dir })
+    execFileSync('git', ['config', 'user.name', 'peek'], { cwd: dir })
+    writeFileSync(join(dir, 'a.txt'), 'one\n')
+    execFileSync('git', ['add', '.'], { cwd: dir })
+    execFileSync('git', ['commit', '-qm', '第一条'], { cwd: dir })
+    writeFileSync(join(dir, 'a.txt'), 'two\n')
+    writeFileSync(join(dir, 'b.txt'), 'new\n')
+    const digest = gitDigest(dir)
+    assert.equal(digest.split('\n').length, 1, digest)
+    assert.match(digest, /第一条/)
+    assert.match(digest, /2 个文件/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('旁听材料：没标题时用 id 兜底，材料为空也不产出空壳', () => {
