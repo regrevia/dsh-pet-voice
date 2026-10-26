@@ -1196,7 +1196,7 @@ class HistoryActivity : Activity() {
         sendServiceAction(FloatingPetService.ACTION_WAKE_RESUME)
         if (wav == null || wav.size < 1024) {
             runBar.visibility = View.GONE
-            toast("没听清，再说一次")
+            toast(r.takeFaultText() ?: "没听清，再说一次")
             return
         }
         runText.text = "听着"

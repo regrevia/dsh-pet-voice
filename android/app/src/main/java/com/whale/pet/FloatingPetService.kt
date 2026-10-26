@@ -985,8 +985,16 @@ class FloatingPetService : Service() {
         }
         if (wav == null) {
             logVad(listenedMs, heard, 0, false)
-            updateNotification("没听到声音 · 点我再说")
-            emptyRound()
+            // 录音这边知道为什么没声（拿不到帧 / 说得太短），别只写日志——用户在等一个说法。
+            val fault = recorder.takeFaultText()
+            updateNotification(fault ?: "没听到声音 · 点我再说")
+            // 点一下就抬手：不算一轮，直接回待机，别自动重听（重听会让用户以为卡住了）。
+            if (fault == VoiceRecorder.MSG_TOO_SHORT || fault == VoiceRecorder.MSG_NO_SIGNAL ||
+                    fault == VoiceRecorder.MSG_NO_SPEECH) {
+                if (continuous) stopContinuous(fault) else toIdle()
+            } else {
+                emptyRound()
+            }
             return
         }
         setMode("thinking")

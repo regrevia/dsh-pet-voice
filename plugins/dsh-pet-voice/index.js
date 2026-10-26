@@ -196,6 +196,10 @@ const UPLOAD_EXT_LIST = 'JPG / PNG / WebP / GIF'
 const ASR_COLD_START_MS = 25000
 const ASR_HEALTH_TIMEOUT = 1500
 const ASR_REQUEST_TIMEOUT = 30_000
+/** 一次 /api/asr 从头到尾的总预算：冷启动 + 重试都算在内，别让 App 干等两分钟。 */
+const ASR_HANDLE_BUDGET_MS = 45_000
+/** 预热节流：state 每 20 s 拉一次，别每次都去碰 worker。 */
+let asrWarmAt = 0
 
 /* ------------------------------------------------------------------ */
 /* APK 自动更新通道                                                     */
@@ -991,20 +995,35 @@ async function asrEnsure() {
 }
 
 /**
+ * 后台预热：App 一打开页面就会拉 state，这时把 worker 叫醒，
+ * 等用户真开口时就不用吃 20 多秒的冷启动（以前第一句常常白说）。
+ */
+function warmAsrInBackground() {
+  if (!asrReady()) return
+  const now = Date.now()
+  if (asrWarmAt && now - asrWarmAt < 60_000) return
+  asrWarmAt = now
+  Promise.resolve()
+    .then(() => asrEnsure())
+    .then((r) => { if (!r?.ok) LOG('ASR 预热没起来：', r?.error ?? '') })
+    .catch((e) => LOG('ASR 预热失败：', e?.message ?? e))
+}
+
+/**
  * 把 wav 字节转给 worker。
  *
  * 返回 worker 的 JSON（ok/text/ms）原样内容；网络层失败额外带 `dead:true`，
  * 让 handler 知道该不该重启一次。超时给 30 s：10 s 音频在慢机器上也就 1–2 s，
  * 这个上限只是防止 worker 卡死时宿主一直挂着。
  */
-async function asrForward(body) {
+async function asrForward(body, timeoutMs = ASR_REQUEST_TIMEOUT) {
   const started = Date.now()
   try {
     const res = await fetch(`${ASR_ENDPOINT}/asr`, {
       method: 'POST',
       headers: { 'content-type': 'application/octet-stream', 'content-length': String(body.length) },
       body,
-      signal: AbortSignal.timeout(ASR_REQUEST_TIMEOUT),
+      signal: AbortSignal.timeout(timeoutMs),
     })
     const text = await res.text()
     let payload
@@ -4024,14 +4043,18 @@ export function apply(ctx, config) {
         coldStartMs: ASR_COLD_START_MS,
       })
     }
-    let result = await asrForward(body)
+    // 总预算：冷启动 + 首次转发 + 重试都算在里面，超了就直说再试，不让 App 挂两分钟。
+    const budget = Date.now() + ASR_HANDLE_BUDGET_MS
+    const left = () => Math.max(4_000, budget - Date.now())
+    let result = await asrForward(body, Math.min(ASR_REQUEST_TIMEOUT, left()))
     // 进程刚重启/刚被换掉的那一下就绪和端口之间有空档：给两次机会，中间等一下再发，
     // 这样用户第一句不会白说（只重试两轮，还不通才让他「再说一次」）。
     for (let attempt = 0; attempt < 2 && result.dead; attempt += 1) {
+      if (Date.now() > budget) break
       LOG(`ASR worker 无响应，第 ${attempt + 1} 次重试：${result.error}`)
       await asrStartWorker()
       await new Promise((resolve) => setTimeout(resolve, 250))
-      result = await asrForward(body)
+      result = await asrForward(body, Math.min(12_000, left()))
     }
     if (result.dead) {
       return sendJson(res, 502, {
@@ -4347,6 +4370,10 @@ export function apply(ctx, config) {
         error: `这台电脑最多连 ${deviceTouch.maxDevices} 台设备，先在面板里移出一台`,
       })
     }
+
+    // 任何一次带令牌的请求（App 打开页面就会拉 state）都顺手把识别 worker 叫醒，
+    // 这样用户第一句不用吃冷启动。内部有 60 s 节流，不额外增加负担。
+    warmAsrInBackground()
 
     try {
       // 手机端回传诊断（安装失败原因、启动自检）。这条也要 cookie，公网上不留匿名写入口。
