@@ -15,6 +15,7 @@ import android.widget.BaseAdapter
 import android.widget.EditText
 import android.widget.ListView
 import android.widget.TextView
+import org.json.JSONObject
 import java.util.concurrent.Executors
 
 /**
@@ -48,6 +49,7 @@ class SessionActivity : Activity() {
     private lateinit var list: ListView
     private lateinit var emptyBox: View
     private lateinit var emptyText: TextView
+    private lateinit var peekLine: TextView
     private lateinit var more: TextView
     private lateinit var input: EditText
     private lateinit var adapter: MsgAdapter
@@ -62,6 +64,7 @@ class SessionActivity : Activity() {
         emptyBox = findViewById(R.id.chatEmpty)
         emptyText = emptyBox as TextView
         input = findViewById(R.id.chatInput)
+        peekLine = findViewById(R.id.chatPeek)
 
         more = TextView(this).apply {
             text = "加载更早"
@@ -108,6 +111,7 @@ class SessionActivity : Activity() {
                 maxSeq = page.maxOfOrNull { it.seq } ?: 0
                 hasMore = more
                 nextBefore = next
+                applyPeek(r)
                 adapter.notifyDataSetChanged()
                 refreshMore()
                 if (rows.isEmpty()) {
@@ -164,18 +168,92 @@ class SessionActivity : Activity() {
             if (role == "tool") {
                 val toolObj = o.optJSONObject("tool")
                 val name = toolObj?.optString("name").orEmpty().ifBlank { o.optString("name") }
-                val rawArgs = toolObj?.opt("args")?.toString().orEmpty()
-                val line = firstLine(rawArgs.ifBlank { text })
-                val label = listOf(name, line).filter { it.isNotBlank() }.joinToString(" ")
-                if (label.isBlank()) continue
-                out.add(Msg(o.optLong("seq", 0), "tool", text, label))
+                val args = toolObj?.optJSONObject("args")
+                    ?: runCatching { JSONObject(toolObj?.opt("args")?.toString().orEmpty()) }.getOrNull()
+                out.add(Msg(o.optLong("seq", 0), "tool", text, toolLabel(name, args, text)))
                 continue
             }
             if (role != "user" && role != "assistant") continue
-            if (TextUtils.isEmpty(text.trim())) continue
-            out.add(Msg(o.optLong("seq", 0), role, text, ""))
+            // 旧版本把旁听材料拼在这句话后面；读的时候切掉，界面上只留用户原话。
+            val shown = stripPeek(text)
+            if (TextUtils.isEmpty(shown.trim())) continue
+            // 宿主回合开始时塞的时间/运行时上下文是给模型看的，不是用户说的话。
+            if (role == "user" && isInjectedText(shown)) continue
+            out.add(Msg(o.optLong("seq", 0), role, shown, ""))
         }
         return out.sortedBy { it.seq }
+    }
+
+    /**
+     * 工具那行只说人话：命令就留命令本身，参数别原样糊出来。
+     * 「bash {"command":"git log …"}」这种对看对话的人就是噪音。
+     */
+    private fun toolLabel(name: String, args: JSONObject?, fallback: String): String {
+        val cmd = args?.optString("command").orEmpty().ifBlank { args?.optString("cmd").orEmpty() }
+        if (cmd.isNotBlank()) return "跑了 " + cleanCommand(cmd)
+        val path = args?.optString("file_path").orEmpty().ifBlank { args?.optString("path").orEmpty() }
+        if (path.isNotBlank()) {
+            val verb = if (name in setOf("write", "edit", "write_file", "apply_patch", "multiedit")) "改了" else "看了"
+            return verb + " " + path.substringAfterLast('/')
+        }
+        val q = args?.optString("query").orEmpty().ifBlank { args?.optString("pattern").orEmpty() }
+        if (q.isNotBlank()) return "搜了 " + q.lineSequence().first().trim()
+        val url = args?.optString("url").orEmpty()
+        if (url.isNotBlank()) {
+            return "查了 " + url.removePrefix("https://").removePrefix("http://").take(40)
+        }
+        val agent = args?.optString("prompt").orEmpty()
+        if (agent.isNotBlank()) return "叫了一只帮忙看"
+        return when (name) {
+            "list_agents" -> "看了自己在忙什么"
+            "todo_write" -> "记了下一步"
+            "" -> "动了一下手"
+            else -> "用了 $name"
+        }
+    }
+
+    /** 命令只留第一段：管道、重定向、拼接都是给机器的，念出来没人听得懂。 */
+    private fun cleanCommand(raw: String): String {
+        var cut = raw.lineSequence().first().trim()
+        for (sep in listOf(" && ", " || ", "; ", " | ", " 2>", " >", " 2>&1")) {
+            val at = cut.indexOf(sep)
+            if (at > 0) cut = cut.substring(0, at)
+        }
+        cut = cut.trim()
+        return if (cut.length <= 48) cut else cut.take(47).trimEnd() + "…"
+    }
+
+    /** 老的旁听尾巴：从标记起整段不要，别在对话里露出系统腔。 */
+    private fun stripPeek(text: String): String {
+        var at = -1
+        for (marker in arrayOf("【旁听·不属于这条对话】", "【旁听材料：")) {
+            val index = text.indexOf(marker)
+            if (index >= 0 && (at < 0 || index < at)) at = index
+        }
+        return (if (at >= 0) text.substring(0, at) else text).trim()
+    }
+
+    /** 宿主塞进来的上下文：对模型有用，对看对话的人没有意义。 */
+    private fun isInjectedText(text: String): Boolean {
+        val body = text.trim()
+        if (body.isEmpty()) return true
+        return body.startsWith("Time sampled while preparing turn") ||
+            body.startsWith("Current runtime context.") ||
+            body.startsWith("<system-reminder>") ||
+            body.startsWith("<available_skills>") ||
+            body.startsWith("<environment_context>")
+    }
+
+    /** 宿主说它正在看另一只的活：标题栏下给一行，没有就收起。 */
+    private fun applyPeek(r: PetClient.Result) {
+        val peek = r.json?.optJSONObject("peek")
+        val name = peek?.optString("title").orEmpty().trim()
+        if (name.isBlank()) {
+            peekLine.visibility = View.GONE
+            return
+        }
+        peekLine.text = "在旁听：$name"
+        peekLine.visibility = View.VISIBLE
     }
 
     private fun firstLine(raw: String): String =
@@ -236,6 +314,7 @@ class SessionActivity : Activity() {
                 maxSeq = maxOf(maxSeq, page.maxOfOrNull { it.seq } ?: 0)
                 hasMore = more
                 nextBefore = next
+                applyPeek(r)
                 adapter.notifyDataSetChanged()
                 refreshMore()
                 if (rows.isNotEmpty()) emptyBox.visibility = View.GONE
@@ -298,14 +377,17 @@ class SessionActivity : Activity() {
             val row = rows[position]
             val v = convertView ?: layoutInflater.inflate(R.layout.item_message, parent, false)
             val bubbleRow = v as android.widget.LinearLayout
+            // 同一侧连着说的几句贴一起，换人说话留一口气，读起来才是一段对话。
+            val gap = if (position == 0 || rows[position - 1].role != row.role) dp(9) else dp(3)
+            bubbleRow.setPadding(dp(12), gap, dp(12), dp(3))
             val bubble = v.findViewById<View>(R.id.msgBubble)
             val text = v.findViewById<TextView>(R.id.msgText)
             v.setOnClickListener(null)
             when (row.role) {
                 "tool" -> {
                     bubbleRow.gravity = Gravity.START
-                    bubble.setPadding(0, 0, 0, 0)
-                    bubble.background = null
+                    bubble.background = bubble(getColor(R.color.pet_hint_bg))
+                    bubble.setPadding(dp(9), dp(5), dp(9), dp(5))
                     text.maxLines = 1
                     text.ellipsize = TextUtils.TruncateAt.END
                     text.textSize = 12f

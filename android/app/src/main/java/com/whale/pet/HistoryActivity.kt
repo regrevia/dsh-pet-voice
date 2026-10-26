@@ -89,6 +89,7 @@ class HistoryActivity : Activity() {
     private lateinit var sessionsBtn: android.widget.ImageView
     private lateinit var head: View
     private lateinit var sessionLabel: TextView
+    private lateinit var peekLabel: TextView
     private lateinit var attachBtn: android.widget.ImageView
 
     private lateinit var pickerScrim: View
@@ -113,6 +114,7 @@ class HistoryActivity : Activity() {
     private var lastAttachmentTs = 0L
     /** 屏幕上这只对话的名字（宿主说叫什么就叫什么，查不到就空着）。 */
     private var liveSessionTitle = ""
+    private var peekTitle = ""
     private var syncing = false
     private var tts: TtsPlayer? = null
     private var render: ChatRender? = null
@@ -154,6 +156,9 @@ class HistoryActivity : Activity() {
         data class Action(val text: String) : PickerRow()
         /** 「新建对话」：就在当前项目里开一只新的。 */
         data class NewChat(val text: String) : PickerRow()
+
+        /** 看这只会话在宿主那边的原文（工具调用、长回复都在里面）。 */
+        data class Detail(val text: String) : PickerRow()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -179,6 +184,7 @@ class HistoryActivity : Activity() {
         sessionsBtn = findViewById(R.id.historySessions)
         head = findViewById(R.id.historyHead)
         sessionLabel = findViewById(R.id.historySession)
+        peekLabel = findViewById(R.id.historyPeek)
         attachBtn = findViewById(R.id.chatAttach)
 
         pickerScrim = findViewById(R.id.pickerScrim)
@@ -347,6 +353,9 @@ class HistoryActivity : Activity() {
         }
         sessionLabel.text = line
         sessionLabel.visibility = if (line.isBlank()) View.GONE else View.VISIBLE
+        // 「在旁听：别的那只」只在 5 分钟内有材料时出现，过期自己收起来。
+        peekLabel.text = if (peekTitle.isBlank()) "" else "在旁听：$peekTitle"
+        peekLabel.visibility = if (peekTitle.isBlank()) View.GONE else View.VISIBLE
     }
 
     /**
@@ -382,6 +391,12 @@ class HistoryActivity : Activity() {
         val hostId = target.ifBlank { current?.optString("id").orEmpty() }
         val mine = PetSettings.chatSession(this)
         val shown = mine.ifBlank { hostId }
+        val pk = state.optJSONObject("peek")
+        val nextPeek = niceTitle(pk?.optString("title").orEmpty())
+        if (nextPeek != peekTitle) {
+            peekTitle = nextPeek
+            refreshHeader()
+        }
         val title = titleOf(state, shown)
         if (title.isNotBlank() && niceTitle(title) != liveSessionTitle) {
             liveSessionTitle = niceTitle(title)
@@ -398,8 +413,26 @@ class HistoryActivity : Activity() {
      * 太长就截断——名字是给人认的，不是给全文的。
      */
     private fun niceTitle(raw: String): String {
-        val t = raw.replace(Regex("[#*>`]+"), " ").replace(Regex("\\s+"), " ").trim()
+        var cut = raw
+        for (marker in arrayOf("【旁听·不属于这条对话】", "【旁听材料：")) {
+            val index = cut.indexOf(marker)
+            if (index >= 0) cut = cut.substring(0, index)
+        }
+        val t = cut.replace(Regex("[#*>`]+"), " ").replace(Regex("\\s+"), " ").trim()
+        // 宿主把「运行时上下文」这类注入内容当成第一句时，会话名就是一段系统提示词——不上屏。
+        if (t.isBlank() || isInjectedText(t)) return ""
         return if (t.length <= 22) t else t.take(21).trimEnd() + "…"
+    }
+
+    /** 宿主塞进来的上下文：对看对话的人没有意义，标题和气泡里都不出现。 */
+    private fun isInjectedText(text: String): Boolean {
+        val body = text.trim()
+        if (body.isEmpty()) return true
+        return body.startsWith("Time sampled while preparing turn") ||
+            body.startsWith("Current runtime context.") ||
+            body.startsWith("<system-reminder>") ||
+            body.startsWith("<available_skills>") ||
+            body.startsWith("<environment_context>")
     }
 
     /** 会话 id 在 state 里查名字；查不到回空串（宁可不显示，也不把 id 糊到脸上）。 */
@@ -1066,7 +1099,8 @@ class HistoryActivity : Activity() {
                     val o = arr.optJSONObject(i) ?: continue
                     val id = o.optString("id")
                     if (id.isBlank()) continue
-                    out.add(Sess(id, o.optString("title"), o.optLong("updatedAt")))
+                    val shown = niceTitle(o.optString("title")).ifBlank { "未命名对话" }
+                    out.add(Sess(id, shown, o.optLong("updatedAt")))
                 }
             }
             out.sortByDescending { it.at }
@@ -1078,6 +1112,9 @@ class HistoryActivity : Activity() {
                     pickerRows.add(PickerRow.Head("还没有会话"))
                 } else {
                     out.forEach { pickerRows.add(PickerRow.SessRow(it)) }
+                    if (PetSettings.chatSession(this).isNotBlank()) {
+                        pickerRows.add(PickerRow.Detail("看这只对话的原文"))
+                    }
                 }
                 pickerAdapter.notifyDataSetChanged()
             }
@@ -1100,6 +1137,7 @@ class HistoryActivity : Activity() {
                 closePicker()
                 newChat()
             }
+            is PickerRow.Detail -> openSessionDetail()
             is PickerRow.Action -> toast("新建项目在电脑上做")
             else -> {}
         }
@@ -1127,6 +1165,17 @@ class HistoryActivity : Activity() {
     }
 
     /** 选会话 = 把 App 的对话钉到那只上。 */
+    /** 跳到这只会话的原文页：工具调用、长回复、更早的记录都在那边。 */
+    private fun openSessionDetail() {
+        val id = PetSettings.chatSession(this)
+        if (id.isBlank()) {
+            toast("先选一只对话")
+            return
+        }
+        closePicker()
+        startActivity(SessionActivity.intent(this, id, liveSessionTitle.ifBlank { projectBtn.text.toString() }))
+    }
+
     private fun pickSession(s: Sess) {
         closePicker()
         val client = PetClient { PetSettings.load(this) }
@@ -1534,6 +1583,11 @@ class HistoryActivity : Activity() {
                     text.textSize = 15f
                 }
                 is PickerRow.Action -> {
+                    text.text = row.text
+                    text.setTextColor(getColor(R.color.pet_accent))
+                    text.textSize = 15f
+                }
+                is PickerRow.Detail -> {
                     text.text = row.text
                     text.setTextColor(getColor(R.color.pet_accent))
                     text.textSize = 15f
