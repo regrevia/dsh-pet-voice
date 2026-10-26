@@ -5,9 +5,24 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { __peekInternals } from '../index.js'
+import { __peekInternals, __browseInternals, buildHiddenPrompt } from '../index.js'
 
-const { peekWanted, pickPeekTarget, peekTranscriptLines, gitDigest, buildPeekBlock } = __peekInternals
+const { entriesOfTranscript } = __browseInternals
+
+const {
+  peekWanted,
+  shouldPeek,
+  normalizePeekMode,
+  stripPeekText,
+  isInjectedUserText,
+  buildPeekBlock,
+  pickPeekTarget,
+  peekTranscriptLines,
+  gitDigest,
+  rememberPeek,
+  freshPeekExtra,
+  peekInfoOf,
+} = __peekInternals
 
 test('问进展才旁听：几种常见说法认，普通聊天不认', () => {
   for (const text of [
@@ -155,4 +170,91 @@ test('旁听材料：没标题时用 id 兜底，材料为空也不产出空壳'
   const block = buildPeekBlock({ id: 'session-x', title: '', lines: [], git: '' })
   assert.match(block, /session-x/)
   assert.match(block, /别猜/)
+})
+
+test('旁听频率：关就从不看，每句都看，默认只在问进展时看', () => {
+  assert.equal(normalizePeekMode('off'), 'off')
+  assert.equal(normalizePeekMode('乱填'), 'ask')
+  assert.equal(shouldPeek('off', '最近进展怎么样'), false)
+  assert.equal(shouldPeek('always', '帮我把窗台上的花浇了'), true)
+  assert.equal(shouldPeek('ask', '帮我把窗台上的花浇了'), false)
+  assert.equal(shouldPeek('ask', '最近进展怎么样'), true)
+  assert.equal(shouldPeek('always', '   '), false)
+})
+
+test('旁听材料挂隐藏提示词：手机正文和记录里都不该多出这段', () => {
+  const material = '【旁听·不属于这条对话】修登录 · 17:20\n最近的对话：助手：改完了'
+  const hidden = buildHiddenPrompt({ persona: '说话随意', maxWords: '短' }, material)
+  assert.match(hidden, /角色设定/)
+  assert.match(hidden, /旁听/)
+  assert.match(hidden, /修登录/)
+  // 用户那句话原样就是一句，不带材料：派发正文只由用户原话构成
+  assert.equal(stripPeekText(`最近进展怎么样\n\n${material}`), '最近进展怎么样')
+  assert.equal(stripPeekText('最近进展怎么样'), '最近进展怎么样')
+})
+
+test('旧记录里的旁听尾巴在读的时候切掉，不留系统腔', () => {
+  const legacy =
+    '现在怎么样了\n\n【旁听·不属于这条对话】修登录 · 17:20\n最近的对话：助手：改完了\n材料里没有的就说没看到，别猜。'
+  assert.equal(stripPeekText(legacy), '现在怎么样了')
+  assert.equal(stripPeekText(''), '')
+})
+
+test('旁听材料有保鲜期：只给当前那条会话，过期不再挂在隐藏提示里', () => {
+  rememberPeek('session-a', '材料', '修登录')
+  assert.equal(freshPeekExtra('session-a')?.title, '修登录')
+  assert.equal(freshPeekExtra('session-b'), null)
+  assert.deepEqual(Object.keys(peekInfoOf('session-a')).sort(), ['at', 'title'])
+  assert.equal(peekInfoOf('session-b'), null)
+})
+
+test('旁听材料两种历史头一行都认得，谁都别留在界面上', () => {
+  const older = '开发进度到哪了\n\n【旁听材料：同项目里另一只会话的最近进展，只读，不属于这条对话】\n那是：修登录\n最近的对话：…'
+  assert.equal(stripPeekText(older), '开发进度到哪了')
+})
+
+test('宿主塞的运行时上下文不算用户说的话：对话页一条都不显示', () => {
+  for (const body of [
+    'Time sampled while preparing turn 30, step 1: 2026-10-26T17:10:25+08:00[Asia/Shanghai]',
+    'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.',
+    '<system-reminder>\nUpdated instructions from: ~/.dsh/AGENTS.md',
+    '<available_skills>\n- foo',
+  ]) {
+    assert.equal(isInjectedUserText(body), true, body)
+  }
+  assert.equal(isInjectedUserText('最近进展怎么样'), false)
+})
+
+test('转录里只剩用户原话：注入内容和非空正文都按规矩处理', () => {
+  const lines = [
+    { seq: 1, type: 'user/message', time: 1, data: { content: [{ type: 'text', text: '最近进展怎么样' }] } },
+    {
+      seq: 2,
+      type: 'user/message',
+      time: 2,
+      data: { content: [{ type: 'text', text: 'Time sampled while preparing turn 30, step 1: …' }] },
+    },
+    {
+      seq: 3,
+      type: 'user/message',
+      time: 3,
+      data: { content: [{ type: 'text', text: 'Current runtime context. This snapshot supersedes …' }] },
+    },
+    {
+      seq: 4,
+      type: 'user/message',
+      time: 4,
+      data: { content: [{ type: 'text', text: '开发进度到哪了\n\n【旁听材料：…不属于这条对话】\n旧的尾巴' }] },
+    },
+    { seq: 5, type: 'assistant/message', time: 5, data: { message: { content: [{ type: 'text', text: '在改对话页' }] } } },
+  ]
+  const entries = entriesOfTranscript(lines.map((line) => JSON.stringify(line)).join('\n'))
+  assert.deepEqual(
+    entries.map((entry) => [entry.role, entry.text]),
+    [
+      ['user', '最近进展怎么样'],
+      ['user', '开发进度到哪了'],
+      ['assistant', '在改对话页'],
+    ],
+  )
 })

@@ -46,9 +46,13 @@ const DEFAULT_CONFIG = {
   ttsProvider: 'edge',
   ttsUrl: '',
   ttsVoice: '',
+  // 旁听：手机上问进展时只读看一眼同项目里另一只的活，默认只在问进展时看
+  peek: 'ask',
 }
 
 const TRANSPORTS = ['auto', 'poll']
+/** 旁听频率：ask = 问进展才看；always = 每句都带上；off = 不看。 */
+const PEEK_MODES = ['ask', 'always', 'off']
 const TTS_PROVIDER_IDS = ['edge', 'local', 'http']
 export function normalizeTransport(value) {
   const v = String(value ?? '').trim()
@@ -297,6 +301,9 @@ function readPanelConfig() {
       : DEFAULT_CONFIG.ttsProvider,
     ttsUrl: isHttpUrl(String(raw?.ttsUrl ?? '').trim()) ? String(raw.ttsUrl).trim() : '',
     ttsVoice: String(raw?.ttsVoice ?? '').trim(),
+    peek: PEEK_MODES.includes(String(raw?.peek ?? '').trim())
+      ? String(raw.peek).trim()
+      : DEFAULT_CONFIG.peek,
   }
 }
 
@@ -335,6 +342,11 @@ export function setPanelConfig(patch) {
     const level = String(input.maxWords ?? '').trim()
     if (!MAXWORDS_LEVELS.includes(level)) throw new Error('输出长度只能选短、中、长')
     next.maxWords = level
+  }
+  if (input.peek !== undefined) {
+    const mode = String(input.peek ?? '').trim()
+    if (!PEEK_MODES.includes(mode)) throw new Error('旁听只能选关、问进展时或每一句')
+    next.peek = mode
   }
   if (input.bubble !== undefined) next.bubble = input.bubble !== false
   if (input.transport !== undefined) {
@@ -437,6 +449,7 @@ export function panelState({ origin, pairing } = {}) {
     ttsProvider: config.ttsProvider,
     ttsUrl: config.ttsUrl,
     ttsVoice: config.ttsVoice,
+    peek: config.peek,
   }
 }
 

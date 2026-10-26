@@ -1613,8 +1613,10 @@ function entriesOfTranscript(text) {
     const time = toMs(event?.time)
     const data = event?.data ?? {}
     if (type === 'user/message') {
-      const body = partsText(data.content ?? data.message?.content)
-      if (body) entries.push({ seq, role: 'user', text: clipText(body, MESSAGE_TEXT_LIMIT), time })
+      const body = stripPeekText(partsText(data.content ?? data.message?.content))
+      if (body && !isInjectedUserText(body)) {
+        entries.push({ seq, role: 'user', text: clipText(body, MESSAGE_TEXT_LIMIT), time })
+      }
     } else if (type === 'assistant/message') {
       const message = data.message ?? data
       const parts = message?.content ?? data.content
@@ -1865,12 +1867,14 @@ function sessionDetail(query) {
     page.shift()
     hasMore = true
   }
+  const peek = peekInfoOf(id)
   return {
     ok: true,
     session: { id, title: head.title, cwd: head.cwd },
     messages: page,
     hasMore,
     ...(hasMore && page.length ? { nextBefore: page[0].seq } : {}),
+    ...(peek ? { peek } : {}),
   }
 }
 
@@ -1910,6 +1914,9 @@ export const __browseInternals = {
   browseSessions,
   sessionDetail,
   goalsOfSession,
+  entriesOfTranscript,
+  stripPeekText,
+  isInjectedUserText,
 }
 
 /** 派发落点相关（单测用，见 plugins/dsh-pet-voice/test/dispatch-target.test.mjs）。 */
@@ -1936,10 +1943,17 @@ export const __fileInternals = {
 /** 旁听（问进展只读看一眼同项目另一只）的单测入口（见 test/peek.test.mjs）。 */
 export const __peekInternals = {
   peekWanted,
+  shouldPeek,
+  normalizePeekMode,
+  stripPeekText,
+  isInjectedUserText,
+  buildPeekBlock,
   pickPeekTarget,
   peekTranscriptLines,
   gitDigest,
-  buildPeekBlock,
+  rememberPeek,
+  freshPeekExtra,
+  peekInfoOf,
 }
 
 export const __uploadInternals = {
@@ -2679,10 +2693,93 @@ const PEEK_LINE_MAX = 100
 /** 「在问另一边进展」的几种说法。整句超过 400 字就不认，避免长文里偶然出现「进度」。 */
 const PEEK_ASK = /(进展|进度|做到哪|做到什么程度|到哪一步|卡在哪|最近在(干|做|忙)|最近怎么样|现在怎么样|忙什么呢|下一步)/
 
+/** 旁听频率：ask = 问进展才看；always = 每句都带上；off = 不看。 */
+const PEEK_MODES = ['ask', 'always', 'off']
+/** 旁听材料挂在这条会话的隐藏提示里，超过这个时间就当过期，免得几轮之后还在说旧事。 */
+const PEEK_TTL_MS = 5 * 60_000
+const PEEK_MARKER = '【旁听·不属于这条对话】'
+/** 历史上旁听材料换过两种头一行，读记录时两种都要认。 */
+const PEEK_MARKERS = [PEEK_MARKER, '【旁听材料：']
+
+function normalizePeekMode(value) {
+  const mode = String(value ?? '').trim()
+  return PEEK_MODES.includes(mode) ? mode : 'ask'
+}
+
 function peekWanted(text) {
   const body = String(text ?? '').trim()
   if (!body || body.length > 400) return false
   return PEEK_ASK.test(body)
+}
+
+/** 这句要不要旁听：关 / 每句 / 只在问进展时。 */
+function shouldPeek(mode, text) {
+  const m = normalizePeekMode(mode)
+  if (m === 'off') return false
+  if (!String(text ?? '').trim()) return false
+  return m === 'always' ? true : peekWanted(text)
+}
+
+/**
+ * 旧版本把旁听材料拼在用户那句话后面一起派发，记录里就留下「用户：…【旁听…】」。
+ * 现在材料走隐藏提示词；读记录时把历史上的尾巴切掉，界面上永远只有用户原话。
+ */
+function stripPeekText(text) {
+  const raw = String(text ?? '')
+  let at = -1
+  for (const marker of PEEK_MARKERS) {
+    const index = raw.indexOf(marker)
+    if (index >= 0 && (at < 0 || index < at)) at = index
+  }
+  return (at >= 0 ? raw.slice(0, at) : raw).trim()
+}
+
+/**
+ * 宿主在回合开始时会往会话里塞时间、运行时上下文、指令更新这些「用户消息」，
+ * 它们是给模型的，不是用户说的话——手机对话里一条都不该出现。
+ */
+const INJECTED_USER_PATTERNS = [
+  /^Time sampled while preparing turn\b/,
+  /^Current runtime context\./,
+  /^<system-reminder>/,
+  /^<available[-_]skills>/,
+  /^<environment_context>/,
+]
+
+function isInjectedUserText(text) {
+  const body = String(text ?? '').trim()
+  if (!body) return true
+  return INJECTED_USER_PATTERNS.some((pattern) => pattern.test(body))
+}
+
+/** sessionId -> { text, title, at }：刚挂上去的旁听材料，下一轮同步隐藏提示时一起带上。 */
+const peekExtras = new Map()
+
+function rememberPeek(sessionId, text, title) {
+  const id = String(sessionId ?? '')
+  if (!id || !text) return
+  peekExtras.set(id, { text, title: String(title ?? ''), at: Date.now() })
+  for (const [key, value] of peekExtras) {
+    if (Date.now() - value.at > PEEK_TTL_MS) peekExtras.delete(key)
+  }
+}
+
+function freshPeekExtra(sessionId) {
+  const id = String(sessionId ?? '')
+  const hit = id ? peekExtras.get(id) : null
+  if (!hit) return null
+  if (Date.now() - hit.at > PEEK_TTL_MS) {
+    peekExtras.delete(id)
+    return null
+  }
+  return hit
+}
+
+/** 给手机的「正在旁听」一行：只报标题和时间，不带材料本身。 */
+function peekInfoOf(sessionId) {
+  const hit = freshPeekExtra(sessionId)
+  if (!hit) return null
+  return { title: hit.title, at: hit.at }
 }
 
 /**
@@ -2790,9 +2887,12 @@ function buildPeekBlock(peek) {
   return text.length > 400 ? `${text.slice(0, 400)}…` : text
 }
 
-/** 派发时调用：不是问进展就返回空串，任何异常都只记日志、不影响这句话发出去。 */
-async function peekContext(ctx, boundSessionId, text) {
-  if (!peekWanted(text)) return ''
+/**
+ * 派发时调用：把旁听材料挂进这条会话的隐藏提示，返回空串表示没看。
+ * 任何异常都只记日志，不影响这句话发出去。
+ */
+async function peekContext(ctx, boundSessionId, text, mode) {
+  if (!shouldPeek(mode, text)) return ''
   const startedAt = Date.now()
   try {
     const rows = await sessionRowsCached(ctx)
@@ -2810,7 +2910,16 @@ async function peekContext(ctx, boundSessionId, text) {
       return id ? projectIdOfPath(byPath, projectCacheOf(id).cwd || '') : ''
     }
     const target = pickPeekTarget(rows, bound, { cwd, projectOf })
-    if (!target) return ''
+    if (!target) {
+      // 同项目没有另一只（一个人在一个项目里干活）：退一步只看代码现状，
+      // 「进展怎么样」至少能答出动到哪了，而不是「没看到」。
+      const gitOnly = gitDigest(cwd || boundMeta.cwd)
+      if (!gitOnly) return ''
+      const block = buildPeekBlock({ id: bound, title: '你这个项目的代码', updatedAt: Date.now(), lines: [], git: gitOnly })
+      rememberPeek(bound, block, '你这个项目的代码')
+      netLog('peek', { sessionId: bound, from: 'git', chars: block.length, ms: Date.now() - startedAt })
+      return block
+    }
     const meta = projectCacheOf(target.id)
     const detail = sessionDetail({ id: target.id, limit: '30' })
     const lines = peekTranscriptLines(detail)
@@ -2823,6 +2932,7 @@ async function peekContext(ctx, boundSessionId, text) {
       lines,
       git,
     })
+    rememberPeek(bound, block, target.title || meta.title || '')
     netLog('peek', { sessionId: bound, from: target.id, chars: block.length, ms: Date.now() - startedAt })
     return block
   } catch (error) {
@@ -2881,9 +2991,10 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
     return { status: 404, body: { ok: false, error: `会话不存在：${sessionId}` } }
   }
 
-  // 「进展怎么样」这类问题：只读看一眼同项目里最近活跃的另一只，材料贴在本轮提示词后面。
-  const peekBlock = await peekContext(ctx, sessionId, text)
-  if (peekBlock) promptText = `${promptText}\n\n${peekBlock}`
+  // 旁听：只读看一眼同项目里另一只的活，材料挂进这条会话的隐藏提示词。
+  // 绝不拼进这句话本身——手机上看到的就是用户说的那句，记录里也不会多出系统腔。
+  const config = getPanelConfig()
+  await peekContext(ctx, sessionId, text, config?.peek)
 
   // 切网重发：同一个 requestId 只落一轮，避免电脑端出现两条相同提问。
   const rid = String(body?.requestId ?? '').trim()
@@ -2929,8 +3040,8 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
   const ac = new AbortController()
   const acTimer = setTimeout(() => { try { ac.abort() } catch { /* ignore */ } }, 120_000)
   for (const key of turnKeys) liveAbort.set(key, ac)
-  // 人设/长度档挂进这条会话的 system prompt：只有模型看得见，不进对话记录。
-  await syncHiddenPrompt(ctx, sessionId, getPanelConfig())
+  // 人设/长度档/旁听材料挂进这条会话的 system prompt：只有模型看得见，不进对话记录。
+  await syncHiddenPrompt(ctx, sessionId, config)
   const prompt = controller.prompt(
     {
       requestId: rid || randomBytes(8).toString('hex'),
@@ -3365,13 +3476,20 @@ export function buildDispatchPrompt(text) {
   return String(text ?? '').trim()
 }
 
-/** 隐藏段：人设 + 长度档，挂进会话的 system prompt，不落进对话正文。 */
-export function buildHiddenPrompt(config = {}) {
+/** 旁听材料的使用规矩：只当背景，别解释机制，别把材料当这条对话里的话。 */
+const PEEK_RULE =
+  '下面是同项目另一只会话的近况（只读看一眼，不属于这条对话）。' +
+  '用户问起进展就直接按材料说事；材料里没有的说没看到，别猜。不要解释你是怎么看到的。'
+
+/** 隐藏段：人设 + 长度档 + 本轮旁听材料，挂进会话的 system prompt，不落进对话正文。 */
+export function buildHiddenPrompt(config = {}, peekText = '') {
   const blocks = []
   const persona = String(config?.persona ?? '').trim()
   if (persona) blocks.push(`角色设定（用户配置的人设，覆盖默认语气）：\n${persona.slice(0, 2000)}`)
   blocks.push(TONE_RULE)
   blocks.push(MAXWORDS_LINES[normalizeMaxWords(config?.maxWords)])
+  const peek = String(peekText ?? '').trim()
+  if (peek) blocks.push(`${PEEK_RULE}\n\n${peek}`)
   return blocks.join('\n\n')
 }
 
@@ -3391,7 +3509,8 @@ const hiddenSections = new Map()
 
 export async function syncHiddenPrompt(ctx, sessionId, config) {
   if (!sessionId) return false
-  const text = buildHiddenPrompt(config)
+  const peek = freshPeekExtra(sessionId)
+  const text = buildHiddenPrompt(config, peek?.text ?? '')
   const controller = ctx?.get?.('sessionController')
   if (!controller?.resolveAgent) {
     netLog('hidden-skip', { reason: 'no-scope-api' })
@@ -4712,6 +4831,8 @@ export function apply(ctx, config) {
           // 派发落点看 dispatchTarget，它恒等于 pet-session.json 里那只。
           current,
           dispatchTarget: petNow.sessionId || null,
+          // 5 分钟内旁听过别的会话时给个标题，手机在对话页标题下显示一行；过期就是 null。
+          peek: peekInfoOf(petNow.sessionId) || null,
           remembered: state.projects,
           petSession: (() => {
             try {

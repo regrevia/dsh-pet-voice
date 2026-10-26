@@ -190,6 +190,7 @@ window.__ModuleLoader__.load({
       wakeName: s.wakeName,
       persona: s.persona ?? '',
       maxWords: s.maxWords ?? '短',
+      peek: s.peek ?? 'ask',
       bubble: s.bubble !== false,
     })
 
@@ -226,6 +227,13 @@ window.__ModuleLoader__.load({
       { id: 'edge', label: '微软在线' },
       { id: 'local', label: '这台电脑' },
       { id: 'http', label: '自己的接口' },
+    ]
+
+    /** 旁听：手机上问进展时只读看一眼同项目里另一只的活。 */
+    const PEEK_OPTIONS = [
+      { id: 'ask', label: '问进展时' },
+      { id: 'always', label: '每一句' },
+      { id: 'off', label: '关' },
     ]
 
     const MAXWORD_OPTIONS = [
@@ -685,6 +693,21 @@ window.__ModuleLoader__.load({
               onChange: (e) => field('persona')(e.target.value),
               onBlur: () => commit('persona')(),
             }),
+          ),
+          paramRow(
+            '旁听',
+            h(
+              'select',
+              {
+                value: draft.peek,
+                style: { ...S.input, width: 120 },
+                onChange: (e) => {
+                  setDraft((d) => ({ ...d, peek: e.target.value }))
+                  save({ peek: e.target.value })
+                },
+              },
+              PEEK_OPTIONS.map((item) => h('option', { key: item.id, value: item.id }, item.label)),
+            ),
           ),
           paramRow(
             '一句话长短',
