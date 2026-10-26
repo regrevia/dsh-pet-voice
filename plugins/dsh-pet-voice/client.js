@@ -27,14 +27,22 @@ window.__ModuleLoader__.load({
     }
 
     const S = {
+      // 宿主给的面板槽位是 overflow:hidden 的定高容器：根节点必须自己滚，
+      // 不然超出一屏的「手机」那节永远看不到，滚轮也带不动。
       view: {
+        height: '100%',
+        overflowY: 'auto',
+        overflowX: 'hidden',
+        boxSizing: 'border-box',
         padding: '32px 32px 72px',
+        color: 'inherit',
+      },
+      inner: {
         maxWidth: 640,
         margin: '0 auto',
         display: 'flex',
         flexDirection: 'column',
         gap: 28,
-        color: 'inherit',
       },
       section: { display: 'flex', flexDirection: 'column', gap: 10 },
       title: { fontSize: 12, color: C.dim, margin: 0, fontWeight: 500, letterSpacing: '0.04em' },
@@ -52,6 +60,7 @@ window.__ModuleLoader__.load({
       grow: { flex: 1 },
       link: { fontSize: 13, color: C.brand, textDecoration: 'none' },
       meta: { fontSize: 12, color: C.dim },
+      rowSub: { fontSize: 12, color: C.dim, lineHeight: 1.5, padding: '0 14px 10px' },
       device: { display: 'flex', alignItems: 'center', gap: 10, padding: '12px 14px' },
       name: { fontSize: 13 },
       button: {
@@ -769,13 +778,21 @@ window.__ModuleLoader__.load({
       const devices = state.devices ?? []
       const maxDevices = Number(state.maxDevices) || 2
       // 上限以前只能手改文件：手机被 429 挡住时面板里没有出路。加减各一步就够。
-      const saveMax = async (next) => {
+      const saveMax = async (raw) => {
+        const next = Math.min(8, Math.max(1, raw))
+        if (next === maxDevices) return
         try {
           setState(await request('/state', { maxDevices: next }))
         } catch {
           setError('设备数没存上')
         }
       }
+      const step = (delta) => ({
+        ...S.button,
+        minWidth: 28,
+        opacity: (delta < 0 ? maxDevices <= 1 : maxDevices >= 8) ? 0.4 : 1,
+        cursor: (delta < 0 ? maxDevices <= 1 : maxDevices >= 8) ? 'default' : 'pointer',
+      })
       const deviceSection = h(
         Section,
         { title: '手机' },
@@ -787,9 +804,9 @@ window.__ModuleLoader__.load({
             { style: S.row },
             h('span', { style: S.label }, '最多连几台'),
             h('span', { style: S.grow }),
-            h('button', { style: S.button, onClick: () => saveMax(maxDevices - 1) }, '−'),
+            h('button', { style: step(-1), onClick: () => saveMax(maxDevices - 1) }, '−'),
             h('span', { style: { ...S.name, minWidth: 20, textAlign: 'center' } }, String(maxDevices)),
-            h('button', { style: S.button, onClick: () => saveMax(maxDevices + 1) }, '+'),
+            h('button', { style: step(1), onClick: () => saveMax(maxDevices + 1) }, '+'),
           ),
           devices.length
             ? devices.map((d, index) =>
@@ -823,11 +840,15 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { style: S.view, 'data-dsh-panel': PANEL_ID },
-        error ? h('div', { style: S.error }, error) : null,
-        paramsSection,
-        pairSection,
-        appSection,
-        deviceSection,
+        h(
+          'div',
+          { style: S.inner },
+          error ? h('div', { style: S.error }, error) : null,
+          paramsSection,
+          pairSection,
+          appSection,
+          deviceSection,
+        ),
       )
     }
 
