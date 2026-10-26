@@ -203,8 +203,8 @@ class TtsPlayer(
     /**
      * 真下载。三件事都在后台线程：取字节、落最终文件、淘汰旧缓存。
      *
-     * **临时文件名唯一**（`.名字.seq.part`）：同一句话被并发请求时不会再出现两个任务写同一个
-     * `.part`，先完成的把它改名拿走、后一个 `copyTo` 抛 NoSuchFileException 的老问题。
+    * **临时文件名唯一**（名字里带序号和后缀）：同一句话被并发请求时不会再出现两个任务写同一个
+    * 临时文件，先完成的把它改名拿走、后一个 copyTo 抛 NoSuchFileException 的老问题。
      * 异常只记原因，交回 [TtsQueue] 变成「跳过这一句或报一句错」，绝不往上抛。
      */
     private fun download(seq: Long, text: String, preset: String, tempTag: Long) {

@@ -38,7 +38,34 @@
                 android:paddingStart="4dp"
                 android:textColor="@color/pet_text"
                 android:textSize="15sp" />
+
+            <TextView
+                android:id="@+id/chatStop"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="?android:attr/selectableItemBackground"
+                android:paddingStart="12dp"
+                android:paddingTop="6dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="6dp"
+                android:text="停止"
+                android:textColor="@color/pet_accent"
+                android:textSize="13.5sp"
+                android:visibility="gone" />
         </LinearLayout>
+
+        <TextView
+            android:id="@+id/chatGoal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:paddingBottom="6dp"
+            android:textColor="@color/pet_hint"
+            android:textSize="12sp"
+            android:visibility="gone" />
 
         <TextView
             android:id="@+id/chatPeek"

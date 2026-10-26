@@ -767,17 +767,35 @@ window.__ModuleLoader__.load({
       /* ---------------- 已连上的手机 ---------------- */
 
       const devices = state.devices ?? []
+      const maxDevices = Number(state.maxDevices) || 2
+      // 上限以前只能手改文件：手机被 429 挡住时面板里没有出路。加减各一步就够。
+      const saveMax = async (next) => {
+        try {
+          setState(await request('/state', { maxDevices: next }))
+        } catch {
+          setError('设备数没存上')
+        }
+      }
       const deviceSection = h(
         Section,
-        { title: '已连上的手机' },
+        { title: '手机' },
         h(
           'div',
           { style: S.card },
+          h(
+            'div',
+            { style: S.row },
+            h('span', { style: S.label }, '最多连几台'),
+            h('span', { style: S.grow }),
+            h('button', { style: S.button, onClick: () => saveMax(maxDevices - 1) }, '−'),
+            h('span', { style: { ...S.name, minWidth: 20, textAlign: 'center' } }, String(maxDevices)),
+            h('button', { style: S.button, onClick: () => saveMax(maxDevices + 1) }, '+'),
+          ),
           devices.length
             ? devices.map((d, index) =>
                 h(
                   'div',
-                  { key: d.id, style: { ...S.device, ...(index ? S.rowBorder : null) } },
+                  { key: d.id, style: { ...S.device, ...S.rowBorder } },
                   h('span', { style: S.name }, d.label || (d.platform === 'android' ? 'Android 手机' : '手机')),
                   h('span', { style: S.grow }),
                   h('span', { style: S.meta }, ago(d.lastSeen)),

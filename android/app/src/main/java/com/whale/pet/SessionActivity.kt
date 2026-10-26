@@ -45,15 +45,20 @@ class SessionActivity : Activity() {
     private var maxSeq: Long = 0
     private var loading = false
     private var sending = false
+    private var running = false
+    private var queued = ""
     private var errorLine: String = ""
 
     private lateinit var list: ListView
     private lateinit var emptyBox: View
     private lateinit var emptyText: TextView
     private lateinit var peekLine: TextView
+    private lateinit var stopBtn: TextView
+    private lateinit var goalLine: TextView
     private lateinit var more: TextView
     private lateinit var input: EditText
     private lateinit var adapter: MsgAdapter
+    private var render: ChatRender? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -66,6 +71,9 @@ class SessionActivity : Activity() {
         emptyText = emptyBox as TextView
         input = findViewById(R.id.chatInput)
         peekLine = findViewById(R.id.chatPeek)
+        stopBtn = findViewById(R.id.chatStop)
+        goalLine = findViewById(R.id.chatGoal)
+        stopBtn.setOnClickListener { doStop() }
 
         more = TextView(this).apply {
             text = "加载更早"
@@ -81,12 +89,17 @@ class SessionActivity : Activity() {
 
         adapter = MsgAdapter()
         list.adapter = adapter
+        render = ChatRender(this, maxViews = 8) { PetSettings.load(this) }
         findViewById<View>(R.id.chatBack).setOnClickListener { finish() }
         findViewById<View>(R.id.chatSend).setOnClickListener { send() }
         load()
+        refreshStatus()
     }
 
     override fun onDestroy() {
+        ui.removeCallbacksAndMessages(null)
+        runCatching { render?.release() }
+        render = null
         io.shutdownNow()
         super.onDestroy()
     }
@@ -262,11 +275,68 @@ class SessionActivity : Activity() {
     private fun firstLine(raw: String): String =
         raw.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }.orEmpty()
 
+    /* ---------------- 状态：在不在跑、有没有目标 ---------------- */
+
+    /** 每 6 秒对一次宿主：跑没跑完、目标还在不在。网络都在后台线程，不占界面。 */
+    private fun refreshStatus() {
+        if (sessionId.isBlank()) return
+        val sid = sessionId
+        io.execute {
+            val list = runCatching { client.sessions() }.getOrNull()
+            var busy = sending
+            list?.json?.optJSONArray("sessions")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    if (o.optString("id") != sid) continue
+                    busy = o.optBoolean("running")
+                    break
+                }
+            }
+            val goals = runCatching { client.goals(sid) }.getOrNull()
+            val objective = goals?.json?.optJSONArray("goals")
+                ?.optJSONObject(0)?.optString("objective").orEmpty().trim()
+            ui.post {
+                running = busy
+                stopBtn.visibility = if (busy || sending) View.VISIBLE else View.GONE
+                goalLine.text = if (objective.isBlank()) "" else "目标 · " + objective
+                goalLine.visibility = if (objective.isBlank()) View.GONE else View.VISIBLE
+            }
+        }
+        ui.postDelayed({ if (!isFinishing) refreshStatus() }, 6_000)
+    }
+
+    /** 这一轮不想要了：让宿主掐掉，界面立刻还回可输入。 */
+    private fun doStop() {
+        val sid = sessionId
+        if (sid.isBlank()) return
+        stopBtn.visibility = View.GONE
+        io.execute {
+            val r = runCatching { client.cancel(sid) }.getOrNull()
+            ui.post {
+                sending = false
+                errorLine = ""
+                findViewById<android.widget.ImageView>(R.id.chatSend).isEnabled = true
+                adapter.notifyDataSetChanged()
+                if (r?.ok == true) toast("已停止") else toast("没接上，再点一次")
+            }
+        }
+    }
+
+    private fun toast(text: String) =
+        android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_SHORT).show()
+
     /* ---------------- 写 ---------------- */
 
     private fun send() {
         val raw = input.text.toString().trim()
-        if (raw.isBlank() || sending || sessionId.isBlank()) return
+        if (raw.isBlank() || sessionId.isBlank()) return
+        // 正在跑：先排队，这一轮完了立刻发（跟电脑端一样，不用等它停）
+        if (sending) {
+            queued = raw
+            input.setText("")
+            input.hint = "已排队，这一轮结束就发"
+            return
+        }
         input.setText("")
         input.clearFocus()
         hideKeyboard()
@@ -341,6 +411,13 @@ class SessionActivity : Activity() {
         errorLine = error
         findViewById<android.widget.ImageView>(R.id.chatSend).isEnabled = true
         adapter.notifyDataSetChanged()
+        if (queued.isNotBlank()) {
+            val next = queued
+            queued = ""
+            input.hint = "发消息"
+            input.setText(next)
+            ui.postDelayed({ send() }, 120)
+        }
     }
 
     /** 贴底：这一帧布局完再滚一次，键盘弹出/收起会改高度，立刻滚会滚到一半。 */
@@ -364,7 +441,7 @@ class SessionActivity : Activity() {
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
             if (position >= rows.size) {
                 val v = convertView ?: layoutInflater.inflate(R.layout.item_message, parent, false)
-                val bubble = v.findViewById<View>(R.id.msgBubble)
+                val bubble = v.findViewById<android.widget.FrameLayout>(R.id.msgBubble)
                 val text = v.findViewById<TextView>(R.id.msgText)
                 bubble.background = null
                 text.maxLines = 2
@@ -383,7 +460,7 @@ class SessionActivity : Activity() {
             // 同一侧连着说的几句贴一起，换人说话留一口气，读起来才是一段对话。
             val gap = if (position == 0 || rows[position - 1].role != row.role) dp(9) else dp(3)
             bubbleRow.setPadding(dp(12), gap, dp(12), dp(3))
-            val bubble = v.findViewById<View>(R.id.msgBubble)
+            val bubble = v.findViewById<android.widget.FrameLayout>(R.id.msgBubble)
             val text = v.findViewById<TextView>(R.id.msgText)
             v.setOnClickListener(null)
             when (row.role) {
@@ -414,29 +491,51 @@ class SessionActivity : Activity() {
                 }
                 "user" -> {
                     bubbleRow.gravity = Gravity.END
+                    text.visibility = View.VISIBLE
                     text.maxLines = Int.MAX_VALUE
                     text.ellipsize = null
                     text.textSize = 15f
                     text.setTextColor(getColor(R.color.pet_bg))
-                    bubble.setBackgroundResource(0)
                     bubble.background = bubble(getColor(R.color.pet_accent))
                     bubble.setPadding(dp(12), dp(9), dp(12), dp(9))
+                    text.maxWidth = dp(292)
+                    if (bubble.childCount > 1) bubble.removeViews(1, bubble.childCount - 1)
                     text.text = row.text
                 }
                 else -> {
+                    // 电脑上鱼说的话不带气泡、占满整行：先按纯文本上屏，渲染结果回来再换成富文本
                     bubbleRow.gravity = Gravity.START
+                    text.visibility = View.VISIBLE
                     text.maxLines = Int.MAX_VALUE
                     text.ellipsize = null
                     text.textSize = 15f
                     text.setTextColor(getColor(R.color.pet_text))
-                    bubble.background = bubble(getColor(R.color.pet_hint_bg))
-                    bubble.setPadding(dp(12), dp(9), dp(12), dp(9))
-                    text.text = row.text
+                    bubble.background = null
+                    bubble.setPadding(0, 0, 0, 0)
+                    text.maxWidth = resources.displayMetrics.widthPixels - dp(24)
+                    if (bubble.childCount > 1) bubble.removeViews(1, bubble.childCount - 1)
+                    text.text = MdPlain.of(row.text)
+                    val box = render ?: return v
+                    if (row.text.isBlank()) return v
+                    val html = box.cached(row.text)
+                    if (html != null) {
+                        text.visibility = View.GONE
+                        box.attach(bubble, row.text, html)
+                    } else {
+                        box.request(row.text) {
+                            ui.post {
+                                if (!isFinishing && !isDestroyed && indexOf(row.text) >= 0) notifyDataSetChanged()
+                            }
+                        }
+                    }
                 }
             }
             return v
         }
     }
+
+    /** 富文本渲染完只刷还在屏上那条，别整列表重排。 */
+    fun indexOf(text: String): Int = rows.indexOfFirst { it.role != "tool" && it.text == text }
 
     private fun bubble(color: Int) = android.graphics.drawable.GradientDrawable().apply {
         cornerRadius = 16f * resources.displayMetrics.density

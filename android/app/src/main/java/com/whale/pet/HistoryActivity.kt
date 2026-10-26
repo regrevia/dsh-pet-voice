@@ -37,6 +37,7 @@ import android.widget.TextView
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.LinkedHashSet
 import java.util.Locale
@@ -72,6 +73,7 @@ class HistoryActivity : Activity() {
         val MARKDOWN_IMG = Regex("!\\[[^]]*]\\(\\s*<?([^)\\s>]+)")
         /** 正文里的裸绝对路径（含 `[图片] /abs/path` 这种宿主回显）。 */
         val ABS_IMG = Regex("/[\\w\\u4e00-\\u9fa5 .\\-+/@]+?\\.(?:jpe?g|png|webp|gif)", RegexOption.IGNORE_CASE)
+        val MARKDOWN_IMG_FULL = Regex("!\\[[^]]*]\\(\\s*<?[^)\\s>]+>?\\s*\\)")
     }
 
 
@@ -138,7 +140,13 @@ class HistoryActivity : Activity() {
     private var snapUri: Uri? = null
 
     private data class Ws(val id: String, val title: String, val path: String, val pinned: Boolean)
-    private data class Sess(val id: String, val title: String, val at: Long)
+    private data class Sess(
+        val id: String,
+        val title: String,
+        val at: Long,
+        val running: Boolean = false,
+        val proj: String = "",
+    )
 
     private sealed class ChatRow {
         data class Me(val text: String, val ts: Long = 0L) : ChatRow()
@@ -248,7 +256,7 @@ class HistoryActivity : Activity() {
         }
 
         adapter.onRetry = { resendLast() }
-        render = ChatRender(this) { PetSettings.load(this) }
+        render = ChatRender(this, maxViews = 8) { PetSettings.load(this) }
 
         refreshHeader()
         reload()
@@ -488,7 +496,6 @@ class HistoryActivity : Activity() {
 
     private fun reload() {
         val items = PetHistory.all(this)
-        val lastPet = items.indexOfLast { !it.isMe && !it.isNote }
         val rows = ArrayList<ChatRow>(items.size + 2)
         items.forEachIndexed { i, item ->
             if (item.isNote) {
@@ -497,7 +504,7 @@ class HistoryActivity : Activity() {
                 rows.add(ChatRow.Me(item.text, item.ts))
             } else {
                 // 只有最后一条助手消息挂富文本渲染器：历史长列表里塞多个 WebView 会卡
-                rows.add(ChatRow.Pet(item.text, rich = i == lastPet))
+                rows.add(ChatRow.Pet(item.text, rich = true))
             }
         }
         val live = liveText
@@ -992,6 +999,7 @@ class HistoryActivity : Activity() {
         pickerScrim.visibility = View.VISIBLE
         pickerRows.clear()
         pickerAdapter.notifyDataSetChanged()
+        sizePicker()
         when (level) {
             1 -> {
                 pickerBack.visibility = View.GONE
@@ -1003,6 +1011,25 @@ class HistoryActivity : Activity() {
                 pickerTitle.text = pickerProject.ifBlank { PetSettings.pinnedTitle(this) }.ifBlank { "会话" }
                 syncPickerProject()
             }
+        }
+    }
+
+    /**
+     * 浮层高度按行数算：ListView 不认 maxHeight，不自己算就会整屏铺满。
+     * 最高占屏幕 62%，剩下的让列表自己滚。
+     */
+    private fun sizePicker() {
+        val rowPx = dp(56)
+        val headPx = dp(52)
+        var h = 0
+        for (row in pickerRows) h += if (row is PickerRow.Head) headPx else rowPx
+        h += dp(2) // 最后一条的收尾线
+        val cap = (resources.displayMetrics.heightPixels * 0.62f).toInt()
+        val listH = h.coerceIn(rowPx, cap)
+        val lp = pickerList.layoutParams
+        if (lp != null && lp.height != listH) {
+            lp.height = listH
+            pickerList.layoutParams = lp
         }
     }
 
@@ -1049,6 +1076,7 @@ class HistoryActivity : Activity() {
                 }
                 pickerRows.add(PickerRow.Action("新建项目"))
                 pickerAdapter.notifyDataSetChanged()
+                sizePicker()
             }
         }, "pet-projects").apply { isDaemon = true }.start()
     }
@@ -1079,46 +1107,98 @@ class HistoryActivity : Activity() {
         }, "pet-picker-project").apply { isDaemon = true }.start()
     }
 
+    /**
+     * 列当前项目里的会话。
+     * 宿主没钉项目时（刚建过项目就会出现），拿当前这只会话所属的项目当项目，
+     * 否则一进来是所有项目的会话混在一起。
+     */
     private fun loadSessions() {
         pickerRows.clear()
         pickerRows.add(PickerRow.Head("载入中"))
         pickerAdapter.notifyDataSetChanged()
-        val wsId = pickerProjectId
         val client = PetClient { PetSettings.load(this) }
+        val cur = PetSettings.chatSession(this)
         Thread({
             val res = try {
-                client.get("sessions", if (wsId.isBlank()) emptyMap() else mapOf("workspaceId" to wsId))
+                client.get("sessions", mapOf("limit" to "100"))
             } catch (_: Exception) {
                 null
             }
-            val out = ArrayList<Sess>()
-            // 宿主返回的是 sessions（旧字段 rows 兜底），按最近更新排前面
+            val all = ArrayList<Sess>()
+            // 宿主返回的是 sessions（旧字段 rows 兜底）
             val arr = res?.json?.optJSONArray("sessions") ?: res?.json?.optJSONArray("rows")
             if (arr != null) {
                 for (i in 0 until arr.length()) {
                     val o = arr.optJSONObject(i) ?: continue
                     val id = o.optString("id")
                     if (id.isBlank()) continue
-                    val shown = niceTitle(o.optString("title")).ifBlank { "未命名对话" }
-                    out.add(Sess(id, shown, o.optLong("updatedAt")))
+                    all.add(
+                        Sess(
+                            id = id,
+                            title = niceTitle(o.optString("title")).ifBlank { "未命名对话" },
+                            at = o.optLong("updatedAt"),
+                            running = o.optBoolean("running"),
+                            proj = o.optString("projectId"),
+                        ),
+                    )
                 }
             }
-            out.sortByDescending { it.at }
+            all.sortByDescending { it.at }
+            // 项目优先级：钉住的 > 当前会话所属的 > 列表里钉过的 > 全部（都不认识时才放宽）
+            var wsId = pickerProjectId
+            if (wsId.isBlank()) wsId = all.firstOrNull { it.id == cur }?.proj.orEmpty()
+            if (wsId.isBlank()) wsId = projects.firstOrNull { it.pinned }?.id.orEmpty()
+            val out = if (wsId.isBlank()) all else all.filter { it.proj == wsId }
+            val wsTitle = projects.firstOrNull { it.id == wsId }?.title.orEmpty()
             runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (wsId.isNotBlank()) pickerProjectId = wsId
+                if (wsTitle.isNotBlank()) pickerProject = wsTitle
                 sessions = out
+                // 顶上那行写「这只对话在哪个项目」：不能拿旧的钉住名字凑，
+                // 否则项目换了名（或人把会话挪了项目）顶上还是旧项目，看着像是在串项目。
+                val curWs = all.firstOrNull { it.id == cur }?.proj.orEmpty()
+                val curTitle = projects.firstOrNull { it.id == curWs }?.title.orEmpty()
+                    .ifBlank { if (curWs.isNotBlank() && curWs == wsId) wsTitle else "" }
+                if (curWs.isNotBlank() && curTitle.isNotBlank() &&
+                    curTitle != PetSettings.pinnedTitle(this)
+                ) {
+                    PetSettings.savePinnedTitle(this, curTitle)
+                    refreshHeader()
+                }
+                pickerTitle.text = pickerProject.ifBlank { PetSettings.pinnedTitle(this) }.ifBlank { "会话" }
                 pickerRows.clear()
-                pickerRows.add(PickerRow.NewChat("新建对话"))
+                pickerRows.add(PickerRow.NewChat("+ 新建对话"))
                 if (out.isEmpty()) {
-                    pickerRows.add(PickerRow.Head("还没有会话"))
+                    pickerRows.add(PickerRow.Head(if (wsId.isBlank()) "还没有对话" else "这个项目还没有对话"))
                 } else {
                     out.forEach { pickerRows.add(PickerRow.SessRow(it)) }
-                    if (PetSettings.chatSession(this).isNotBlank()) {
-                        pickerRows.add(PickerRow.Detail("看这只对话的原文"))
-                    }
+                    if (cur.isNotBlank()) pickerRows.add(PickerRow.Detail("看这只对话的原文"))
                 }
                 pickerAdapter.notifyDataSetChanged()
+                sizePicker()
             }
         }, "pet-sessions").apply { isDaemon = true }.start()
+    }
+
+    /** 列表里只精确到分钟：今天、昨天、更早给日期。 */
+    private fun timeLabel(ts: Long): String {
+        if (ts <= 0L) return ""
+        val then = Calendar.getInstance().apply { timeInMillis = ts }
+        val today = Calendar.getInstance()
+        val hm = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(ts))
+        if (then.get(Calendar.YEAR) == today.get(Calendar.YEAR) &&
+            then.get(Calendar.DAY_OF_YEAR) == today.get(Calendar.DAY_OF_YEAR)
+        ) {
+            return "今天 $hm"
+        }
+        today.add(Calendar.DAY_OF_YEAR, -1)
+        if (then.get(Calendar.YEAR) == today.get(Calendar.YEAR) &&
+            then.get(Calendar.DAY_OF_YEAR) == today.get(Calendar.DAY_OF_YEAR)
+        ) {
+            return "昨天 $hm"
+        }
+        return SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(ts))
     }
 
     private var pickerProjectId = ""
@@ -1544,7 +1624,6 @@ class HistoryActivity : Activity() {
         /** 只给「渲染完成通知」用：找到仍然显示这条文本的行，没人看就不刷。 */
         fun positionOf(raw: String): Int = rows.indexOfFirst { it is ChatRow.Pet && it.rich && it.text == raw }
     }
-
     /* ---------------- 选择层适配器 ---------------- */
 
     private inner class PickerAdapter : BaseAdapter() {
@@ -1553,44 +1632,66 @@ class HistoryActivity : Activity() {
         override fun getItemId(position: Int): Long = position.toLong()
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-            val v = convertView ?: layoutInflater.inflate(R.layout.item_history, parent, false)
-            v.findViewById<View>(R.id.itemThumbs)?.visibility = View.GONE
-            val bubble = v.findViewById<FrameLayout>(R.id.itemBubble)
-            val text = v.findViewById<TextView>(R.id.itemText)
-            bubble.background = null
-            bubble.setPadding(dp(16), dp(14), dp(16), dp(14))
-            val row = pickerRows[position]
-            when (row) {
+            val v = convertView ?: layoutInflater.inflate(R.layout.item_picker, parent, false)
+            val title = v.findViewById<TextView>(R.id.pickerRowTitle)
+            val meta = v.findViewById<TextView>(R.id.pickerRowMeta)
+            val chevron = v.findViewById<TextView>(R.id.pickerRowChevron)
+            val line = v.findViewById<View>(R.id.pickerRowLine)
+            v.setBackgroundColor(getColor(R.color.pet_surface))
+            v.setPadding(0, 0, 0, 0)
+            title.visibility = View.VISIBLE
+            meta.visibility = View.GONE
+            chevron.visibility = View.GONE
+            line.visibility = View.VISIBLE
+            title.setTextColor(getColor(R.color.pet_text))
+            title.textSize = 15f
+            when (val row = pickerRows[position]) {
                 is PickerRow.Head -> {
-                    text.text = row.text
-                    text.setTextColor(getColor(R.color.pet_hint))
-                    text.textSize = 13f
-                }
-                is PickerRow.Proj -> {
-                    text.text = row.ws.title
-                    text.setTextColor(getColor(R.color.pet_text))
-                    text.textSize = 15f
-                }
-                is PickerRow.SessRow -> {
-                    val when_ = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(row.s.at))
-                    text.text = "${row.s.title.ifBlank { "未命名" }}   $when_"
-                    text.setTextColor(getColor(R.color.pet_text))
-                    text.textSize = 15f
+                    title.visibility = View.GONE
+                    line.visibility = View.GONE
+                    meta.visibility = View.VISIBLE
+                    meta.text = row.text
+                    meta.setTextColor(getColor(R.color.pet_hint))
+                    meta.textSize = 13f
+                    v.setPadding(0, dp(18), 0, dp(10))
                 }
                 is PickerRow.NewChat -> {
-                    text.text = row.text
-                    text.setTextColor(getColor(R.color.pet_accent))
-                    text.textSize = 15f
+                    title.text = row.text
+                    title.setTextColor(getColor(R.color.pet_accent))
+                }
+                is PickerRow.Proj -> {
+                    title.text = row.ws.title
+                    // 只有「当前这只对话在哪个项目」值得写；其余行不再挂一句解释动作的话
+                    if (row.ws.id.isNotBlank() && row.ws.id == pickerProjectId) {
+                        meta.visibility = View.VISIBLE
+                        meta.text = "当前"
+                    } else {
+                        meta.visibility = View.GONE
+                    }
+                }
+                is PickerRow.SessRow -> {
+                    val s = row.s
+                    title.text = s.title.ifBlank { "未命名对话" }
+                    val current = s.id == PetSettings.chatSession(this@HistoryActivity)
+                    val bits = ArrayList<String>(3)
+                    val when_ = timeLabel(s.at)
+                    if (when_.isNotBlank()) bits.add(when_)
+                    if (current) bits.add("当前")
+                    if (s.running) bits.add("正在执行")
+                    meta.visibility = View.VISIBLE
+                    meta.text = bits.joinToString(" · ")
+                    meta.setTextColor(getColor(if (s.running) R.color.pet_accent else R.color.pet_hint))
+                    if (current) v.setBackgroundColor(getColor(R.color.pet_hint_bg))
                 }
                 is PickerRow.Action -> {
-                    text.text = row.text
-                    text.setTextColor(getColor(R.color.pet_accent))
-                    text.textSize = 15f
+                    title.text = row.text
+                    title.setTextColor(getColor(R.color.pet_accent))
                 }
                 is PickerRow.Detail -> {
-                    text.text = row.text
-                    text.setTextColor(getColor(R.color.pet_accent))
-                    text.textSize = 15f
+                    title.text = row.text
+                    title.setTextColor(getColor(R.color.pet_text_dim))
+                    chevron.visibility = View.VISIBLE
+                    line.visibility = View.GONE
                 }
             }
             return v

@@ -65,8 +65,11 @@ object PetHistory {
                 val o = arr.optJSONObject(i) ?: continue
                 val text = o.optString("t")
                 if (text.isBlank()) continue
-                // 不再按会话过滤：同一只会话换了 id，用户也不该看到消息凭空消失
-                out.add(Item(o.optString("r", ROLE_PET), text, o.optLong("ts", 0L), want))
+                // 记录里带会话 id 的，只显示属于当前这只会话的：换成别的会话后
+                // 上一只的消息不能混在这一只下面（不带 id 的旧记录留着，免得一升级就清空）
+                val sid = o.optString("s")
+                if (sid.isNotBlank() && want.isNotBlank() && sid != want) continue
+                out.add(Item(o.optString("r", ROLE_PET), text, o.optLong("ts", 0L), sid))
             }
             return out
         }

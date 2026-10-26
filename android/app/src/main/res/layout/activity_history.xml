@@ -257,9 +257,9 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
-        android:background="@color/pet_surface"
+        android:background="@drawable/bg_sheet"
         android:orientation="vertical"
-        android:paddingTop="8dp"
+        android:paddingTop="10dp"
         android:paddingBottom="12dp"
         android:visibility="gone">
 
@@ -312,7 +312,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:listSelector="@android:color/transparent"
-            android:maxHeight="420dp"
+            android:maxHeight="520dp"
             android:scrollbars="none" />
     </LinearLayout>
 </FrameLayout>

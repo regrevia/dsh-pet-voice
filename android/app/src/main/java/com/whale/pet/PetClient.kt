@@ -132,6 +132,28 @@ class PetClient(private val config: () -> PetConfig) {
 
     /** 助手 Markdown → HTML 片段；样式由客户端统一包（`ChatRender`）。 */
     fun render(text: String): Result = postJson("render", JSONObject().put("text", text))
+    /** 掐掉这只会话正在跑的这一轮（宿主 sessionController.cancel）。 */
+    fun cancel(sessionId: String): Result = postJson("cancel", JSONObject().put("sessionId", sessionId))
+
+    /** 这只会话当前的目标，没有就空数组。 */
+    fun goals(sessionId: String): Result = get("goals", mapOf("sessionId" to sessionId))
+
+    /** 宿主上的图片字节（`/api/file?path=`）：聊天里要直接看到电脑上的图。 */
+    fun fileBytes(path: String): ByteArray? {
+        val conn = open("file", mapOf("path" to path), "GET", 15_000)
+        return try {
+            if (conn.responseCode !in 200..299) {
+                conn.errorStream?.close()
+                null
+            } else {
+                conn.inputStream.use { it.readBytes() }
+            }
+        } catch (_: Exception) {
+            null
+        } finally {
+            runCatching { conn.disconnect() }
+        }
+    }
 
     /** 把 APP 的对话钉到指定会话（写宿主 pet-session.json，之后 dispatch 都落到它）。 */
     fun bind(sessionId: String): Result = postJson("bind", JSONObject().put("sessionId", sessionId))

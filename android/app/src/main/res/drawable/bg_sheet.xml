@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 底部浮层：只圆上面两个角，和页面底边贴齐。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="@color/pet_surface" />
+    <corners android:topLeftRadius="18dp" android:topRightRadius="18dp" />
+</shape>

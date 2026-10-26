@@ -3302,6 +3302,11 @@ function renderInline(escaped) {
   out = out.replace(/__([^_]+)__/g, '<strong>$1</strong>')
   out = out.replace(/(^|[^\w*])\*([^*\n]+)\*(?!\w)/g, '$1<em>$2</em>')
   out = out.replace(/~~([^~]+)~~/g, '<del>$1</del>')
+  // 图片：只放行宿主上的绝对路径（App 用 /api/file 取字节），外链仍降级成文字
+  out = out.replace(/!\[([^\]]*)\]\(\s*<?([^()\s>]+)>?\s*\)/g, (all, alt, src) => {
+    if (!src.startsWith('/') || src.includes('..')) return all.slice(1)
+    return `<img src="${src}" alt="${alt.replace(/"/g, '&quot;')}">`
+  })
   // 链接：只放行 http(s)，其余降级成纯文字
   out = out.replace(/\[([^\]]*)\]\(\s*<?((?:[^()\s>]|\([^()]*\))*)>?\s*\)/g, (_all, label, href) => {
     if (!/^https?:\/\//i.test(href)) return label
