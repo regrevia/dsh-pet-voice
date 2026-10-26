@@ -114,6 +114,14 @@ class PetTurn(
     @Volatile
     private var knownTurn = 0
 
+    /**
+     * 这一轮的发送 id：重试**必须**带同一个。
+     *
+     * 弱网下最常见的不是「没发出去」，而是「电脑收到了、回执在回来的路上丢了」。
+     * 换个 id 重试就会在电脑上多开一轮、把回复念两遍；同一个 id 宿主直接判重复，安全。
+     */
+    private val requestId = java.util.UUID.randomUUID().toString()
+
     fun start() {
         Thread({ run() }, "pet-turn").apply { isDaemon = true; start() }
     }
@@ -131,32 +139,23 @@ class PetTurn(
 
     private fun run() {
         post { cb.onUser(text) }
-        post { cb.onStatus("连接宿主…") }
+        status("连接中…")
 
-        // 先探一刀再开流：断网/切网时开流要干等 30s（读超时）才失败，人就盯着「处理中」
-        // 发呆；这条一次性的 /api/poll 顺带给出本轮基线 cursor，失败就立刻报「连不上」。
-        val pre = try {
-            client.poll("", -1, 0)
-        } catch (e: Exception) {
-            null
-        }
-        if (pre == null || !pre.ok) {
-            NetLog.record("poll", pre?.code ?: 0, latency.elapsedMs(), "preflight failed")
-            postError("连不上电脑，检查网络")
-            finishOnce()
-            return
-        }
-        turnCursor = pre.json?.optInt("cursor", -1) ?: -1
+        // 先探一刀再开流：断网/切网时开流要干等 30s（读超时）才失败，人就盯着「处理中」发呆；
+        // 这条一次性的 /api/poll 顺带给出本轮基线 cursor。
+        // 弱网下这一刀没通不代表这句话发不出去：少量重试之后照样往下派发。
+        val pre = preflight()
+        turnCursor = pre?.json?.optInt("cursor", -1) ?: -1
         // 宿主会把所有会话的帧广播出来；不钉住目标会话，别的会话的 start/end/final 就会被
         // 当成这一轮的（0.8.4 真机「想 4 秒然后没输出」就是被别人的 end 收尾的）。
-        val probed = pre.json?.optString("sessionId").orEmpty()
+        val probed = pre?.json?.optString("sessionId").orEmpty()
         if (expectedSession.isBlank() && probed.isNotBlank()) expectedSession = probed
-        latency.mark("preflight", "http=${pre.code} cursor=$turnCursor")
-        dbg("preflight ok http=${pre.code} cursor=$turnCursor session=$expectedSession")
+        latency.mark("preflight", "http=${pre?.code ?: 0} cursor=$turnCursor")
+        dbg("preflight http=${pre?.code ?: 0} cursor=$turnCursor session=$expectedSession")
 
         // 插件设置页把传输方式锁成「只用轮询」时，别去开流：有些路由器/代理直接把 SSE 掐掉，
         // 硬开会先干等一个读超时，人看着「处理中」发呆。轮询本来就在，只是提前接管。
-        val forcedPoll = pre.json?.optString("transport").orEmpty() == "poll"
+        val forcedPoll = pre?.json?.optString("transport").orEmpty() == "poll"
         if (forcedPoll) {
             pollOnly = true
             latency.mark("transport", "panel=poll")
@@ -209,6 +208,8 @@ class PetTurn(
     private fun readSse(first: PetClient.Stream) {
         var s: PetClient.Stream? = first
         var backoff = 1_000L
+        // 断开只在第一次给一行状态；重连上了再收回，避免网络抖一下界面就闪一句话
+        var lostNotified = false
         while (!cancelled.get() && !ended.get()) {
             val cur = s
             if (cur == null) {
@@ -227,6 +228,10 @@ class PetTurn(
                 if (s != null) {
                     stream = s
                     backoff = 1_000L
+                    if (lostNotified) {
+                        lostNotified = false
+                        status("已连上")
+                    }
                 }
                 continue
             }
@@ -242,7 +247,12 @@ class PetTurn(
                 // 读超时/连接重置都走重连，别把用户的这一轮判死
             }
             if (cancelled.get() || ended.get()) break
-            NetLog.record("GET /api/stream", 0, 0, "断开，重连中")
+            if (!lostNotified) {
+                lostNotified = true
+                linkLost("SSE 断开，重连中")
+            } else {
+                NetLog.record("GET /api/stream", 0, 0, "断开，重连中")
+            }
             runCatching { cur.close() }
             s = null
         }
@@ -253,12 +263,80 @@ class PetTurn(
      * 立刻改投专属会话，这一轮照样有回复；上层收到 404 再清偏好。
      */
     private fun send(text: String): PetClient.Result {
-        val first = client.dispatch(text, requestedSession, attachments = attachments)
+        val first = client.dispatch(text, requestedSession, requestId = requestId, attachments = attachments)
         if (first.code != 404 || requestedSession.isBlank()) return first
         fellBack = true
         NetLog.record("POST /api/dispatch", 404, 0, "钉住的会话失效，改投专属会话")
         post { cb.onStatus("原会话不在了，换回专属会话") }
-        return client.dispatch(text, "", attachments = attachments)
+        return client.dispatch(text, "", requestId = requestId, attachments = attachments)
+    }
+
+    /* ---------------- 弱网自愈：一行状态 + 原地重试，不把用户的话丢掉 ---------------- */
+
+    /** 底部那一行状态：只在还没收工的时候更新，别在收工后再冒出来一句。 */
+    private fun status(text: String) {
+        main.post { if (!cancelled.get() && !finished.get()) cb.onStatus(text) }
+    }
+
+    /** 断线一次记一行日志 + 一行提示；调用方负责只在「第一次」调它。 */
+    private fun linkLost(why: String) {
+        NetLog.reconnect()
+        NetLog.record("GET /api/stream", 0, 0, why)
+        status(LINK_LOST_TEXT)
+    }
+
+    private fun sleepQuietly(ms: Long) {
+        try {
+            Thread.sleep(ms)
+        } catch (_: InterruptedException) {
+        }
+    }
+
+    /** 值不值得重发：网络层失败（0）和临时性错误值得，4xx 是「话说错了」，重发没用。 */
+    private fun retryable(code: Int): Boolean = code == 0 || code == 408 || code == 429 || code >= 500
+
+    /**
+     * 开流前的那一刀。弱网下多试几次（总共最多 ~8 秒），通了就拿到本轮基线 cursor；
+     * 全不通也**不**在这里判死：直接往下派发，真发不出去再让上层给一行可点的重试。
+     */
+    private fun preflight(): PetClient.Result? {
+        val until = System.currentTimeMillis() + PREFLIGHT_BUDGET_MS
+        var last: PetClient.Result? = null
+        for (i in 1..PREFLIGHT_TRIES) {
+            if (cancelled.get()) return last?.takeIf { it.ok }
+            last = try {
+                client.poll("", -1, 0)
+            } catch (_: Exception) {
+                null
+            }
+            if (last != null && last.ok) return last
+            NetLog.record("poll", last?.code ?: 0, latency.elapsedMs(), "预检第 $i 次没通")
+            if (i >= PREFLIGHT_TRIES || System.currentTimeMillis() >= until) break
+            status(LINK_LOST_TEXT)
+            sleepQuietly(400L * i)
+        }
+        return last?.takeIf { it.ok }
+    }
+
+    /**
+     * 派发 + 原地重试。同一个 requestId，所以「电脑其实收到了、回执丢了」的情况不会变成两轮。
+     */
+    private fun sendWithRetry(text: String): PetClient.Result? {
+        var last: PetClient.Result? = null
+        for (i in 1..DISPATCH_TRIES) {
+            if (cancelled.get()) return last
+            last = try {
+                send(text)
+            } catch (e: Exception) {
+                NetLog.record("POST /api/dispatch", 0, 0, "第 $i 次失败 ${e.javaClass.simpleName}")
+                null
+            }
+            if (last != null && (last.ok || !retryable(last.code))) return last
+            if (i >= DISPATCH_TRIES) break
+            status(SEND_RETRY_TEXT)
+            sleepQuietly(800L * i)
+        }
+        return last
     }
 
     /** 派发回执里的落点：宿主把 `usedSessionId` 当准，老宿主没有它就用 `sessionId`。 */
@@ -310,22 +388,18 @@ class PetTurn(
         runCatching {
             client.poll(requestedSession, -1, 0).json?.let { turnCursor = it.optInt("cursor", -1) }
         }
-        val res = try {
-            send(text)
-        } catch (e: Exception) {
-            postError("派发失败：${e.message ?: e.javaClass.simpleName}")
-            return
-        }
-        if (!res.ok) {
+        val res = sendWithRetry(text)
+        if (res == null || !res.ok) {
             // 404 = 钉住的那只会话被删了：明说，让上层清掉偏好回到默认落点
-            if (res.code == 404) postError("会话已失效（404），下次自动回到专属会话")
-            else postError("派发失败：${res.error()}")
+            if (res?.code == 404) postError("会话已失效（404），下次自动回到专属会话")
+            else if (res == null) postError("连不上电脑，检查网络")
+            else postError("没发出去，重试")
             return
         }
         sessionId = resolvedOf(res)
         adoptResolved(sessionId, adoptionBaseline())
         startPollFallback()
-        post { cb.onStatus("思考中…") }
+        status("正在想…")
         val deadline = System.currentTimeMillis() + 180_000
         while (!cancelled.get() && !ended.get() && System.currentTimeMillis() < deadline) {
             Thread.sleep(120)
@@ -337,48 +411,75 @@ class PetTurn(
         if (firstPollSent.compareAndSet(false, true)) {
             latency.mark("pollSent", "baseline cursor=-1")
         }
-        val base = try {
-            client.poll("", -1, 0)
-        } catch (e: Exception) {
-            postError("轮询对齐失败：${e.message ?: e.javaClass.simpleName}")
-            return
+        // 对齐基线这一步也扛断网：短重试之后还不行，就是真连不上了（后面派发只会更慢，直接说）
+        var base: PetClient.Result? = null
+        for (i in 1..3) {
+            base = try {
+                client.poll("", -1, 0)
+            } catch (_: Exception) {
+                null
+            }
+            if (base?.ok == true) break
+            if (i < 3) {
+                status(LINK_LOST_TEXT)
+                sleepQuietly(600L * i)
+            }
         }
-        if (!base.ok) {
-            postError("轮询对齐失败：${base.error()}")
+        if (base?.ok != true) {
+            postError("连不上电脑，检查网络")
             return
         }
         var cursor = base.json?.optInt("cursor", -1) ?: -1
         if (firstPollReturned.compareAndSet(false, true)) {
             latency.mark("pollReturned", "http=${base.code} cursor=$cursor")
         }
-        val res = try {
-            send(text)
-        } catch (e: Exception) {
-            postError("派发失败：${e.message ?: e.javaClass.simpleName}")
-            return
-        }
-        if (!res.ok) {
-            postError("派发失败：${res.error()}")
+        val res = sendWithRetry(text)
+        if (res == null || !res.ok) {
+            if (res == null) postError("连不上电脑，检查网络")
+            else postError("没发出去，重试")
             return
         }
         sessionId = resolvedOf(res)
         adoptResolved(sessionId, adoptionBaseline())
         if (sessionId.isBlank()) {
-            postError("派发失败：宿主没给会话")
+            postError("没发出去，重试")
             return
         }
-        post { cb.onStatus("思考中…（轮询）") }
+        status("正在想…")
         val deadline = System.currentTimeMillis() + 185_000
+        // 断线不再立刻判死：真断了超过 POLL_DOWN_MS 才收手，中途只更新那一行状态。
+        var downStreak = 0
+        var downAt = 0L
         while (!cancelled.get() && !ended.get() && System.currentTimeMillis() < deadline) {
             val r = try {
                 client.poll(sessionId, cursor, 20_000)
-            } catch (e: Exception) {
-                postError("轮询失败：${e.message ?: e.javaClass.simpleName}")
-                return
+            } catch (_: Exception) {
+                null
             }
-            if (!r.ok) {
-                postError("轮询失败：${r.error()}")
-                return
+            if (r == null || !r.ok) {
+                // 会话真没了（被删/宿主重启换了落点）重试多少次都没用：交给上层清指针
+                if (r?.code == 404) {
+                    postError("会话已失效（404），下次自动回到专属会话")
+                    return
+                }
+                downStreak += 1
+                if (downAt == 0L) {
+                    downAt = System.currentTimeMillis()
+                    linkLost("轮询断开，重连中（第 $downStreak 次）")
+                }
+                NetLog.record("GET /api/poll", r?.code ?: 0, 0, "断开第 $downStreak 次")
+                if (System.currentTimeMillis() - downAt > POLL_DOWN_MS) {
+                    postError(TIMEOUT_TEXT)
+                    return
+                }
+                sleepQuietly(minOf(1_000L * downStreak, 4_000L))
+                continue
+            }
+            if (downStreak > 0) {
+                dbg("轮询恢复，断了 ${System.currentTimeMillis() - downAt}ms")
+                downStreak = 0
+                downAt = 0L
+                status("正在想…")
             }
             val j = r.json ?: continue
             cursor = j.optInt("cursor", cursor)
@@ -615,6 +716,8 @@ class PetTurn(
                 val deadline = System.currentTimeMillis() + 180_000
                 var failed = 0
                 var failedSince = 0L
+                // 这一行状态只报一次断、一次恢复，别让兜底通道把界面刷成日志
+                var statusWasLost = false
                 var endSeenAtPoll = 0L
                 while (!cancelled.get() && !ended.get() && System.currentTimeMillis() < deadline) {
                     val resPoll = runCatching { client.poll(sid, cursor, 20_000) }.getOrNull()
@@ -622,7 +725,11 @@ class PetTurn(
                         // 以前是「连挂三次就判死」：Wi-Fi↔移动网切那几秒正好三次，
                         // 用户白丢一轮，看到的就是「接收失败」。现在要求「真断了 20 秒」才收。
                         failed += 1
-                        if (failedSince == 0L) failedSince = System.currentTimeMillis()
+                        if (failedSince == 0L) {
+                            failedSince = System.currentTimeMillis()
+                            statusWasLost = true
+                            linkLost("轮询兜底断开，重连中")
+                        }
                         if (failed >= 3 && System.currentTimeMillis() - failedSince > 20_000) {
                             postError("没收到回复，重试")
                             break
@@ -632,6 +739,10 @@ class PetTurn(
                     }
                     failed = 0
                     failedSince = 0L
+                    if (statusWasLost) {
+                        statusWasLost = false
+                        status("已连上")
+                    }
                     val json = resPoll.json ?: return@Thread
                     val frames = json.optJSONArray("frames")
                     if (frames == null || frames.length() == 0) {
@@ -756,5 +867,21 @@ class PetTurn(
 
         /** 超过这个时间还没收到结束信号：只给用户一句能懂的提示，不报内部帧名。 */
         const val TIMEOUT_TEXT = "电脑那边没回，再发一次"
+
+        /* ---------------- 弱网自愈 ---------------- */
+
+        /** 开流前探路最多试几次、总共最多花多久：够跨过「切网那几秒」，又不让人干等。 */
+        const val PREFLIGHT_TRIES = 3
+        const val PREFLIGHT_BUDGET_MS = 8_000L
+
+        /** 派发重试次数：同一个 requestId，重试不会在电脑上多开一轮。 */
+        const val DISPATCH_TRIES = 3
+
+        /** 轮询连续断开超过这么久才算真断（期间自动重连，界面只留一行状态）。 */
+        const val POLL_DOWN_MS = 30_000L
+
+        /** 界面那一行状态：说人话，不写重试策略、不写内部名词。 */
+        const val LINK_LOST_TEXT = "信号不好，正在重连…"
+        const val SEND_RETRY_TEXT = "发送没成功，重试中…"
     }
 }

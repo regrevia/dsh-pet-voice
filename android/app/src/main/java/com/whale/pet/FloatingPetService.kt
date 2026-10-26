@@ -97,6 +97,10 @@ class FloatingPetService : Service() {
     private var listenStartedAt = 0L
     /** 服务在后台的起始时刻（0 = 前台），连续对话时每 10s 查一次，超 60s 停麦。 */
     private var bgSince = 0L
+    /** 这一次开麦的时刻：8s 内一直没人声就回待机（0 = 没开麦）。 */
+    private var autoListenSince = 0L
+    /** 这一串连续对话里已经自动续上的轮数；满 MAX_AUTO_ROUNDS 就停，别自己跟自己聊。 */
+    private var autoRounds = 0
     private var turn: PetTurn? = null
     private var lastMouth = -1f
 
@@ -248,6 +252,8 @@ class FloatingPetService : Service() {
                 setPetVisible(true)
                 applyDisplayMode()
             } else {
+                // 用户收起小人（含打开本 App）：立刻结束自动重听，且不偷偷把麦克风再抢回来
+                stopContinuous("收起", resumeWake = false)
                 stopHomeWatch()
                 setPetVisible(false)
             }
@@ -899,7 +905,11 @@ class FloatingPetService : Service() {
         }
         continuous = true
         emptyRounds = 0
+        // 用户自己开口 = 一串新的连续对话：自动续听轮数和 8s 计时都从头算
+        autoRounds = 0
+        autoListenSince = 0L
         main.removeCallbacks(resumeListen)
+        main.removeCallbacks(noVoiceWatch)
         startBgWatch()
         turn?.cancel()
         tts.stopAll()
@@ -928,9 +938,12 @@ class FloatingPetService : Service() {
             scheduleResume(150)
             return
         }
+        // 自动重听时唤醒引擎可能刚被系统重新拉起过：它攥着麦克风时 AudioRecord 常常起不来
+        wake.stop()
         if (recorder.start()) {
             pttActive = true
             listenStartedAt = SystemClock.elapsedRealtime()
+            armNoVoiceWatch()
             setMode("listening")
             say("")
             updateNotification("在听 · 说完停一下或再点我")
@@ -949,7 +962,8 @@ class FloatingPetService : Service() {
         } else {
             updateNotification("麦克风打不开 · 点我再试")
             say("麦克风好像被占着，等一下再点我")
-            toIdle()
+            // 自动重听里起不来就不再自己攒重试：退出连续对话，把唤醒词还回去
+            if (continuous) stopContinuous("麦克风打不开") else toIdle()
         }
     }
 
@@ -962,6 +976,13 @@ class FloatingPetService : Service() {
         val wav = recorder.stop()
         val heard = recorder.heardSpeech
         val listenedMs = if (listenStartedAt > 0L) SystemClock.elapsedRealtime() - listenStartedAt else 0L
+        // 全程没人声（录音自己按静音收的尾）：6s 静音送去识别没有意义，
+        // 先别判失败——8s 到点由 noVoiceWatch 统一回待机并还回唤醒词。
+        if (!heard && continuous && autoListenSince > 0L) {
+            logVad(listenedMs, heard, 0, false)
+            updateNotification(getString(R.string.notif_text))
+            return
+        }
         if (wav == null) {
             logVad(listenedMs, heard, 0, false)
             updateNotification("没听到声音 · 点我再说")
@@ -970,6 +991,9 @@ class FloatingPetService : Service() {
         }
         setMode("thinking")
         updateNotification("在想…")
+        // 有人开口了：8s 没人声的看门狗到此为止，后面交给正常的一轮对话
+        main.removeCallbacks(noVoiceWatch)
+        autoListenSince = 0L
         Thread({
             var res: PetClient.Result? = null
             var err: String? = null
@@ -1135,6 +1159,9 @@ class FloatingPetService : Service() {
         updateNotification("听到「${hit.word}」")
         continuous = true
         emptyRounds = 0
+        autoRounds = 0
+        autoListenSince = 0L
+        main.removeCallbacks(noVoiceWatch)
         startBgWatch()
         if (hit.rest.isNotBlank()) beginTurn(hit.rest) else startPtt()
     }
@@ -1176,6 +1203,9 @@ class FloatingPetService : Service() {
         firstSentenceAt = 0L
         firstSoundLogged = false
         val gen = commandGen
+        // 进入一轮正经回复：自动重听的 8s 看门狗先撤掉（等 afterReply 再重新开麦时再数）
+        main.removeCallbacks(noVoiceWatch)
+        autoListenSince = 0L
         setMode("thinking")
         say("")
         updateNotification("在想…")
@@ -1373,6 +1403,13 @@ class FloatingPetService : Service() {
             return
         }
         if (continuous && cfg.ready) {
+            if (autoRounds >= MAX_AUTO_ROUNDS) {
+                // 连着自动聊满上限就收手：再往下就是自己跟自己说话了
+                Log.i("PetVad", "连续自动对话已达 $MAX_AUTO_ROUNDS 轮，回待机")
+                stopContinuous("连续 $MAX_AUTO_ROUNDS 轮")
+                return
+            }
+            autoRounds++
             scheduleResume(200)
         } else {
             toIdle()
@@ -1391,10 +1428,39 @@ class FloatingPetService : Service() {
         afterReply()
     }
 
+    /**
+     * 自动重听的开麦看门狗：8s 内一直没人声就回待机，把唤醒词还回去。
+     *
+     * 有人声时让位给录音自己的静音 VAD（它说了算）：那样才是「说完 → 识别 → 下一轮」。
+     * 只在「开麦 8s 一个字的动静都没有」时由这里收尾，避免服务一遍遍自己开麦。
+     */
+    private val noVoiceWatch = Runnable {
+        if (destroyed || !continuous) return@Runnable
+        if (turnActive || speaking || tts.busy) return@Runnable
+        if (pttActive && recorder.heardSpeech) return@Runnable
+        Log.i("PetVad", "自动重听 ${NO_VOICE_MS}ms 没人声，回待机")
+        NetLog.record("/api/asr", 200, 0L, "vad 自动重听没人声")
+        stopContinuous("没人声")
+    }
+
+    /** 每次开麦重新数 8s：一串连续对话里每一轮都该有完整的一次机会。 */
+    private fun armNoVoiceWatch() {
+        main.removeCallbacks(noVoiceWatch)
+        if (!continuous) {
+            autoListenSince = 0L
+            return
+        }
+        autoListenSince = SystemClock.elapsedRealtime()
+        main.postDelayed(noVoiceWatch, NO_VOICE_MS)
+    }
+
     private val resumeListen = Runnable {
         if (destroyed) return@Runnable
         if (!continuous || !cfg.ready) {
             continuous = false
+            autoRounds = 0
+            autoListenSince = 0L
+            main.removeCallbacks(noVoiceWatch)
             toIdle()
             return@Runnable
         }
@@ -1410,13 +1476,20 @@ class FloatingPetService : Service() {
         main.postDelayed(resumeListen, delayMs)
     }
 
-    /** 退出连续对话：停麦、停定时器、回待机（idle 就是四态里的「退出」）。 */
-    private fun stopContinuous(reason: String) {
+    /**
+     * 退出连续对话：停麦、停定时器、回待机（idle 就是四态里的「退出」）。
+     *
+     * `resumeWake = false`：用户自己按收起/暂停时不要偷偷把麦克风再抢回来。
+     */
+    private fun stopContinuous(reason: String, resumeWake: Boolean = true) {
         if (!continuous) return
         continuous = false
         emptyRounds = 0
+        autoRounds = 0
+        autoListenSince = 0L
         bgSince = 0L
         main.removeCallbacks(resumeListen)
+        main.removeCallbacks(noVoiceWatch)
         main.removeCallbacks(bgWatch)
         if (pttActive) {
             pttActive = false
@@ -1432,7 +1505,7 @@ class FloatingPetService : Service() {
         setMode("idle")
         setMouth(0f)
         updateNotification(getString(R.string.notif_text))
-        maybeStartWake()
+        if (resumeWake) maybeStartWake() else wake.stop()
     }
 
     /** 一轮空识别：第一次留在 listening（还能再说一次），第二次退出到 idle 不亮麦。 */
@@ -1517,6 +1590,11 @@ class FloatingPetService : Service() {
     }
 
     private fun maybeStartWake() {
+        // 服务在收尾（onDestroy 里也会走到这）：别在最后再起一次麦克风
+        if (destroyed) {
+            wake.stop()
+            return
+        }
         if (!cfg.wakeEnabled || !cfg.ready) {
             wake.stop()
             return
@@ -1733,6 +1811,12 @@ class FloatingPetService : Service() {
 
         /** home 模式看前台应用的间隔：切回桌面 1.5s 内必须回来。 */
         private const val HOME_POLL_MS = 1200L
+
+        /** 自动重听里这么久一直没人声就回待机（不再自己接着开麦）。 */
+        private const val NO_VOICE_MS = 8_000L
+
+        /** 连续自动重听最多几轮：到此为止，最后一轮回完就回待机。 */
+        private const val MAX_AUTO_ROUNDS = 6
 
         private const val CHANNEL_ID = "pet_listen"
         private const val NOTIF_ID = 4101

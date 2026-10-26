@@ -38,6 +38,7 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.LinkedHashSet
 import java.util.Locale
 
 /**
@@ -62,8 +63,15 @@ class HistoryActivity : Activity() {
 
         /** 发出去之前先把长边缩到这个像素以内，再压成 JPEG。 */
         const val SEND_IMAGE_MAX_PX = 1600
-        /** 页面开着时多久问一次「电脑上还是那只对话吗」。 */
+        /** 页面开着时多久核一次「这只对话还在不在、叫什么」（不跟电脑切）。 */
         const val HOST_WATCH_MS = 20_000L
+
+        /** 聊天里能看的图：跟宿主 /api/file 的白名单一致。 */
+        val IMAGE_EXT = setOf("jpg", "jpeg", "png", "webp", "gif")
+        /** markdown 图片 `![alt](/abs/path)`。 */
+        val MARKDOWN_IMG = Regex("!\\[[^]]*]\\(\\s*<?([^)\\s>]+)")
+        /** 正文里的裸绝对路径（含 `[图片] /abs/path` 这种宿主回显）。 */
+        val ABS_IMG = Regex("/[\\w\\u4e00-\\u9fa5 .\\-+/@]+?\\.(?:jpe?g|png|webp|gif)", RegexOption.IGNORE_CASE)
     }
 
 
@@ -101,11 +109,10 @@ class HistoryActivity : Activity() {
     private var lastSent = ""
     /** 上一次带出去的图片路径：重发要跟着一起重发。 */
     private var lastAttachment = ""
+    /** 带着这张图的那条气泡是谁（时间戳）：只给那一条挂缩略图，后面的文字行别跟着沾。 */
+    private var lastAttachmentTs = 0L
     /** 屏幕上这只对话的名字（宿主说叫什么就叫什么，查不到就空着）。 */
     private var liveSessionTitle = ""
-    /** 桌面端换到别的对话了：给一行提醒，点一下这边跟过去。空 = 不用提示。 */
-    private var offerId = ""
-    private var offerTitle = ""
     private var syncing = false
     private var tts: TtsPlayer? = null
     private var render: ChatRender? = null
@@ -132,13 +139,11 @@ class HistoryActivity : Activity() {
     private data class Sess(val id: String, val title: String, val at: Long)
 
     private sealed class ChatRow {
-        data class Me(val text: String) : ChatRow()
+        data class Me(val text: String, val ts: Long = 0L) : ChatRow()
         data class Pet(val text: String, val rich: Boolean) : ChatRow()
         data class Live(val text: String) : ChatRow()
         /** 居中灰字提示（换过会话之类），不算谁说的话。 */
         data class Note(val text: String) : ChatRow()
-        /** 电脑上换到别的对话去了：一行可点的提醒，点了这边就跟过去（不落库，不污染历史）。 */
-        data class Offer(val id: String, val title: String) : ChatRow()
     }
 
     private sealed class PickerRow {
@@ -284,7 +289,7 @@ class HistoryActivity : Activity() {
         refreshHeader()
         reload()
         syncSession()
-        // 页面开着的时候电脑上换了会话，也要能看见（20 秒一次，够快也不费电）
+        // 页面开着的时候核一下这只还在不在、名字对不对（20 秒一次，够快也不费电）
         ui.removeCallbacks(hostWatch)
         ui.postDelayed(hostWatch, HOST_WATCH_MS)
     }
@@ -370,7 +375,6 @@ class HistoryActivity : Activity() {
         val target = state.optString("dispatchTarget").orEmpty()
         val current = state.optJSONObject("current")
         val hostId = target.ifBlank { current?.optString("id").orEmpty() }
-        watchHostCurrent(state, current)
         val mine = PetSettings.chatSession(this)
         val shown = mine.ifBlank { hostId }
         val title = titleOf(state, shown)
@@ -382,73 +386,6 @@ class HistoryActivity : Activity() {
         if (mine.isBlank() && hostId.isNotBlank()) PetSettings.saveChatSession(this, hostId)
         // 最近会话表里查不到名字（太老、掉出列表）：单独问这只一句，只补标题
         if (title.isBlank() && shown.isNotBlank()) syncTitle(shown)
-    }
-
-    /**
-     * 电脑上开着的那只对话，和上次看到的不一样 = 用户在桌面端换过会话。
-     *
-     * 不自动把这边拽过去：App 钉的会话是用户在这边选的，被悄悄改掉更糟。只在对话末尾
-     * 留一行可点的提醒，点了才跟。识别用「上次看到的是哪只」，所以不会每次打开都唠叨。
-     */
-    private fun watchHostCurrent(state: JSONObject, current: JSONObject?) {
-        val id = current?.optString("id").orEmpty()
-        if (id.isBlank()) return
-        // 名字以会话表里那份为准（current 上常常还没有标题）；表里也没有就去问这只一句，
-        // 先按通用的话显示，名字回来再换。宁可不显示 id，也不把一串编号糊到脸上。
-        val known = titleOf(state, id)
-        if (known.isBlank()) refreshOfferTitle(id)
-        val title = niceTitle(known).ifBlank { "另一只对话" }
-        val seen = PetSettings.hostCurrentSeen(this)
-        val pin = PetSettings.chatSession(this)
-        val changed = seen.isNotBlank() && seen != id
-        if (seen != id) PetSettings.saveHostCurrentSeen(this, id)
-        if (id == pin) {
-            // 又回到这边钉的那只：提醒作废
-            if (offerId.isNotBlank()) {
-                offerId = ""
-                offerTitle = ""
-                reload()
-            }
-            return
-        }
-        if (changed && offerId != id) {
-            offerId = id
-            offerTitle = title
-            reload()
-        }
-    }
-
-    /** 会话表里没这只的名字：单独问一句，回来再刷新那行提醒。 */
-    private fun refreshOfferTitle(id: String) {
-        val client = PetClient { PetSettings.load(this) }
-        Thread({
-            val title = try {
-                client.sessionInfo(id).json?.optJSONObject("session")?.optString("title").orEmpty()
-            } catch (_: Exception) {
-                ""
-            }
-            if (title.isBlank()) return@Thread
-            runOnUiThread {
-                if (!isFinishing && !isDestroyed && offerId == id && niceTitle(title) != offerTitle) {
-                    offerTitle = niceTitle(title)
-                    reload()
-                }
-            }
-        }, "pet-offer-title").apply { isDaemon = true }.start()
-    }
-
-    /** 跟到电脑上现在开着的那只：换指针、清提醒，从现在起这句窗口就对上了。 */
-    private fun followHostCurrent() {
-        val id = offerId
-        if (id.isBlank()) return
-        val title = offerTitle
-        PetSettings.saveChatSession(this, id)
-        offerId = ""
-        offerTitle = ""
-        liveSessionTitle = title
-        refreshHeader()
-        reload()
-        syncSession()
     }
 
     /**
@@ -493,7 +430,8 @@ class HistoryActivity : Activity() {
     /**
      * 这一问实际落在宿主的哪只上（[PetTurn] 从回执里读出来的）。
      *
-     * 和本地钉的不一样 = 钉的那只不在了，宿主把它换掉了：跟过去、存下来、留一行提示。
+     * 和本地钉的不一样 = 钉的那只不在了，宿主给了新的落点：存下来、留一行提示。
+     * 电脑上切到哪只不影响这边——绑定只认 App 里选的那只。
      */
     private fun onSessionResolved(id: String) {
         if (id.isBlank()) return
@@ -518,7 +456,7 @@ class HistoryActivity : Activity() {
             if (item.isNote) {
                 rows.add(ChatRow.Note(item.text))
             } else if (item.isMe) {
-                rows.add(ChatRow.Me(item.text))
+                rows.add(ChatRow.Me(item.text, item.ts))
             } else {
                 // 只有最后一条助手消息挂富文本渲染器：历史长列表里塞多个 WebView 会卡
                 rows.add(ChatRow.Pet(item.text, rich = i == lastPet))
@@ -526,7 +464,6 @@ class HistoryActivity : Activity() {
         }
         val live = liveText
         if (live.isNotBlank()) rows.add(ChatRow.Live(live))
-        if (offerId.isNotBlank()) rows.add(ChatRow.Offer(offerId, offerTitle))
         adapter.rows = rows
         adapter.notifyDataSetChanged()
         empty.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
@@ -660,7 +597,7 @@ class HistoryActivity : Activity() {
         adapter.errorAction = null
         adapter.live = ""
         turnStart = System.currentTimeMillis()
-        PetHistory.append(this, PetHistory.ROLE_ME, shownAs.ifBlank { text })
+        lastAttachmentTs = PetHistory.append(this, PetHistory.ROLE_ME, shownAs.ifBlank { text })
         reload()
         typing.visibility = View.VISIBLE
         runBar.visibility = View.VISIBLE
@@ -1303,6 +1240,43 @@ class HistoryActivity : Activity() {
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
+    /** 路径看着像图（认扩展名，忽略 query 片段）。 */
+    private fun isImagePath(path: String): Boolean {
+        val clean = path.substringBefore('?').substringBefore('#')
+        return IMAGE_EXT.contains(clean.substringAfterLast('.', "").lowercase(Locale.ROOT))
+    }
+
+    /**
+     * 一条消息里能显示的图：markdown 图片、`[图片] /abs/path` 回显、正文里的裸绝对路径。
+     * [extra] 是本进程自己发图时记下的附件路径。
+     */
+    private fun imagePathsOf(raw: String, extra: List<String> = emptyList()): List<String> {
+        val out = LinkedHashSet<String>()
+        extra.filter { it.startsWith("/") && isImagePath(it) }.forEach { out.add(it) }
+        MARKDOWN_IMG.findAll(raw).forEach { m ->
+            val path = m.groupValues[1].trim().trim('<', '>')
+            if (path.startsWith("/") && isImagePath(path)) out.add(path)
+        }
+        ABS_IMG.findAll(raw).forEach { m ->
+            val path = m.value.trimEnd('.', ',', ')', ']', '。', '，')
+            if (isImagePath(path)) out.add(path)
+        }
+        return out.toList()
+    }
+
+    /**
+     * 回复里只有图（markdown 图 / 裸路径 / `[图片]` 回显），没有别的字。
+     * 这种行的正文由缩略图代替，气泡里不该再画一截空文本（渲染器会剩一个 `!`）。
+     */
+    private fun onlyImages(raw: String): Boolean {
+        if (imagePathsOf(raw).isEmpty()) return false
+        var rest = raw
+        MARKDOWN_IMG.findAll(raw).forEach { rest = rest.replace(it.value, "") }
+        ABS_IMG.findAll(raw).forEach { rest = rest.replace(it.value, "") }
+        rest = rest.replace("[图片]", "")
+        return rest.replace(Regex("[\\s\\p{P}]+"), "").isBlank()
+    }
+
     /** 本轮的流式文本（还没落库）。 */
     private var liveText: String
         get() = adapter.live
@@ -1321,13 +1295,9 @@ class HistoryActivity : Activity() {
         override fun getItem(position: Int): Any? = rows.getOrNull(position)
         override fun getItemId(position: Int): Long = position.toLong()
 
-        /** 点了一行：失败行 = 重发，换会话的提醒 = 跟过去，其余不动。 */
+        /** 点了一行：只有发送失败那行能点（重发），其余不动。 */
         fun tap(position: Int) {
-            if (position >= rows.size) {
-                (errorAction ?: onRetry)()
-                return
-            }
-            if (rows[position] is ChatRow.Offer) followHostCurrent()
+            if (position >= rows.size) (errorAction ?: onRetry)()
         }
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
@@ -1347,11 +1317,10 @@ class HistoryActivity : Activity() {
             }
             val row = rows[position]
             return when (row) {
-                is ChatRow.Me -> bindText(convertView, parent, row.text, mine = true)
+                is ChatRow.Me -> bindText(convertView, parent, row.text, mine = true, extraImages = meImages(position))
                 is ChatRow.Pet -> if (row.rich) bindRich(convertView, parent, row.text) else bindText(convertView, parent, row.text, mine = false)
                 is ChatRow.Live -> bindText(convertView, parent, row.text, mine = false)
                 is ChatRow.Note -> bindNote(convertView, parent, row.text)
-                is ChatRow.Offer -> bindOffer(convertView, parent, row.title)
             }
         }
 
@@ -1374,34 +1343,35 @@ class HistoryActivity : Activity() {
             return v
         }
 
-        /** 桌面端换过会话的那一行：一眼看得见，点一下就跟过去。 */
-        private fun bindOffer(convertView: View?, parent: ViewGroup, title: String): View {
-            val v = convertView ?: layoutInflater.inflate(R.layout.item_history, parent, false)
-            val bubble = v.findViewById<FrameLayout>(R.id.itemBubble)
-            val text = v.findViewById<TextView>(R.id.itemText)
-            if (bubble.childCount > 1) bubble.removeViews(1, bubble.childCount - 1)
-            (v as android.widget.LinearLayout).gravity = Gravity.CENTER
-            bubble.background = bubble(getColor(R.color.pet_hint_bg), 0)
-            bubble.setPadding(dp(12), dp(7), dp(12), dp(7))
-            text.visibility = View.VISIBLE
-            text.text = "电脑上切到了「" + title + "」· 跟过去"
-            text.textSize = 13f
-            text.setTextColor(getColor(R.color.pet_accent))
-            text.maxWidth = resources.displayMetrics.widthPixels - dp(56)
-            text.setOnLongClickListener(null)
-            plainRow(v)
-            text.setOnClickListener { followHostCurrent() }
-            return v
-        }
-
         /** 普通气泡不吃点击：复用行上可能还挂着别的监听。 */
         private fun plainRow(v: View) {
             v.setOnClickListener(null)
             v.isClickable = false
             v.findViewById<TextView>(R.id.itemText)?.setOnClickListener(null)
+            hideThumbs(v)
         }
 
-        private fun bindText(convertView: View?, parent: ViewGroup, raw: String, mine: Boolean): View {
+        private fun hideThumbs(v: View) {
+            val holder = v.findViewById<LinearLayout>(R.id.itemThumbs) ?: return
+            holder.removeAllViews()
+            holder.visibility = View.GONE
+        }
+
+        /** 自己刚发的图：只挂在带图那条气泡上；重启后没记住路径就不显示。 */
+        private fun meImages(position: Int): List<String> {
+            if (lastAttachment.isBlank()) return emptyList()
+            val row = rows.getOrNull(position) as? ChatRow.Me ?: return emptyList()
+            if (row.ts != lastAttachmentTs) return emptyList()
+            return listOf(lastAttachment)
+        }
+
+        private fun bindText(
+            convertView: View?,
+            parent: ViewGroup,
+            raw: String,
+            mine: Boolean,
+            extraImages: List<String> = emptyList(),
+        ): View {
             val v = convertView ?: layoutInflater.inflate(R.layout.item_history, parent, false)
             plainRow(v)
             val bubble = v.findViewById<FrameLayout>(R.id.itemBubble)
@@ -1425,13 +1395,68 @@ class HistoryActivity : Activity() {
             }
             // 列表复用：先把可能挂在上面的渲染器摘掉，别让 WebView 跟着旧行跑
             if (bubble.childCount > 1) bubble.removeViews(1, bubble.childCount - 1)
+            val thumbs = bindThumbs(v, raw, extraImages)
+            // 只有图的行：正文已经是缩略图了，别在气泡里剩一截空文本
+            if (!mine && thumbs > 0 && onlyImages(raw)) text.visibility = View.GONE
             text.setOnLongClickListener { copy(raw); true }
             return v
         }
 
+        /**
+         * 气泡下面放缩略图（宽 ≤ 200dp，高按比例、最高 260dp，超高就裁）。
+         * 行会复用：回调里用 tag + 是否还在容器里校验，旧请求回来不会贴到新行上。
+         *
+         * @return 放了几张
+         */
+        private fun bindThumbs(v: View, raw: String, extra: List<String>): Int {
+            val holder = v.findViewById<LinearLayout>(R.id.itemThumbs) ?: return 0
+            holder.removeAllViews()
+            val paths = imagePathsOf(raw, extra).take(4)
+            if (paths.isEmpty()) {
+                holder.visibility = View.GONE
+                return 0
+            }
+            holder.visibility = View.VISIBLE
+            val density = resources.displayMetrics.density
+            val width = minOf((200 * density).toInt(), (resources.displayMetrics.widthPixels - dp(24)) * 3 / 4)
+            val height = (width * 0.72f).toInt()
+            // 解码要够清楚：最长的边按「宽度 或 最大高度」取大值
+            val decodePx = maxOf(width, dp(260))
+            paths.forEachIndexed { i, path ->
+                val iv = android.widget.ImageView(this@HistoryActivity)
+                iv.layoutParams = LinearLayout.LayoutParams(width, height).apply { topMargin = dp(6) }
+                iv.scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+                iv.clipToOutline = true
+                iv.background = GradientDrawable().apply {
+                    // 圆角跟 itemBubble 一致（16dp），不另造一套视觉
+                    cornerRadius = 16f * resources.displayMetrics.density
+                    setColor(getColor(R.color.pet_hint_bg))
+                }
+                iv.tag = path
+                holder.addView(iv)
+                HostImage.peek(path, decodePx)?.let { bmp -> showThumb(iv, bmp, width) }
+                HostImage.load(this@HistoryActivity, path, decodePx) { bmp ->
+                    if (iv.tag != path || holder.indexOfChild(iv) < 0) return@load
+                    if (bmp != null) showThumb(iv, bmp, width)
+                }
+                iv.setOnClickListener { ImageActivity.open(this@HistoryActivity, paths, i) }
+            }
+            return paths.size
+        }
+
+        /** 固定宽度、按图比例给高度，超高裁掉中间一段（点开看整张）。 */
+        private fun showThumb(iv: android.widget.ImageView, bmp: Bitmap, maxWidth: Int) {
+            val w = maxWidth.coerceAtMost(bmp.width.coerceAtLeast(dp(48)))
+            val h = (w.toFloat() * bmp.height / bmp.width).toInt()
+                .coerceIn(dp(72), dp(260))
+            iv.layoutParams = LinearLayout.LayoutParams(w, h).apply { topMargin = dp(6) }
+            iv.setImageBitmap(bmp)
+        }
+
         private fun bindRich(convertView: View?, parent: ViewGroup, raw: String): View {
             val v = bindText(convertView, parent, raw, mine = false)
-            plainRow(v)
+            // 只有图的行：缩略图已经表达了，再渲染这段 markdown 只剩一个 `!`
+            if (onlyImages(raw)) return v
             val bubble = v.findViewById<FrameLayout>(R.id.itemBubble)
             val text = v.findViewById<TextView>(R.id.itemText)
             val renderer = render ?: return v
@@ -1463,6 +1488,7 @@ class HistoryActivity : Activity() {
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
             val v = convertView ?: layoutInflater.inflate(R.layout.item_history, parent, false)
+            v.findViewById<View>(R.id.itemThumbs)?.visibility = View.GONE
             val bubble = v.findViewById<FrameLayout>(R.id.itemBubble)
             val text = v.findViewById<TextView>(R.id.itemText)
             bubble.background = null

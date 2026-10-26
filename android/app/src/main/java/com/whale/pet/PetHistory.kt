@@ -31,19 +31,20 @@ object PetHistory {
 
     private val lock = Any()
 
-    /** 记住的是「哪只会话里的对话」：同一只会话的才显示在一起。 */
-    fun append(context: Context, role: String, text: String) {
+    /** 记住的是「哪只会话里的对话」：同一只会话的才显示在一起。@return 这条的时间戳 */
+    fun append(context: Context, role: String, text: String): Long {
         val t = text.trim()
-        if (t.isEmpty()) return
+        if (t.isEmpty()) return 0L
         // 单条太长（整段回复）截到 2000 字，避免 SharedPreferences 无限涨
         val body = if (t.length > 2000) t.take(1999) + "…" else t
+        val now = System.currentTimeMillis()
         synchronized(lock) {
             val arr = readArray(context)
             arr.put(
                 JSONObject()
                     .put("r", role)
                     .put("t", body)
-                    .put("ts", System.currentTimeMillis())
+                    .put("ts", now)
                     .put("s", PetSettings.chatSession(context)),
             )
             val trimmed = JSONArray()
@@ -51,6 +52,7 @@ object PetHistory {
             for (i in from until arr.length()) trimmed.put(arr.get(i))
             prefs(context).edit().putString(KEY, trimmed.toString()).apply()
         }
+        return now
     }
 
     /** 时间正序（最老在前），列表展示时最新在底部。 */

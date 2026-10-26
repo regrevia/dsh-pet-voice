@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -98,6 +98,48 @@ test('项目目录不可写时退到 fallbackDir，成功路径不丢', () => {
     chmodSync(base, 0o700)
     rmSync(base, { recursive: true, force: true })
     rmSync(fallback, { recursive: true, force: true })
+  }
+})
+
+test('项目是 git 仓库：.pet-uploads 写进本地 exclude，且不重复', () => {
+  const base = tempBase()
+  try {
+    mkdirSync(join(base, '.git', 'info'), { recursive: true })
+    writeFileSync(join(base, '.git', 'info', 'exclude'), '# 已有内容\n*.log\n')
+    saveUpload(base, 'image/png', PNG)
+    saveUpload(base, 'image/png', PNG)
+    const text = readFileSync(join(base, '.git', 'info', 'exclude'), 'utf8')
+    assert.match(text, /^# 已有内容$/m)
+    assert.match(text, /^\*\.log$/m)
+    // 只写一次，别每次上传都往用户文件里追加一行
+    assert.equal(text.split(/\r?\n/).filter((row) => row.trim() === '.pet-uploads/').length, 1)
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('worktree：.git 是文件时顺着 gitdir 写到真正的 git 目录', () => {
+  const base = tempBase()
+  const realGit = tempBase()
+  try {
+    writeFileSync(join(base, '.git'), `gitdir: ${realGit}\n`)
+    saveUpload(base, 'image/png', PNG)
+    assert.match(readFileSync(join(realGit, 'info', 'exclude'), 'utf8'), /^\.pet-uploads\/$/m)
+    assert.equal(existsSync(join(base, '.git', 'info')), false)
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+    rmSync(realGit, { recursive: true, force: true })
+  }
+})
+
+test('不是仓库：不建 .git，不写文件，图片照常落盘', () => {
+  const base = tempBase()
+  try {
+    const out = saveUpload(base, 'image/png', PNG)
+    assert.equal(out.ok, true)
+    assert.equal(existsSync(join(base, '.git')), false)
+  } finally {
+    rmSync(base, { recursive: true, force: true })
   }
 })
 

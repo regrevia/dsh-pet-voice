@@ -449,28 +449,29 @@ class PetClient(private val config: () -> PetConfig) {
         return conn
     }
 
-    /**
-     * 面板「已连上的手机」里显示的名字：厂商 + 机型（`Xiaomi Redmi K80 Pro`）。
-     * 走请求头而不是 UA 解析，国产 ROM 的 UA 常常只有 `Android` 或一串 Build 号。
-     */
-    private fun deviceName(): String {
-        val manu = Build.MANUFACTURER.orEmpty().trim()
-        val model = Build.MODEL.orEmpty().trim()
-        val name = when {
-            model.isBlank() -> manu.ifBlank { "Android" }
-            manu.isBlank() || model.startsWith(manu, true) -> model
-            else -> "$manu $model"
+    companion object {
+        /**
+         * 面板「已连上的手机」里显示的名字：厂商 + 机型（`Xiaomi Redmi K80 Pro`）。
+         * 走请求头而不是 UA 解析，国产 ROM 的 UA 常常只有 `Android` 或一串 Build 号。
+         */
+        fun deviceName(): String {
+            val manu = Build.MANUFACTURER.orEmpty().trim()
+            val model = Build.MODEL.orEmpty().trim()
+            val name = when {
+                model.isBlank() -> manu.ifBlank { "Android" }
+                manu.isBlank() || model.startsWith(manu, true) -> model
+                else -> "$manu $model"
+            }
+            return name.replace(Regex("\\s+"), " ").take(40)
         }
-        return name.replace(Regex("\\s+"), " ").take(40)
-    }
 
-    /** 同一台机器换 UA / 换 IP 也要认成同一台：用机型 + 系统指纹做稳定 id。 */
-    private fun deviceId(): String {
-        val seed = "${Build.MANUFACTURER}|${Build.MODEL}|${Build.FINGERPRINT}|${Build.DEVICE}"
-        val digest = java.security.MessageDigest.getInstance("SHA-1").digest(seed.toByteArray())
-        return digest.joinToString("") { "%02x".format(it.toInt() and 0xff) }.take(12)
+        /** 同一台机器换 UA / 换 IP 也要认成同一台：用机型 + 系统指纹做稳定 id。 */
+        fun deviceId(): String {
+            val seed = "${Build.MANUFACTURER}|${Build.MODEL}|${Build.FINGERPRINT}|${Build.DEVICE}"
+            val digest = java.security.MessageDigest.getInstance("SHA-1").digest(seed.toByteArray())
+            return digest.joinToString("") { "%02x".format(it.toInt() and 0xff) }.take(12)
+        }
     }
-
 }
 
 private fun String.toJsonOrNull(): JSONObject? = try {

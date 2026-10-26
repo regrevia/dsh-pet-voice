@@ -116,6 +116,13 @@
             android:theme="@style/AppTheme" />
 
         <activity
+            android:name=".ImageActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"
+            android:label="看图"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+
+        <activity
             android:name=".PermissionProxyActivity"
             android:excludeFromRecents="true"
             android:exported="false"

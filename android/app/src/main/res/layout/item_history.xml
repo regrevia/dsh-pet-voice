@@ -10,19 +10,35 @@
     android:paddingEnd="12dp"
     android:paddingBottom="3dp">
 
-    <!-- 气泡本体：纯文字和富文本渲染器（WebView）都挂这一层，圆角/底色只在代码里定一次 -->
-    <FrameLayout
-        android:id="@+id/itemBubble"
+    <!-- 气泡 + 下面的缩略图：竖着排，气泡本体仍是 FrameLayout（WebView 挂第 1 层） -->
+    <LinearLayout
+        android:id="@+id/itemCell"
         android:layout_width="wrap_content"
-        android:layout_height="wrap_content">
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
 
-        <TextView
-            android:id="@+id/itemText"
+        <!-- 气泡本体：纯文字和富文本渲染器（WebView）都挂这一层，圆角/底色只在代码里定一次 -->
+        <FrameLayout
+            android:id="@+id/itemBubble"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content">
+
+            <TextView
+                android:id="@+id/itemText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:lineSpacingExtra="3dp"
+                android:maxWidth="292dp"
+                android:textColor="@color/pet_text"
+                android:textSize="15sp" />
+        </FrameLayout>
+
+        <!-- 消息里带的图：缩略图竖排，默认不占位 -->
+        <LinearLayout
+            android:id="@+id/itemThumbs"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:lineSpacingExtra="3dp"
-            android:maxWidth="292dp"
-            android:textColor="@color/pet_text"
-            android:textSize="15sp" />
-    </FrameLayout>
+            android:orientation="vertical"
+            android:visibility="gone" />
+    </LinearLayout>
 </LinearLayout>

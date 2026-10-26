@@ -379,6 +379,8 @@ const API_ROUTES = [
   'tts',
   'tts/voices',
   'say',
+  // 聊天里看图：把电脑上的图片字节发给 App（GET/HEAD ?path=绝对路径）
+  'file',
   // 本机语音识别 / APK 更新通道（契约见 handlers 上的注释）
   'asr',
   'diag',
@@ -1686,6 +1688,14 @@ export const __dispatchInternals = {
 }
 
 /** 图片上传 / 派发附图（单测用，见 plugins/dsh-pet-voice/test/upload.test.mjs）。 */
+/** 读图路由的单测入口（见 test/file.test.mjs）。 */
+export const __fileInternals = {
+  imageContentType,
+  readImageFile,
+  handleFile,
+  MAX_IMAGE_BYTES: UPLOAD_MAX_BYTES,
+}
+
 export const __uploadInternals = {
   extFor,
   uploadDir,
@@ -1753,6 +1763,44 @@ function uploadNameHint(raw) {
 }
 
 /**
+ * 项目里的 `.pet-uploads/` 不该出现在 `git status` 里。
+ *
+ * 只写仓库**本地**的 `.git/info/exclude`：不碰 .gitignore（那会被提交、会改别人的仓库），
+ * worktree/submodule 的 `.git` 是个文件，顺着 `gitdir:` 一行找真正的 git 目录。
+ * 任何一步失败都静默：图片存下来比忽略规则重要。
+ */
+function ensureUploadIgnored(base) {
+  try {
+    const root = String(base ?? '').trim()
+    if (!root) return
+    const gitPath = join(root, '.git')
+    const st = statSync(gitPath, { throwIfNoEntry: false })
+    if (!st) return
+    let gitDir = gitPath
+    if (st.isFile()) {
+      const text = readFileSync(gitPath, 'utf8')
+      const line = /^gitdir:\s*(.+)$/m.exec(text)?.[1]?.trim()
+      if (!line) return
+      gitDir = isAbsolute(line) ? line : join(root, line)
+    }
+    const excludePath = join(gitDir, 'info', 'exclude')
+    let current = ''
+    try {
+      current = readFileSync(excludePath, 'utf8')
+    } catch {
+      /* 还没建过 exclude：下面补 */
+    }
+    const row = `${UPLOAD_DIR_NAME}/`
+    if (current.split(/\r?\n/).some((item) => item.trim() === row)) return
+    mkdirSync(join(gitDir, 'info'), { recursive: true })
+    const head = current && !current.endsWith('\n') ? `${current}\n` : current
+    writeFileSync(excludePath, `${head}${row}\n`)
+  } catch (error) {
+    LOG('写 git exclude 失败：', error?.message ?? error)
+  }
+}
+
+/**
  * 保存一张图片（Buffer）。返回 {ok:true, path, name, bytes} 或 {ok:false, status, error}。
  * 纯 IO，不碰 req/res：HTTP 层和单测共用同一份逻辑。
  */
@@ -1771,14 +1819,18 @@ function saveUpload(base, contentType, bytes, opts = {}) {
   const fallback = String(opts.fallbackDir ?? '').trim()
   if (fallback && fallback !== dirs[0]) dirs.push(fallback)
   let lastError = null
+  let first = true
   for (const dir of dirs) {
     try {
       mkdirSync(dir, { recursive: true })
+      // 落在项目里的那份：顺手让 git 本地忽略这个目录，别污染用户的 git status。
+      if (first && base) ensureUploadIgnored(base)
       writeFileSync(join(dir, name), data)
       return { ok: true, path: join(dir, name), name, bytes: data.length }
     } catch (error) {
       lastError = error
     }
+    first = false
   }
   LOG('图片落盘失败：', lastError?.message ?? lastError)
   return { ok: false, status: 500, error: '图片没存下来' }
@@ -1865,6 +1917,85 @@ async function handleUpload(ctx, req, res, url) {
   if (!saved.ok) return sendJson(res, saved.status, { ok: false, error: saved.error })
   netLog('upload', { bytes: saved.bytes, path: saved.path })
   return sendJson(res, 200, { ok: true, path: saved.path, name: saved.name, bytes: saved.bytes })
+}
+
+/**
+ * GET/HEAD /pet-voice/api/file?path=<绝对路径>
+ *
+ * 手机聊天里要直接看到电脑上的图：把字节按原样发回去，只认四种图片扩展名。
+ * 纯 IO 与 HTTP 分两层：readImageFile 单测直接用，handleFile 只做响应头/HEAD。
+ */
+const IMAGE_FILE_TYPES = {
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+}
+
+/** 扩展名 → content-type；不在白名单返回空串（调用方据此回 415）。 */
+function imageContentType(filePath) {
+  return IMAGE_FILE_TYPES[extname(String(filePath ?? '')).toLowerCase()] ?? ''
+}
+
+/**
+ * 读一张图片。返回 {ok:true, body, type, bytes} 或 {ok:false, status, error}。
+ * 路径必须是绝对路径、不含 `..`；文件必须存在且是普通文件、≤ 12 MB。
+ */
+function readImageFile(rawPath) {
+  const path = String(rawPath ?? '').trim()
+  if (!path) return { ok: false, status: 400, error: 'path 为空' }
+  if (!isAbsolute(path)) return { ok: false, status: 400, error: 'path 必须是绝对路径' }
+  // 不做目录穿越拼接：直接读用户给的路径，但带 `..` 段的一律拒。
+  if (path.split(/[\\/]/).includes('..')) return { ok: false, status: 400, error: 'path 不能包含 ..' }
+  const type = imageContentType(path)
+  if (!type) return { ok: false, status: 415, error: `只支持 ${UPLOAD_EXT_LIST} 图片` }
+  let st
+  try {
+    st = statSync(path)
+  } catch {
+    return { ok: false, status: 404, error: '图片不存在' }
+  }
+  if (!st.isFile()) return { ok: false, status: 404, error: '不是普通文件' }
+  if (st.size > UPLOAD_MAX_BYTES) return { ok: false, status: 413, error: '图片太大（上限 12 MB）' }
+  let body
+  try {
+    body = readFileSync(path)
+  } catch {
+    return { ok: false, status: 404, error: '图片读不到' }
+  }
+  if (body.length > UPLOAD_MAX_BYTES) return { ok: false, status: 413, error: '图片太大（上限 12 MB）' }
+  return { ok: true, body, type, bytes: body.length }
+}
+
+/** HTTP 层：鉴权已在 apiHandler 里做过；这里只落响应。HEAD 不回 body。 */
+function handleFile(req, res, url) {
+  const out = readImageFile(url.searchParams.get('path') ?? '')
+  if (!out.ok) return sendJson(res, out.status, { ok: false, error: out.error })
+  const headers = {
+    'content-type': out.type,
+    'content-length': out.bytes,
+    // 图片内容按绝对路径缓存 10 分钟：同一句话反复上屏时别再抓一遍。
+    'cache-control': 'private, max-age=600',
+    'x-content-type-options': 'nosniff',
+  }
+  if (!writeHead(res, 200, headers)) return false
+  if (String(req.method ?? '').toUpperCase() === 'HEAD') {
+    try {
+      res.end()
+      return true
+    } catch (error) {
+      LOG('写图片 HEAD 失败：', error?.message ?? error)
+      return false
+    }
+  }
+  try {
+    res.end(out.body)
+    return true
+  } catch (error) {
+    LOG('写图片失败：', error?.message ?? error)
+    return false
+  }
 }
 
 /** 项目里的上一只会话；找不到就新建一个。 */
@@ -4058,6 +4189,11 @@ export function apply(ctx, config) {
           LOG('客户端：', line.slice(0, 300))
         }
         return sendJson(res, 200, { ok: true })
+      }
+
+      // 聊天里看图：图片字节直出（GET 取 body / HEAD 只取头）
+      if (route === 'file' && (method === 'GET' || method === 'HEAD')) {
+        return handleFile(req, res, url)
       }
 
       if (route === 'state' && method === 'GET') {
