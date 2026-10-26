@@ -548,19 +548,25 @@ async function main() {
   const sha256 = await sha256File(apkPath)
   const size = stat.size
 
+  // 宿主兜底目录（~/.dsh/pet-voice/update）只跟「推广」走：没推广的版本在哪儿都拿不到，
+  // 连自己绑定的设备也一样。否则存档就等于对自家设备提前放版。
+  // --no-github（离线自测）没有别的出口，才退回只写本地目录。
+  const localFallback = options.promote || !options.github
   let copied = false
   let same = false
-  try {
-    same = statSync(targetPath).size === size && (await sha256File(targetPath)) === sha256
-  } catch {
-    same = false
-  }
-  if (!same) {
-    // 先写临时名再 rename：手机正在下载时重发同一版，不会看到被截断的文件。
-    const tmp = `${targetPath}.tmp-${process.pid}`
-    copyFileSync(apkPath, tmp)
-    renameSync(tmp, targetPath)
-    copied = true
+  if (localFallback) {
+    try {
+      same = statSync(targetPath).size === size && (await sha256File(targetPath)) === sha256
+    } catch {
+      same = false
+    }
+    if (!same) {
+      // 先写临时名再 rename：手机正在下载时重发同一版，不会看到被截断的文件。
+      const tmp = `${targetPath}.tmp-${process.pid}`
+      copyFileSync(apkPath, tmp)
+      renameSync(tmp, targetPath)
+      copied = true
+    }
   }
 
   const meta = {
@@ -574,12 +580,14 @@ async function main() {
     ...(options.minPlugin ? { minPlugin: options.minPlugin } : {}),
     publishedAt: new Date().toISOString(),
   }
-  writeJsonAtomic(join(options.dir, 'latest.json'), meta)
+  if (localFallback) writeJsonAtomic(join(options.dir, 'latest.json'), meta)
 
   console.log(`✓ 版本 ${versionName}（versionCode ${versionCode}）${via ? `· 来源 ${via}` : ''}`)
-  console.log(copied ? `✓ 已复制 → ${targetPath}` : `✓ 已在发布目录（内容一致，跳过复制）→ ${targetPath}`)
+  if (localFallback) {
+    console.log(copied ? `✓ 已复制 → ${targetPath}` : `✓ 已在发布目录（内容一致，跳过复制）→ ${targetPath}`)
+  }
   console.log(`✓ ${size} B · sha256 ${sha256}`)
-  console.log(`✓ 本地兜底 latest.json → ${join(options.dir, 'latest.json')}`)
+  if (localFallback) console.log(`✓ 本地兜底 latest.json → ${join(options.dir, 'latest.json')}`)
 
   if (options.github) {
     const tag = `v${versionName}`

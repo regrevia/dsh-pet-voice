@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { lanState } from './lan.mjs'
+import { publicState, publicUrl } from './public.mjs'
 import { join } from 'node:path'
 
 export const PANEL_DIR = join(homedir(), '.dsh/pet-voice')
@@ -252,14 +253,33 @@ function isPlaceholderUrl(value) {
   }
 }
 
+/** ssh 隧道自己的地址：旧版连上后会顺手写进 customUrl，不能让它冒充「自己的域名」。 */
+function selfTunnelOrigin() {
+  try {
+    return publicState().running ? new URL(publicUrl()).origin : ''
+  } catch {
+    return ''
+  }
+}
+
+function sameOrigin(a, b) {
+  try {
+    return Boolean(a) && Boolean(b) && new URL(a).origin === new URL(b).origin
+  } catch {
+    return false
+  }
+}
+
 function readPanelConfig() {
   const raw = readJson(CONFIG_PATH)
-  const customUrl = String(raw?.customUrl ?? '').trim()
+  const storedUrl = String(raw?.customUrl ?? '').trim()
+  const customUrl = sameOrigin(storedUrl, selfTunnelOrigin()) ? '' : storedUrl
   return {
     mode: MODES.includes(raw?.mode) ? raw.mode : DEFAULT_CONFIG.mode,
     customUrl: isHttpUrl(customUrl) && !isPlaceholderUrl(customUrl) ? customUrl : '',
     maxDevices: clampMaxDevices(raw?.maxDevices, DEFAULT_CONFIG.maxDevices),
-    voice: String(raw?.voice ?? '').trim(),
+    // 空值交给默认音色：下拉框不能空着，空着等于「看着能选、实际用的是另一把声音」。
+    voice: String(raw?.voice ?? '').trim() || DEFAULT_CONFIG.voice,
     wakeName: String(raw?.wakeName ?? DEFAULT_CONFIG.wakeName).trim(),
     persona: String(raw?.persona ?? '').trim().slice(0, 2000),
     maxWords: MAXWORDS_LEVELS.includes(String(raw?.maxWords ?? '').trim())
@@ -362,11 +382,15 @@ function pairingToken() {
 export function panelState({ origin, pairing } = {}) {
   const config = readPanelConfig()
   const source = pairing && typeof pairing === 'object' ? pairing : {}
+  // 「自己的服务器」两种来源：面板里连着的 ssh 反向隧道（地址是 ssh 那台机器的公网口），
+  // 或者外部隧道脚本留下的域名（cloudflared / 小爱）。谁在用给谁，都没在跑就是空。
+  const pub = publicState()
+  const serverUrl = pub.running && pub.url ? publicUrl() : ''
   const modes = [
     {
       id: 'server',
       label: '自己的服务器',
-      url: source.source === 'tunnel' ? String(source.publicBase ?? '').trim() : '',
+      url: serverUrl || (source.source === 'tunnel' ? String(source.publicBase ?? '').trim() : ''),
     },
     { id: 'lan', label: '同一个 Wi-Fi', url: lanBase(origin) },
     { id: 'domain', label: '自己的域名', url: config.customUrl },

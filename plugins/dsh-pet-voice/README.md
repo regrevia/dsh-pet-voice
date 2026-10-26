@@ -38,6 +38,17 @@ plugin_manager action=set_plugin target=include:dsh-pet-voice enabled=true
 装好后页面在 `ctx.webServer.getOrigin()` 下，本机就是
 `http://127.0.0.1:58686/pet-voice/`（端口按你的宿主实际值）。
 
+### 第一次装需要什么
+
+插件本体零额外依赖（宿主自带 Node 就能跑）。两样东西是**可选件**，不装也能用，只是功能少一块：
+
+| 能力 | 从哪来 | 装法 | 不装的后果 |
+|---|---|---|---|
+| 神经语音（音色） | 微软 edge-tts，免 key、免账号，联网直接合成 | `bash plugins/dsh-pet-voice/tts/setup.sh`（建 `~/.dsh/pet-voice/tts-venv`） | 面板「音色」下面会有一行提示；照样能打字对话，只是不出声 |
+| 本机识别（ASR） | openai-whisper 常驻进程，只监听回环 | `bash plugins/dsh-pet-voice/asr/setup.sh`（建 `~/.dsh/pet-voice/asr-venv`，torch 首次几 GB） | 默认走手机自己的语音识别，电脑端不做识别 |
+
+两个脚本都是幂等的，重复跑只检查不重装；venv 和模型都落在 `~/.dsh/pet-voice/`，不在仓库里，换目录不会丢。
+
 ### 手机怎么打开
 
 浏览器**只允许 https 或 localhost 使用麦克风**，所以手机必须走隧道：
@@ -111,7 +122,7 @@ https://xxx-xxx.trycloudflare.com/pet-voice/?k=<token>
 
 ### 语音识别（ASR）细节
 
-`asr/asr-worker.py` 是常驻的 openai-whisper 进程，只监听回环。默认模型 `large-v3-turbo`（1.5 GB，权重缓存在
+`asr/asr-worker.py` 是常驻的 openai-whisper 进程，只监听回环；没跑 `asr/setup.sh` 就不启动，识别在手机上做。默认模型 `large-v3-turbo`（1.5 GB，权重缓存在
 `~/.cache/whisper/`），`beam_size=5`：base 在中文上会稳定错字（「语音识别服务」→「余音时别服务」）并偶尔吐繁体，
 turbo 用同一批句子全对，只多花半秒。
 
@@ -147,8 +158,9 @@ node scripts/publish-apk.mjs --rollback 0.9.44
 ```
 
 更新通道优先级由高到低：CNB `latest` → 仓库 `update/latest.json`（jsDelivr → raw）→ 宿主这个
-`~/.dsh/pet-voice/update/latest.json`（相对地址兜底）。前两个只在 `--promote` 时变，所以「什么时候给用户」
-是人的决定，GitHub 上的每版存档都不会漏到用户那边。meta 带 `minPlugin`（`--min-plugin 0.1.8`）时，
+`~/.dsh/pet-voice/update/latest.json`（相对地址兜底）。三条都只在 `--promote` 时变，所以「什么时候给用户」
+是人的决定：GitHub 上的存档、宿主的兜底目录，都不会把没推广的版本漏出去——包括自家已经绑定的设备。
+兜底那条要令牌，只有扫过码的设备问得动，公开渠道的 meta 里也没有任何指向宿主的地址。meta 带 `minPlugin`（`--min-plugin 0.1.8`）时，
 App 发现本机插件版本更低就只提示「先更新插件」，不下载；插件版本随 `/api/state` 的 `pluginVersion` 上报。
 
 手机端：`更多 → 检查更新` → `下载并安装`。走的是 `PackageInstaller`（零 androidx 的代价），

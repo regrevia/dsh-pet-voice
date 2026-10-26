@@ -725,6 +725,8 @@ SERIAL=emulator-5554 PET_HOST=https://pet.example.com/pet-voice/ bash scripts/ve
 `--rollback 0.9.44` 把 CNB 固定入口指回某个已推广过的版本（那版的 meta 存在它自己的 Release 里）。
 
 App「检查更新」通道顺序：CNB → jsDelivr `update/latest.json` → raw.githubusercontent → 宿主 `/api/update`（兜底，相对地址）。
+宿主的 `~/.dsh/pet-voice/update/latest.json` 同样只在 `--promote` 时写：没推广的版本三条通道都取不到，
+自家已绑定的设备也一样（兜底接口要令牌，公开 meta 里没有指向宿主的地址）。
 meta 可带 `minPlugin`（`--min-plugin 0.1.8`）：本机插件版本更低时 App 只显示「先更新插件」，不下载。
 默认不带 = 不拿插件版本拦 App；只有 App 真用到新接口时才标。插件版本由 `/api/state` 的 `pluginVersion` 上报。
 
@@ -752,6 +754,7 @@ meta 可带 `minPlugin`（`--min-plugin 0.1.8`）：本机插件版本更低时 
 | 0.9.44 | 114 | 28.59 MB | `89e22596394987b9` | 配置页只留三种连法和人设；检查更新先看国内镜像（CNB 无数据才退 GitHub / 宿主） |
 | 0.9.45 | 115 | 28.59 MB | `b94d826304a1fc17` | 发版拆两步：GitHub 每版存档，`--promote` 才动 CNB `latest` 与仓库 `update/latest.json`；meta 支持 `minPlugin` 门槛。实测：GitHub 已发但未推广时，线上仍是上一版 |
 | 0.9.46 | 116 | 28.59 MB | `1881a867be41cc9d` | 门槛实测：CNB 写 `minPlugin 0.1.9` 时，插件 0.1.8 的机器只显示「先更新插件 0.1.9」不下载；改回无门槛后同一台机器检查更新 → 自动从 CNB 下载 30 MB 并装到 116，配对与气泡设置都保住 |
+| 0.9.47 | 117 | 29.98 MB | `9dd0b0968b206506` | 信任用户根证书（别人自建服务器只需把 CA 装进手机，不必重编 APK）；存档不再写宿主兜底目录，未推广的版本任何通道都取不到。实测：装 117 后检查更新 → 「已是最新」，线上仍是 116 |
 
 模拟器实测环境：`emulator-5554`，Android 11 / API 30（`sdk_gphone_arm64`），1080×2340。
 

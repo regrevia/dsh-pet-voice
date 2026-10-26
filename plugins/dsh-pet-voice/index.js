@@ -4230,7 +4230,7 @@ export function apply(ctx, config) {
       return sendJson(res, 503, {
         ok: false,
         error: '本机语音识别还没装好',
-        hint: `需要 ${ASR_PYTHON} 和 scripts/asr-worker.py（venv 里要有 openai-whisper）`,
+        hint: `可选：bash plugins/dsh-pet-voice/asr/setup.sh 装好本机识别（不装就走手机识别）`,
       })
     }
     // 请求侧不等满整个载入时间：15 s 还没好就先让 App 拿到回话，进程继续在后台载。
@@ -4431,7 +4431,12 @@ export function apply(ctx, config) {
     const route = reqUrl.pathname.slice(PANEL.length + 1).replace(/\/+$/, '')
     const method = String(req.method ?? 'GET').toUpperCase()
     const origin = ctx.webServer.getOrigin?.() ?? ''
-    const snapshot = async () => ({ ...(await panelState({ origin, pairing: await pairInfo(origin) })), pluginVersion: PLUGIN_VERSION })
+    const snapshot = async () => ({
+      ...(await panelState({ origin, pairing: await pairInfo(origin) })),
+      pluginVersion: PLUGIN_VERSION,
+      ttsReady: ttsReady(),
+      asrReady: asrReady(),
+    })
     try {
     // 面板：DSH 网页里那一页（配对码 / 设备 / 参数）。网页既没有也不该有手机令牌,
     // 门禁换成回环地址——只有本机打得开，公网侧永远 403。
@@ -4456,7 +4461,9 @@ export function apply(ctx, config) {
           const upstream = { host: originUrl.hostname, port: originUrl.port || (originUrl.protocol === 'https:' ? 443 : 80) }
           const got = await connectPublic({ upstream })
           try {
-            setPanelConfig({ mode: 'domain', customUrl: got.url })
+            // 隧道连上后选中「自己的服务器」：它和「自己的域名」是两条路，
+            // 前者地址由插件自己算（ssh 转到的那台机器），后者是用户手填的域名。
+            setPanelConfig({ mode: 'server' })
           } catch {
             /* 地址写不进去也让隧道保持连着，面板会显示状态 */
           }
@@ -5216,7 +5223,7 @@ export function apply(ctx, config) {
           running: Boolean(health?.ok),
           model: health?.model ?? ASR_MODEL,
           pid: health?.pid ?? null,
-          ...(ready ? {} : { hint: `需要 ${ASR_PYTHON} 和 scripts/asr-worker.py` }),
+          ...(ready ? {} : { hint: `可选：bash plugins/dsh-pet-voice/asr/setup.sh` }),
         })
       }
 
@@ -5433,7 +5440,7 @@ async function selfcheck(ctx, url, state) {
           label: 'asr.whisper',
           ok: false,
           skipped: true,
-          error: `可选：${ASR_PYTHON} + scripts/asr-worker.py 装好后启用本机识别`,
+          error: `可选：bash plugins/dsh-pet-voice/asr/setup.sh 装好后启用本机识别`,
         },
   )
   const updateMeta = readLatestUpdate()

@@ -199,7 +199,7 @@ window.__ModuleLoader__.load({
     /** 选中的连法还没有地址时，二维码位置说什么。 */
     const MODE_HINT = {
       server: '服务器还没连上。',
-      lan: '这台电脑现在没有局域网地址。',
+      lan: '手机得和这台电脑同一个 Wi-Fi，电脑防火墙放行才连得上。',
       domain: '填好域名，二维码就出来。',
     }
 
@@ -585,6 +585,13 @@ window.__ModuleLoader__.load({
               placeholder: '大肥鱼',
             }),
           ),
+          state.ttsReady === false
+            ? h(
+                'div',
+                { style: { ...S.row, color: 'var(--dsw-alias-state-warning-primary, #b7791f)', fontSize: 12 } },
+                '这台电脑还没装语音：在仓库里跑 bash plugins/dsh-pet-voice/tts/setup.sh，装完刷新这一页。',
+              )
+            : null,
           paramRow(
             '音色',
             h(

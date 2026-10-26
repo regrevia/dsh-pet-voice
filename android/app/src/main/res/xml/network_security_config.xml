@@ -10,6 +10,8 @@
         <trust-anchors>
             <certificates src="system" />
             <certificates src="@raw/pet_ca" />
+            <!-- 自己生成的根证书装进手机也行，不用为了换个服务器重新出包。 -->
+            <certificates src="user" />
         </trust-anchors>
     </base-config>
 </network-security-config>

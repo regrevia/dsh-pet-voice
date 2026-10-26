@@ -52,12 +52,15 @@ function rememberPort(port) {
 
 /** 这台电脑在局域网里的 IPv4；多网卡取第一个非回环的。 */
 export function lanAddress() {
-  for (const list of Object.values(networkInterfaces())) {
+  const found = []
+  for (const [name, list] of Object.entries(networkInterfaces())) {
     for (const item of list ?? []) {
-      if ((item.family === 'IPv4' || item.family === 4) && !item.internal) return item.address
+      if ((item.family === 'IPv4' || item.family === 4) && !item.internal) found.push({ name, address: item.address })
     }
   }
-  return ''
+  // 装了 VPN 的机器上，utun 往往排在真网卡前面：先挑 Wi-Fi / 有线，别把 VPN 地址发给手机。
+  const physical = found.find((item) => /^(en|eth|wl|wlan)/i.test(item.name))
+  return (physical ?? found[0])?.address ?? ''
 }
 
 function isPrivate(addr) {
