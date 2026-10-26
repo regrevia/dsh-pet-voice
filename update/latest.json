@@ -1,12 +1,12 @@
 {
-  "versionCode": 130,
-  "versionName": "0.9.60",
-  "size": 29993782,
-  "sha256": "5c521d413acb342f5e7c707da33c209afe168315f9a33f298f0ab615dedf0d41",
+  "versionCode": 132,
+  "versionName": "0.9.62",
+  "size": 29996858,
+  "sha256": "72d7da168095922031fc7be09e6014a427fd1b58eb69e578a95198546a093adb",
   "file": "app-release.apk",
-  "url": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.60/app-release.apk",
-  "notes": "会话页加了停止按钮、发送自动排队、目标一行显示；会话列表标出正在执行的那只",
-  "minPlugin": "0.1.12",
-  "publishedAt": "2026-10-26T11:24:13.790Z",
-  "promotedAt": "2026-10-26T11:24:15.357Z"
+  "url": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.62/app-release.apk",
+  "notes": "会话列表去冗余文案；换会话不再串上一条的记录；面板可直接调同时连几台手机",
+  "minPlugin": "0.1.13",
+  "publishedAt": "2026-10-26T13:07:21.762Z",
+  "promotedAt": "2026-10-26T13:07:23.496Z"
 }
