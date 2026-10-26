@@ -179,10 +179,11 @@
                 android:tint="@color/pet_accent" />
 
             <TextView
+                android:id="@+id/launchLabel"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
-                android:text="立即对话"
+                android:text="叫出大肥鱼"
                 android:textColor="@color/pet_accent"
                 android:textSize="16sp"
                 android:textStyle="bold" />

@@ -37,7 +37,7 @@ import android.widget.TextView
 import android.widget.Toast
 
 /**
- * 主界面：① 状态卡 ② 扫码绑定 / 立即对话 ③ 折叠的「设置」「更多」。
+ * 主界面：① 状态卡 ② 扫码绑定 / 叫出宠物 ③ 折叠的「设置」「更多」。
  * 打开就能用：没有配置时状态卡是空状态，两个大按钮引导扫码或直接对话。
  */
 class MainActivity : Activity() {
@@ -435,6 +435,8 @@ class MainActivity : Activity() {
 
         val scan = findViewById<Button>(R.id.scanBtn)
         val launch = findViewById<View>(R.id.launchBtn)
+        // 按钮上直接写「叫出谁」：用户配的是哪个称呼，就显示哪个，别让人猜「立即对话」是开什么。
+        findViewById<TextView>(R.id.launchLabel).text = "叫出${cfg.wakeName}"
         if (!cfg.ready) {
             statusTitle.text = "${PetSettings.load(this).wakeName} · 未绑定"
             statusHost.visibility = View.VISIBLE
@@ -1170,7 +1172,7 @@ class MainActivity : Activity() {
     /* ---------------- 悬浮窗 / 服务 ---------------- */
 
 
-    /** 点「立即对话」：没权限就先去授权页，回来后 onResume 续跑，不弹 Toast 说教。 */
+    /** 点「叫出<称呼>」：没权限就先去授权页，回来后 onResume 续跑，不弹 Toast 说教。 */
     private fun chatClicked() {
         val cfg = PetSettings.load(this)
         if (!Settings.canDrawOverlays(this)) {
