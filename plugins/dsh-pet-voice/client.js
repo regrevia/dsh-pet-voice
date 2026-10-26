@@ -50,6 +50,7 @@ window.__ModuleLoader__.load({
       rowBorder: { borderTop: `1px solid ${C.border}` },
       label: { fontSize: 13, minWidth: 64 },
       grow: { flex: 1 },
+      link: { fontSize: 13, color: C.brand, textDecoration: 'none' },
       meta: { fontSize: 12, color: C.dim },
       device: { display: 'flex', alignItems: 'center', gap: 10, padding: '12px 14px' },
       name: { fontSize: 13 },
@@ -659,6 +660,25 @@ window.__ModuleLoader__.load({
         ),
       )
 
+      /* ---------------- 手机 App ---------------- */
+
+      const app = state.app ?? {}
+      const appSection = h(
+        Section,
+        { title: '手机 App' },
+        h(
+          'div',
+          { style: S.card },
+          h(
+            'div',
+            { style: S.device },
+            h('span', { style: S.name }, '装到新手机上'),
+            h('span', { style: S.grow }),
+            h('a', { href: app.url || '', target: '_blank', rel: 'noreferrer', style: S.link }, app.versionName ? `下载 ${app.versionName}` : '去下载'),
+          ),
+        ),
+      )
+
       /* ---------------- 已连上的手机 ---------------- */
 
       const devices = state.devices ?? []
@@ -702,6 +722,7 @@ window.__ModuleLoader__.load({
         error ? h('div', { style: S.error }, error) : null,
         paramsSection,
         pairSection,
+        appSection,
         deviceSection,
       )
     }

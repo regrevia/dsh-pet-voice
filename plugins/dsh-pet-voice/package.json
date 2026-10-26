@@ -1,6 +1,6 @@
 {
   "name": "dsh-pet-voice",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "private": true,
   "description": "手机端语音宠物：像素鲸鱼娘 + 唤醒词 + 语音对话 + 项目切换，直接驱动本机 DSH 会话（复用其 agent preset 人设）。",
   "type": "module",

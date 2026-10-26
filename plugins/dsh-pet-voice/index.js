@@ -136,6 +136,9 @@ const TTS_VOICES = [
 ]
 const TTS_DEFAULT_VOICE = 'zh-CN-XiaoyiNeural'
 
+/** 没有推广过任何版本时，面板「装到新手机上」退回这里，让人能自己挑一版。 */
+const GITHUB_RELEASES_LATEST = 'https://github.com/regrevia/dsh-pet-voice/releases/latest'
+
 /**
  * 形象档位（页面上「音色」下拉用）：每档 = 音色 + 语速 + 音高，一键切「说话的味道」。
  * 全部落在上面白名单里的真实 zh-CN 女声——2026-10-24 用
@@ -4436,6 +4439,15 @@ export function apply(ctx, config) {
       pluginVersion: PLUGIN_VERSION,
       ttsReady: ttsReady(),
       asrReady: asrReady(),
+      // 面板里「装到新手机上」的去处：优先给推广过的那一版（在线升级看到的就是它），
+      // 这台机器还没推广过任何版本时退回 GitHub 的 releases 页，至少能手动挑一版。
+      app: (() => {
+        const meta = readLatestUpdate()
+        if (meta && typeof meta.url === 'string' && /^https?:\/\//.test(meta.url)) {
+          return { versionName: String(meta.versionName ?? ''), versionCode: Number(meta.versionCode) || 0, url: meta.url }
+        }
+        return { versionName: '', versionCode: 0, url: GITHUB_RELEASES_LATEST }
+      })(),
     })
     try {
     // 面板：DSH 网页里那一页（配对码 / 设备 / 参数）。网页既没有也不该有手机令牌,
