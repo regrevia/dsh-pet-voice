@@ -958,6 +958,54 @@ async function asrWaitReady(waitMs) {
   }
 }
 
+/** 硬预算：超过这么久还没就绪，就当这个载入进程卡死了（实测首载 187 s，240 s 是兜底）。 */
+function asrOverHardBudget(lock = asrLockRead()) {
+  return Number(lock?.at ?? 0) > 0 && Date.now() - Number(lock.at) >= ASR_COLD_START_MS
+}
+
+/**
+ * 兜底清场：机器上同时存在多个 asr-worker.py 时只留一个。
+ *
+ * 2026-10-26 的 jetsam 事故就是三个 worker 各占 4.3 GB（12.7 GB python）把系统压崩的。
+ * 锁能防新的并载，这条负责收拾「事故已经发生/外部手工拉起」的现场：
+ * 留正在服务的那个（/health 报的 pid），没在服务就留锁里那个，再没有就留最老的。
+ */
+async function asrKillDuplicateWorkers() {
+  let list = []
+  try {
+    const out = execFileSync('/bin/ps', ['-axo', 'pid=,command='], { encoding: 'utf8', timeout: 3000 })
+    for (const line of out.split('\n')) {
+      if (!line.includes('asr-worker.py')) continue
+      const pid = Number(line.trim().split(/\s+/)[0])
+      if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) list.push(pid)
+    }
+  } catch {
+    return // ps 拿不到就算了，绝不为清场把主流程搞挂
+  }
+  if (list.length <= 1) return
+  const health = await asrHealth(800)
+  const keep = Number(health?.pid ?? asrLockRead()?.pid ?? 0)
+  const survivors = list.filter((pid) => pid === keep)
+  const keepPid = survivors.length ? survivors[0] : Math.min(...list)
+  for (const pid of list) {
+    if (pid === keepPid) continue
+    LOG(`发现重复的 ASR worker pid ${pid}，停掉（留 ${keepPid}）：一模型 4.3 GB，不能并载`)
+    try {
+      await asrKillWorker(pid)
+    } catch {
+      /* 杀不掉就留给下次 */
+    }
+  }
+}
+
+/** 清场节流：每 60 s 最多扫一次进程表，别每句话都去 ps。 */
+let asrSweepAt = 0
+async function asrSweep() {
+  if (Date.now() - asrSweepAt < 60_000) return
+  asrSweepAt = Date.now()
+  await asrKillDuplicateWorkers()
+}
+
 function asrStartWorker(waitMs = ASR_COLD_START_MS) {
   if (asrStarting) return asrStarting
   asrStarting = (async () => {
@@ -966,10 +1014,22 @@ function asrStartWorker(waitMs = ASR_COLD_START_MS) {
     const pre = await asrHealth(800)
     if (pre?.ok) {
       asrLockDrop()
+      // 健康也要扫一眼现场：外部手工拉起/事故遗留的重复 worker 在这里被收掉。
+      await asrSweep()
       return { ok: true, pid: pre.pid, cold: false }
     }
     // 别的实例（上一次热重载、另一个并发请求）正在载：跟着等，绝不并载第二个 4.3 GB。
     const lock = asrLockRead()
+    // 锁里那个已经载了超过硬预算还没好：卡死了，杀掉换新的，别跟着一个僵进程死等。
+    if (asrLockHeld(lock) && asrOverHardBudget(lock)) {
+      LOG(`ASR worker pid ${lock.pid} 载入超过 ${Math.round(ASR_COLD_START_MS / 1000)} s，判定卡死，停掉重来`)
+      try {
+        await asrKillWorker(Number(lock.pid))
+      } catch {
+        /* 已经没了 */
+      }
+      asrLockDrop()
+    }
     if (asrLockHeld(lock)) {
       LOG(`ASR worker 正由 pid ${lock.pid} 载入，跟着等不重拉`)
       const waited = await asrWaitReady(waitMs)
@@ -981,6 +1041,7 @@ function asrStartWorker(waitMs = ASR_COLD_START_MS) {
     } catch {
       /* 建不了目录也让下面的 spawn 自己报错，这里不抢先抛 */
     }
+    await asrSweep()
     // 抢占启动锁：抢不到说明另一个实例刚进来，等它的结果就好。
     if (!asrLockTake(0)) {
       const waited = await asrWaitReady(Math.min(waitMs, ASR_START_WAIT_MS))
@@ -1040,8 +1101,23 @@ function asrStartWorker(waitMs = ASR_COLD_START_MS) {
       }
       await new Promise((resolve) => setTimeout(resolve, 300))
     }
-    // 超时不杀：它还在老老实实载模型，杀了下次还得从零再来。锁继续指着它，
-    // 后面来的请求（包括重载后的新实例）只会跟着等，不会再拉第二个。
+    // 到这里是等满 waitMs 还没就绪。请求侧的短等待（15 s）不杀——它在正常载，
+    // 杀了才会出现「一直载不完」的重启风暴；只有到了硬预算（默认 240 s）才杀，
+    // 那时候基本是卡死，留着一个 4.3 GB 的僵进程只会再压崩一次系统。
+    if (waitMs >= ASR_COLD_START_MS || asrOverHardBudget()) {
+      LOG(`ASR worker 载入超过硬预算 ${Math.round(ASR_COLD_START_MS / 1000)} s，停掉 pid ${child.pid}`)
+      try {
+        await asrKillWorker(child.pid)
+      } catch {
+        /* 自己已经退了 */
+      }
+      asrLockDrop()
+      return {
+        ok: false,
+        error: `识别载入超时（>${Math.round(ASR_COLD_START_MS / 1000)} s），已停掉重试`,
+        hint: `看 ${ASR_LOG_PATH} 里的 [asr] 日志`,
+      }
+    }
     return {
       ok: false,
       starting: true,
@@ -1101,6 +1177,9 @@ async function asrEnsure(waitMs = ASR_COLD_START_MS) {
       asrLockDrop()
       return asrStartWorker(waitMs)
     }
+    // 每句话都会走这条快路，所以顺手清场（内部 60 s 节流）：
+    // 有人手工拉了第二个 worker、或上次事故留下两个，都在这里收成一个。
+    void asrSweep()
     return { ok: true, pid: health.pid, cold: false }
   }
   return asrStartWorker(waitMs)

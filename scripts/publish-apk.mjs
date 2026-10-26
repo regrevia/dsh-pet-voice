@@ -13,6 +13,8 @@
  * 为什么要 sha256：手机端下载完要校验完整性，隧道路径偶尔会被中间层缓存/截断，
  * 有 hash 才能区分「网络坏了」和「服务端发错了」。size 一起带上省一次 HEAD。
  *
+ * 公开更新源默认是 GitHub Releases（`latest.json` + `<文件名>.apk` 两个资产），
+ * 因为「检查更新」必须谁都能查，不能指着某台电脑。本地目录只当兜底（--dir）。
  * 目录默认 ~/.dsh/pet-voice/update，可用 --dir 或 DSH_PET_UPDATE_DIR 改（自测用）。
  * 零依赖：只用 node:fs / node:crypto / node:child_process。
  */
@@ -26,11 +28,15 @@ import { fileURLToPath } from 'node:url'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const UPDATE_DIR = resolve(process.env.DSH_PET_UPDATE_DIR || join(homedir(), '.dsh', 'pet-voice', 'update'))
+/** 公开更新源：和 App 里的 PUBLIC_META_URL 必须一致，换仓库两边一起改。 */
+const GITHUB_REPO = process.env.DSH_PET_GITHUB_REPO || 'regrevia/dsh-pet-voice'
+const GITHUB_BASE = `https://github.com/${GITHUB_REPO}/releases`
 /** 和插件里的白名单保持一致：没有 `/`、不以 `.` 开头。 */
 const APK_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.apk$/i
 const USAGE = `用法：
   node scripts/publish-apk.mjs <apk 路径> [--notes "更新说明"] [--version-code 5] [--version-name 0.3.0]
 
+  --no-github       只写本地兜底目录，不建 GitHub Release（离线/自测用）
   --dir <目录>      发布到别处（默认 ${UPDATE_DIR}）
   --version-code N  显式指定 versionCode（不给就自己读 APK）
   --version-name S  显式指定 versionName
@@ -47,7 +53,7 @@ function fail(message, hint) {
 }
 
 function parseArgs(argv) {
-  const options = { notes: '', versionCode: null, versionName: null, dir: UPDATE_DIR, apk: null }
+  const options = { notes: '', versionCode: null, versionName: null, dir: UPDATE_DIR, apk: null, github: true }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     const next = () => {
@@ -70,6 +76,8 @@ function parseArgs(argv) {
       if (!options.versionName) fail('--version-name 不能为空')
     } else if (arg === '--dir') {
       options.dir = resolve(next())
+    } else if (arg === '--no-github') {
+      options.github = false
     } else if (arg.startsWith('-')) {
       fail(`不认识的参数 ${arg}`, USAGE)
     } else if (options.apk) {
@@ -260,6 +268,43 @@ function assertZipMagic(apkPath) {
 }
 
 // ---------------------------------------------------------------------------
+// GitHub Releases：用 gh CLI，仓库要提前登录（gh auth login）
+// ---------------------------------------------------------------------------
+
+function runGh(args) {
+  try {
+    return execFileSync('gh', args, { encoding: 'utf8', timeout: 600_000, stdio: ['ignore', 'pipe', 'pipe'] })
+  } catch (error) {
+    fail(
+      `gh ${args.slice(0, 2).join(' ')} 失败：${String(error?.stderr ?? error?.message ?? error).trim()}`,
+      '公开更新源发布不了，手机就查不到新版；确认 gh 已登录、仓库有写权限',
+    )
+  }
+}
+
+function hasRelease(tag) {
+  try {
+    execFileSync('gh', ['release', 'view', tag, '-R', GITHUB_REPO], { stdio: 'ignore', timeout: 30_000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function hasAsset(tag, name, size) {
+  try {
+    const out = execFileSync(
+      'gh',
+      ['release', 'view', tag, '-R', GITHUB_REPO, '--json', 'assets', '-q', `.assets[] | select(.name=="${name}") | .size`],
+      { encoding: 'utf8', timeout: 30_000 },
+    )
+    return Number(String(out).trim()) === size
+  } catch {
+    return false
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 async function main() {
   const options = parseArgs(process.argv.slice(2))
@@ -333,8 +378,25 @@ async function main() {
   console.log(`✓ 版本 ${versionName}（versionCode ${versionCode}）${via ? `· 来源 ${via}` : ''}`)
   console.log(copied ? `✓ 已复制 → ${targetPath}` : `✓ 已在发布目录（内容一致，跳过复制）→ ${targetPath}`)
   console.log(`✓ ${size} B · sha256 ${sha256}`)
-  console.log(`✓ latest.json 已原子更新 → ${join(options.dir, 'latest.json')}`)
-  console.log(`  下载路径（需 cookie）：/pet-voice/download/${encodeURIComponent(fileName)}`)
+  console.log(`✓ 本地兜底 latest.json → ${join(options.dir, 'latest.json')}`)
+
+  if (options.github) {
+    const tag = `v${versionName}`
+    const assetUrl = `${GITHUB_BASE}/download/${tag}/${fileName}`
+    const publicMeta = { ...meta, url: assetUrl, file: fileName, publishedAt: meta.publishedAt }
+    console.log(`· 发布到公开源 ${GITHUB_REPO} ${tag}（30 MB 左右，慢是正常的）`)
+    // 先确保 Release 存在再传资产：上传要几十秒到几分钟，不能在前台等。
+    hasRelease(tag) || runGh(['release', 'create', tag, '-R', GITHUB_REPO, '-t', `鲸灵 ${versionName}`, '-n', options.notes || `鲸灵 ${versionName}`])
+    if (!hasAsset(tag, fileName, size)) {
+      runGh(['release', 'upload', tag, apkPath, '--clobber', '-R', GITHUB_REPO])
+    }
+    // latest.json 最后传：资产没齐就让手机看到新版本，会下到 404。
+    const publicPath = join(options.dir, 'latest.json')
+    writeJsonAtomic(publicPath, publicMeta)
+    runGh(['release', 'upload', tag, publicPath, '--clobber', '-R', GITHUB_REPO])
+    console.log(`✓ 公开源已发布 → ${assetUrl}`)
+    console.log(`✓ 检查更新地址 → ${GITHUB_BASE}/latest/download/latest.json`)
+  }
 }
 
 main().catch((error) => {

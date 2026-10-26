@@ -8,10 +8,15 @@ import android.content.pm.PackageInstaller
 import android.os.Build
 import android.util.Log
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import java.security.MessageDigest
+import org.json.JSONObject
 
 /**
- * 自更新：宿主 `GET /api/update` 拿到版本 → 下载 APK → `PackageInstaller` 覆盖安装。
+ * 自更新：公开更新源（GitHub Releases 的 latest.json）拿到版本 → 下载 APK → `PackageInstaller` 覆盖安装。
+ * 旧版的 `GET /api/update` 只能问「我自己那台电脑」，别人装了查不到、电脑关了也查不到；
+ * 现在公开源优先，宿主接口只在能连上时当兜底（内网自建发布用）。
  *
  * 为什么用 PackageInstaller 而不是 `ACTION_VIEW + file://`：
  *  - file:// 从 Android 7 起抛 FileUriExposedException，要 FileProvider，
@@ -42,6 +47,11 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
         const val EXTRA_STATUS = "status"
         const val EXTRA_MESSAGE = "message"
         private const val PREFS_LAST_CHECK = "last_update_check"
+        /** 公开更新源：仓库 Releases 的 latest.json 固定地址，谁都能查。 */
+        private const val PUBLIC_META_URL =
+            "https://github.com/regrevia/dsh-pet-voice/releases/latest/download/latest.json"
+        private const val PUBLIC_ASSET_BASE =
+            "https://github.com/regrevia/dsh-pet-voice/releases/latest/download/"
     }
 
     fun currentVersionCode(): Int = try {
@@ -59,8 +69,56 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
         BuildConfig.VERSION_NAME
     }
 
-    /** 宿主说有没有比本机新的版本；网络/鉴权失败一律当「没有」，静默，不打扰用户。 */
-    fun check(): Info? {
+    /** 有没有比本机新的版本：先问公开源，问不到再问宿主；都问不到当「没有」，静默。 */
+    fun check(): Info? = publicInfo() ?: hostInfo()
+
+    private fun publicMeta(): JSONObject? {
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL(PUBLIC_META_URL).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 8_000
+                readTimeout = 10_000
+                instanceFollowRedirects = true
+                setRequestProperty("User-Agent", "WhalePet/${BuildConfig.VERSION_NAME}")
+                setRequestProperty("Accept", "application/json")
+            }
+            if (conn.responseCode !in 200..299) {
+                Log.i(TAG, "公开源 HTTP ${conn.responseCode}")
+                return null
+            }
+            val text = conn.inputStream.bufferedReader().use { it.readText().take(64 * 1024) }
+            return JSONObject(text)
+        } catch (e: Exception) {
+            Log.i(TAG, "公开源不可达：${e.javaClass.simpleName}")
+            return null
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    private fun publicInfo(): Info? {
+        val j = publicMeta() ?: return null
+        val code = j.optInt("versionCode", 0)
+        if (code <= currentVersionCode()) {
+            lastCheck = "none"
+            return null
+        }
+        val name = j.optString("versionName")
+        val file = j.optString("file").ifBlank { "jingling-$name.apk" }
+        val url = j.optString("url").ifBlank { PUBLIC_ASSET_BASE + file }
+        lastCheck = "ok"
+        return Info(
+            versionCode = code,
+            versionName = name,
+            path = url,
+            sha256 = j.optString("sha256"),
+            size = j.optLong("size", 0),
+            notes = j.optString("notes"),
+        )
+    }
+
+    private fun hostInfo(): Info? {
         val res = client.update()
         if (!res.ok) {
             lastCheck = "error"
@@ -107,7 +165,11 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
         // 只留正在装的那一个包，旧版本下过的都是垃圾
         dir.listFiles()?.forEach { if (it.name != dest.name) it.delete() }
         if (dest.exists() && info.sha256.isNotBlank() && sha256(dest) == info.sha256) return dest
-        val written = client.downloadTo(info.path, dest, onProgress)
+        val written = if (info.path.startsWith("http")) {
+            downloadUrl(info.path, dest, onProgress)
+        } else {
+            client.downloadTo(info.path, dest, onProgress)
+        }
         if (written <= 0) return null
         if (info.sha256.isNotBlank()) {
             val got = sha256(dest)
@@ -118,6 +180,39 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
             }
         }
         return dest
+    }
+
+    /** 公开源直链下载（GitHub Releases 的 APK）。sha256 仍由调用方校验。 */
+    private fun downloadUrl(url: String, dest: File, onProgress: ((Int) -> Unit)?): Long {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 10_000
+                readTimeout = 180_000
+                instanceFollowRedirects = true
+                setRequestProperty("User-Agent", "WhalePet/${BuildConfig.VERSION_NAME}")
+            }
+            if (conn.responseCode !in 200..299) throw java.io.IOException("APK HTTP ${conn.responseCode}")
+            val total = conn.contentLengthLong
+            dest.parentFile?.mkdirs()
+            var read = 0L
+            val buf = ByteArray(64 * 1024)
+            conn.inputStream.use { input ->
+                dest.outputStream().use { out ->
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        out.write(buf, 0, n)
+                        read += n
+                        if (total > 0) onProgress?.invoke(((read * 100) / total).toInt())
+                    }
+                }
+            }
+            read
+        } finally {
+            conn?.disconnect()
+        }
     }
 
     /** 最近一次安装失败的真实原因；界面显示 + 回传宿主日志，避免只看到一句「安装失败」。 */

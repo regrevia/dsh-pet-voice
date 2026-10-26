@@ -577,7 +577,12 @@ export function createPet (container) {
     if (!ctx || !v || alpha <= 0.002) return
     const n = NORM[clip] || [0, 0, CW, CH]
     const b = BODY[clip] || n
-    const scale = Math.min(1.3, Math.max(0.85, TARGET_H / b[3]))
+    // 一次性动作（点击/庆祝）沿用待机的缩放：各自按主体框归一化会让点击时身体比待机
+    // 大 7%~18%（tap 339 / tap_wave 292 / idle 346），看起来就是点一下先撑大再缩回。
+    // 动作只换姿势不换大小，毛发/水花的锚点公式照旧，s 与待机一致就稳定。
+    const idleScale = Math.min(1.3, Math.max(0.85, TARGET_H / BODY.idle[3]))
+    const scale = /^(tap|cheer|curtsy)\b/.test(clip) ? idleScale
+      : Math.min(1.3, Math.max(0.85, TARGET_H / b[3]))
     // 缩放只看主体高度（细胳膊/尾巴/气泡不吃进高度），落点仍按整段素材的最底边贴地，
     // 这样待机就是原地不动（0.9.28 的位置一像素不差），换动作只换姿势不换大小。
     const bcx = b[0] + b[2] / 2
@@ -881,6 +886,9 @@ export function createPet (container) {
         return
       }
       if (av.on) { av.speaking = next === 'talking'; av.quietAt = next === 'talking' ? Infinity : 0 }
+      // 点一下的一次性动作还在播就别立刻切回循环：先切出去、100ms 后再切回来，
+      // 屏幕上就是「动作放大→缩回」连闪两下。让它播完自己回 baseClip 更顺。
+      if (onceDeadline && nowMs() < onceDeadline && next !== 'talking') return
       play(baseClip(), { fade: 200 })
       if (next === 'talking' && activeVid) activeVid.playbackRate = 1.05
     },

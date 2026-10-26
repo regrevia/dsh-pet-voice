@@ -17,6 +17,8 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import android.speech.RecognizerIntent
@@ -82,6 +84,8 @@ class MainActivity : Activity() {
     private var awaitingOverlay = false
     private var probing = false
     private var connected: Boolean? = null
+    /** 插件回话但脑子（宿主会话）没回话：这种不算「已连接」，别骗人。 */
+    private var hostLost = false
     private val presetKeys = PetConfig.PRESETS.map { it.first }
 
     private var tts: TtsPlayer? = null
@@ -215,9 +219,7 @@ class MainActivity : Activity() {
         findViewById<Button>(R.id.stopBtn).setOnClickListener { quitAll() }
         findViewById<LinearLayout>(R.id.updateRow).setOnClickListener { checkNow() }
         findViewById<Button>(R.id.checkUpdateBtn).setOnClickListener { checkNow() }
-        findViewById<Button>(R.id.diagBtn).setOnClickListener { NetLog.send(this) }
         findViewById<Button>(R.id.scanAgainBtn).setOnClickListener { startScan() }
-        findViewById<Button>(R.id.permBtn).setOnClickListener { permissionChooser() }
         findViewById<TextView>(R.id.permOverlay).setOnClickListener { openOverlayPermission() }
         findViewById<TextView>(R.id.permMic).setOnClickListener {
             if (granted(Manifest.permission.RECORD_AUDIO)) {
@@ -282,6 +284,10 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         petWindow(show = false)
+        // 前台每 20 s 自己复检一次：外面显示「已连接」就必须一直是真的，
+        // 电脑那边关了 DSH，这里最迟 20 s 内变成「连不上」。
+        uiHandler.removeCallbacks(probeTick)
+        uiHandler.postDelayed(probeTick, PROBE_EVERY_MS)
         refreshStatus()
         pendingDisplayMode?.let { pending ->
             pendingDisplayMode = null
@@ -299,7 +305,7 @@ class MainActivity : Activity() {
         probeState()
         // 回到前台只静默查有没有新版，绝不自动弹安装页；装不装由用户点
         initUpdater()
-        if (PetSettings.load(this).ready) checkUpdate(quiet = true)
+        checkUpdate(quiet = true)
     }
 
 
@@ -315,6 +321,7 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        uiHandler.removeCallbacks(probeTick)
         petWindow(show = true)
         super.onPause()
     }
@@ -450,8 +457,15 @@ class MainActivity : Activity() {
             launch.visibility = View.VISIBLE
             statusTitle.text = when (connected) {
                 true -> "${cfg.wakeName} · 已连接"
-                false -> "${cfg.wakeName} · 未连接"
+                false -> if (hostLost) "${cfg.wakeName} · 连不上" else "${cfg.wakeName} · 未连接"
                 null -> "${cfg.wakeName} · 已配置"
+            }
+            // 连不上时给一句能动手的，而不是让用户自己猜是网、是电脑、还是设置。
+            if (connected == false) {
+                statusHost.visibility = View.VISIBLE
+                statusHost.text = if (hostLost) "电脑上的 DSH 没响应，打开它或重新扫码" else "重新扫码，或检查同一个 Wi-Fi"
+            } else {
+                statusHost.visibility = View.GONE
             }
             // 先用本地记下的项目名上屏，联网结果只做「纠正」，绝不先清空再等网络
             setProjectTitle(PetSettings.pinnedTitle(this))
@@ -470,7 +484,15 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 探活：只认 `GET /api/state` 200，不猜；连上顺手刷新「钉在哪个项目」。 */
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private val probeTick = object : Runnable {
+        override fun run() {
+            probeState()
+            uiHandler.postDelayed(this, PROBE_EVERY_MS)
+        }
+    }
+
+    /** 探活：`/api/state` 200 只说明插件活着；再问一次项目列表，才算宿主那边真能用。 */
     private fun probeState() {
         val cfg = PetSettings.load(this)
         if (!cfg.ready || probing) return
@@ -488,12 +510,20 @@ class MainActivity : Activity() {
                 try { Thread.sleep(1200) } catch (_: InterruptedException) { break }
             }
             if (ok == true) {
+                // 插件活着 ≠ 宿主能用。宿主失联时项目列表拿不到，这种不能显示「已连接」。
+                var alive = false
                 try {
-                    val pinned = PetClient { cfg }.workspaces()
-                        .json?.optJSONObject("pinned")?.optString("title").orEmpty()
+                    val ws = PetClient { cfg }.workspaces()
+                    alive = ws.ok
+                    val pinned = ws.json?.optJSONObject("pinned")?.optString("title").orEmpty()
                     if (pinned.isNotBlank()) PetSettings.savePinnedTitle(this, pinned)
                 } catch (_: Exception) {
+                    alive = false
                 }
+                hostLost = !alive
+                if (!alive) ok = false
+            } else {
+                hostLost = false
             }
             runOnUiThread {
                 probing = false
@@ -519,9 +549,10 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != REQ_SCAN) return
         if (resultCode == RESULT_OK) {
-            toast("已绑定 · 大肥鱼在线")
+            toast("已绑定")
             hostInput.setText(PetSettings.load(this).baseUrl)
-            connected = true
+            // 不在这里直接写「已连接」：扫完只是存了地址，真要探到宿主能用才算连上。
+            connected = null
             refreshStatus()
             probeState()
         }
@@ -857,8 +888,6 @@ class MainActivity : Activity() {
 
     /** 只查不下：进 App 静默查一次，有新版才把入口亮出来（点了才下载安装）。 */
     private fun checkUpdate(quiet: Boolean) {
-        val cfg = PetSettings.load(this)
-        if (!cfg.ready) return
         initUpdater()
         val u = updater ?: return
         if (quiet && !u.shouldAutoCheck()) return
@@ -1106,10 +1135,7 @@ class MainActivity : Activity() {
      *   本机已是最新 → 什么都不弹。
      */
     private fun checkNow() {
-        if (!PetSettings.load(this).ready) {
-            toast("先扫码绑定")
-            return
-        }
+        // 检查更新不依赖绑定：公开源谁都能查，没连大肥鱼也该能自己更新。
         initUpdater()
         val u = updater ?: return
         val btn = findViewById<Button>(R.id.checkUpdateBtn)
@@ -1161,8 +1187,15 @@ class MainActivity : Activity() {
                 outfit = old.outfit,
             ),
         )
+        // 换了一个宿主：先把旧的那台解绑，否则旧电脑的设备表里永远挂着这台手机。
+        if (old.ready && old.baseUrl != host) {
+            Thread({
+                runCatching { PetClient { old }.unbind() }
+            }, "pet-unbind").apply { isDaemon = true }.start()
+        }
         hostInput.setText(host)
         connected = null
+        hostLost = false
         toast("已绑定")
         refreshStatus()
         probeState()
@@ -1263,6 +1296,8 @@ class MainActivity : Activity() {
         private const val REQ_PERMISSIONS = 41
         private const val REQ_MIC = 42
         private const val REQ_SCAN = 42
+        /** 前台复检间隔：既不让状态一直骗人，也别把接口当心跳打。 */
+        private const val PROBE_EVERY_MS = 20_000L
         private const val REQ_NOTIF = 43
 
         /** 各家自启动/后台管理页；全部先 resolveActivity，没有就跳过。 */

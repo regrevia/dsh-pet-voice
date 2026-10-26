@@ -61,6 +61,10 @@ class PetClient(private val config: () -> PetConfig) {
 
     fun state(): Result = get("state")
 
+    /** 换绑前先把旧宿主上的这台设备解绑，别让旧电脑挂着一条假「已连接」。 */
+    fun unbind(): Result = postJson("unbind", JSONObject().put("id", deviceId()))
+
+
     fun get(path: String, query: Map<String, String> = emptyMap()): Result =
         request(path, query, "GET", null, 10_000)
 

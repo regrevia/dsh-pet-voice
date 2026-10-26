@@ -466,18 +466,6 @@
                 android:textColor="@color/pet_text"
                 android:textSize="13sp" />
 
-            <Button
-                android:id="@+id/permBtn"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:minHeight="44dp"
-                android:background="@drawable/bg_btn_ghost"
-                android:stateListAnimator="@null"
-                android:text="去授权"
-                android:textAllCaps="false"
-                android:textColor="@color/pet_accent"
-                android:textSize="13sp" />
 
             <Button
                 android:id="@+id/stopBtn"
@@ -494,18 +482,6 @@
 
             
 
-            <Button
-                android:id="@+id/diagBtn"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:minHeight="44dp"
-                android:layout_marginTop="8dp"
-                android:background="@drawable/bg_btn_ghost"
-                android:stateListAnimator="@null"
-                android:text="诊断"
-                android:textAllCaps="false"
-                android:textColor="@color/pet_accent"
-                android:textSize="13sp" />
 
             <Button
                 android:id="@+id/scanAgainBtn"

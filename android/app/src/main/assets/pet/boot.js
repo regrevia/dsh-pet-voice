@@ -248,6 +248,9 @@ window.PetBridge = {
     const margin = Math.max(2, Math.round((16 - pad) / 0.914))
     const shiftPx = Math.min(Math.ceil(bubH) + margin, Math.round(stageH * 0.6))
     document.documentElement.style.setProperty('--shift', shiftPx + 'px')
+    // 让位不用「压矮盒子」，改成等比缩小：可见高度正好少掉让位量，宽高比不变。
+    const shrink = Math.max(0.55, Math.min(1, (stageH - shiftPx) / stageH))
+    document.documentElement.style.setProperty('--shrink', shrink.toFixed(4))
     clearTimeout(bubbleTimer)
     // 气泡停留时间跟字数走，长一点的话有时间读完
     bubbleTimer = setTimeout(() => { bubble.classList.remove('show'); document.body.classList.remove('has-bubble') }, Math.min(9000, 3200 + s.length * 90))

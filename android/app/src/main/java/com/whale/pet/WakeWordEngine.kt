@@ -3,6 +3,7 @@ package com.whale.pet
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.speech.SpeechRecognizer
 
 data class WakeHit(val word: String, val rest: String)
@@ -78,9 +79,15 @@ class NativeSpeechWakeWordEngine(
     }
 
     override fun stop() {
+        val wasListening = running
         running = false
         main.removeCallbacksAndMessages(null)
         asr.cancel()
+        // 识别器跑在系统服务进程里，cancel() 还要走 binder 才真的把输入设备放掉；
+        // 这期间别人开 AudioRecord 拿到的是全零 PCM（真机上表现为「人声0ms」）。
+        // 只有「本来在听」才需要冷却：重听路径里 stop() 会连着来好几次，
+        // 每次都重新计时会让录音机永远开不了。
+        if (wasListening) MicHandover.engineStopped()
     }
 
     private fun listenOnce() {
@@ -201,4 +208,33 @@ class DisabledWakeWordEngine : WakeWordEngine {
     override fun setListener(listener: ((WakeHit) -> Unit)?) = Unit
     override fun start() = Unit
     override fun stop() = Unit
+}
+
+/**
+ * 麦克风交接：唤醒引擎（系统 SpeechRecognizer，跑在别的进程里）和 PTT 录音（AudioRecord）
+ * 抢同一个输入设备。`cancel()` 要经 binder 到识别服务进程才真正释放输入，
+ * 紧接着开 AudioRecord 会绑上一条已经被停掉的音轨，`read()` 永远读不到帧 → 全零 PCM
+ * （真机日志里就是「人声0ms」）。
+ *
+ * 所以这里只记一个「最早可以开麦的时刻」，录音机开麦前查 [pendingMs]，
+ * 没到点就返回 false 交给调用方重试 —— 千万不要在主线程 sleep：
+ * 主线程一睡，排在队里的 `cancel()` 反而跑不掉。
+ */
+object MicHandover {
+    /** 让出麦克风之后的冷却窗口（ms）。实测 <100ms 会读到静音流，取 160ms。 */
+    const val SETTLE_MS = 160L
+
+    /** 到这个时刻之前，别的组件不要开麦。0 = 从来没让出过/冷却早就过了。 */
+    @Volatile private var allowedAt = 0L
+
+    /** 唤醒引擎真的停止了一轮监听，从此刻起算冷却。 */
+    fun engineStopped() {
+        allowedAt = SystemClock.elapsedRealtime() + SETTLE_MS
+    }
+
+    /** 还要等多少 ms 才能开麦；0 表示现在就可以。 */
+    fun pendingMs(): Long {
+        val left = allowedAt - SystemClock.elapsedRealtime()
+        return if (left > 0) left else 0L
+    }
 }
