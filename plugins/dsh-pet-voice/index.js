@@ -22,7 +22,7 @@
  * @module dsh-pet-voice
  */
 
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import {
   appendFileSync,
@@ -1696,6 +1696,15 @@ export const __fileInternals = {
   MAX_IMAGE_BYTES: UPLOAD_MAX_BYTES,
 }
 
+/** 旁听（问进展只读看一眼同项目另一只）的单测入口（见 test/peek.test.mjs）。 */
+export const __peekInternals = {
+  peekWanted,
+  pickPeekTarget,
+  peekTranscriptLines,
+  gitDigest,
+  buildPeekBlock,
+}
+
 export const __uploadInternals = {
   extFor,
   uploadDir,
@@ -2418,6 +2427,170 @@ async function sessionKnownToHost(ctx, sessionId, rowsHint) {
   }
 }
 
+/* ── 问进展时「旁听」：只读看一眼同项目里最近活跃的另一只 ──
+ *
+ * 手机钉的那只用来聊天，但用户常想知道「另一边开发到哪了」。往那只里发一句会打断
+ * 正在跑的活，所以这里只读：转录文件 + git 现状，压成一段贴在本轮提示词后面。
+ * 不出现在手机上显示的文字里（App 的气泡还是用户自己说的那句），也不写那只会话。
+ */
+
+const PEEK_TEXT_MAX = 2600
+const PEEK_GIT_MAX = 1200
+/** 「在问另一边进展」的几种说法。整句超过 400 字就不认，避免长文里偶然出现「进度」。 */
+const PEEK_ASK = /(进展|进度|做到哪|做到什么程度|到哪一步|卡在哪|最近在(干|做|忙)|最近怎么样|现在怎么样|忙什么呢|下一步)/
+
+function peekWanted(text) {
+  const body = String(text ?? '').trim()
+  if (!body || body.length > 400) return false
+  return PEEK_ASK.test(body)
+}
+
+/**
+ * 同项目里最近活跃的另一只（排除自己钉的那只）。projectOf 由调用方注入，
+ * 单测里直接给假的，不用起宿主。
+ */
+function pickPeekTarget(rows, boundId, opts = {}) {
+  const bound = String(boundId ?? '')
+  const projectOf = typeof opts.projectOf === 'function' ? opts.projectOf : () => ''
+  const raw = Array.isArray(rows) ? rows : []
+  const boundRow = raw.find((row) => String(row?.id ?? '') === bound)
+  const boundProject =
+    String(opts.projectId ?? '') ||
+    String(boundRow?.workspaceId ?? '') ||
+    projectOf({ id: bound, cwd: String(opts.cwd ?? '') })
+  const list = raw
+    .map((row) => ({
+      id: String(row?.id ?? ''),
+      title: String(row?.title ?? ''),
+      cwd: String(row?.cwd ?? ''),
+      workspaceId: String(row?.workspaceId ?? ''),
+      updatedAt: toMs(row?.updatedAt),
+    }))
+    .filter((row) => row.id && row.id !== bound)
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+  for (const row of list) {
+    if (boundProject) {
+      const project = row.workspaceId || projectOf(row)
+      if (project !== boundProject) continue
+    }
+    return row
+  }
+  return null
+}
+
+/** 转录 → 每行一句的摘要，只留尾部到 maxChars（先留最近的）。 */
+function peekTranscriptLines(detail, maxChars = PEEK_TEXT_MAX) {
+  const msgs = Array.isArray(detail?.messages) ? detail.messages : []
+  const lines = []
+  for (const m of msgs) {
+    const role = String(m?.role ?? '')
+    if (role === 'user') lines.push(`用户：${clipText(m?.text ?? '', 400)}`)
+    else if (role === 'assistant') lines.push(`助手：${clipText(m?.text ?? '', 500)}`)
+    else if (role === 'tool' && m?.tool?.name) lines.push(`（用了 ${m.tool.name}）`)
+  }
+  const kept = []
+  let total = 0
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]
+    if (total + line.length + 1 > maxChars && kept.length) break
+    kept.push(line)
+    total += line.length + 1
+  }
+  return kept.reverse()
+}
+
+/** 那个项目此刻的代码现状：最近提交 + 未提交改动。读不到就返回空串。 */
+function gitDigest(cwd, maxChars = PEEK_GIT_MAX) {
+  const dir = String(cwd ?? '').trim()
+  if (!dir || !existsSync(dir)) return ''
+  const run = (args) => {
+    try {
+      return String(
+        execFileSync('git', args, {
+          cwd: dir,
+          timeout: 2500,
+          maxBuffer: 1 << 20,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }) ?? '',
+      ).trim()
+    } catch {
+      return ''
+    }
+  }
+  const head = run(['log', '--oneline', '-12'])
+  const status = run(['status', '--short'])
+  const stat = run(['diff', '--stat'])
+  const out = []
+  if (head) out.push(`最近提交：\n${head}`)
+  if (status) out.push(`未提交的改动：\n${status}`)
+  else if (head) out.push('未提交的改动：没有')
+  if (stat) out.push(`改动量：\n${stat}`)
+  const text = out.join('\n')
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text
+}
+
+/** 把旁听材料拼成一段，边界写清楚，免得模型把它当成这条对话里的内容。 */
+function buildPeekBlock(peek) {
+  const lines = ['【旁听材料：同项目里另一只会话的最近进展，只读，不属于这条对话】']
+  const title = String(peek?.title ?? '')
+  const when = toMs(peek?.updatedAt) ? new Date(toMs(peek.updatedAt)).toLocaleString('zh-CN', { hour12: false }) : ''
+  lines.push(`那是：${title || String(peek?.id ?? '')}${when ? `（最后活跃 ${when}）` : ''}`)
+  const body = Array.isArray(peek?.lines) ? peek.lines : []
+  if (body.length) {
+    lines.push('最近的对话：')
+    lines.push(...body)
+  }
+  const git = String(peek?.git ?? '')
+  if (git) {
+    lines.push('代码现状：')
+    lines.push(git)
+  }
+  lines.push('回答就用这些材料；材料里没有的直说没看到，别猜。')
+  return lines.join('\n')
+}
+
+/** 派发时调用：不是问进展就返回空串，任何异常都只记日志、不影响这句话发出去。 */
+async function peekContext(ctx, boundSessionId, text) {
+  if (!peekWanted(text)) return ''
+  const startedAt = Date.now()
+  try {
+    const rows = await sessionRowsCached(ctx)
+    const byPath = projectIdByPath(workspaceRows(ctx))
+    const bound = String(boundSessionId ?? '')
+    const boundMeta = projectCacheOf(bound)
+    const boundRow = rows.find((row) => String(row?.id ?? '') === bound)
+    const cwd = String(boundRow?.cwd ?? '') || boundMeta.cwd || ''
+    const projectOf = (row) => {
+      const direct = String(row?.workspaceId ?? '')
+      if (direct) return direct
+      const path = String(row?.cwd ?? '')
+      if (path) return projectIdOfPath(byPath, path)
+      const id = String(row?.id ?? '')
+      return id ? projectIdOfPath(byPath, projectCacheOf(id).cwd || '') : ''
+    }
+    const target = pickPeekTarget(rows, bound, { cwd, projectOf })
+    if (!target) return ''
+    const meta = projectCacheOf(target.id)
+    const detail = sessionDetail({ id: target.id, limit: '30' })
+    const lines = peekTranscriptLines(detail)
+    const git = gitDigest(cwd || target.cwd || meta.cwd)
+    if (!lines.length && !git) return ''
+    const block = buildPeekBlock({
+      id: target.id,
+      title: target.title || meta.title || '',
+      updatedAt: target.updatedAt || meta.updatedAt || 0,
+      lines,
+      git,
+    })
+    netLog('peek', { sessionId: bound, from: target.id, chars: block.length, ms: Date.now() - startedAt })
+    return block
+  } catch (error) {
+    LOG('旁听失败：', error?.message ?? error)
+    return ''
+  }
+}
+
 /**
  * 派发主体：把一句手机话送进指定会话，返回 `{status, body}` 交给路由写响应。
  * 抽出来是为了单测能不起 HTTP 覆盖「会话不存在 / 专属会话丢失」两条路径。
@@ -2448,7 +2621,7 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
   if (!attachments.ok) return { status: 400, body: { ok: false, error: attachments.error } }
   const attachmentPaths = attachments.paths
   if (!text && !attachmentPaths.length) return { status: 400, body: { ok: false, error: 'text 为空' } }
-  const promptText = composeDispatchText(text, attachmentPaths)
+  let promptText = composeDispatchText(text, attachmentPaths)
   const controller = ctx.get?.('sessionController')
   if (!controller?.prompt) return { status: 503, body: { ok: false, error: '宿主缺少 sessionController' } }
 
@@ -2467,6 +2640,10 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
   if (String(body?.sessionId ?? '').trim() && !(await sessionKnownToHost(ctx, sessionId))) {
     return { status: 404, body: { ok: false, error: `会话不存在：${sessionId}` } }
   }
+
+  // 「进展怎么样」这类问题：只读看一眼同项目里最近活跃的另一只，材料贴在本轮提示词后面。
+  const peekBlock = await peekContext(ctx, sessionId, text)
+  if (peekBlock) promptText = `${promptText}\n\n${peekBlock}`
 
   // 切网重发：同一个 requestId 只落一轮，避免电脑端出现两条相同提问。
   const rid = String(body?.requestId ?? '').trim()
