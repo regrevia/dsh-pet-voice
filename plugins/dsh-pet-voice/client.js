@@ -670,7 +670,7 @@ window.__ModuleLoader__.load({
                   (voiceList.some((item) => item.id === voiceValue)
                     ? voiceList
                     : [...voiceList, { id: voiceValue, label: voiceValue || '默认' }]
-                  ).map((item) => h('option', { key: item.id, value: item.id }, item.label)),
+                  ).map((item) => h('option', { key: item.id, value: item.id }, item.name || item.label)),
                 ),
           ),
           h(
