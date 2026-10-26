@@ -340,8 +340,13 @@ class HistoryActivity : Activity() {
     private fun refreshHeader() {
         val title = PetSettings.pinnedTitle(this)
         projectBtn.text = title.ifBlank { "项目" }
-        sessionLabel.text = liveSessionTitle
-        sessionLabel.visibility = if (liveSessionTitle.isBlank()) View.GONE else View.VISIBLE
+        // 第二行是「这一问落在哪只会话」。还没拿到会话名（刚开的新会话、名字还没生成）
+        // 就直说「新会话」：拿项目名顶上会让人以为自己在旧对话里。
+        val line = liveSessionTitle.ifBlank {
+            if (PetSettings.chatSession(this).isNotBlank()) "新会话" else ""
+        }
+        sessionLabel.text = line
+        sessionLabel.visibility = if (line.isBlank()) View.GONE else View.VISIBLE
     }
 
     /**
@@ -932,7 +937,8 @@ class HistoryActivity : Activity() {
                 if (id.isNotBlank()) {
                     // 开成功了就把屏幕上的旧消息一并收掉，否则新对话里还挂着上一只的内容。
                     PetSettings.saveChatSession(this, id)
-                    liveSessionTitle = PetSettings.pinnedTitle(this)
+                    // 新会话：名字等宿主给，这里先按「新会话」上屏，别再写项目名。
+                    liveSessionTitle = ""
                     refreshHeader()
                     PetHistory.clear(this)
                     liveText = ""
@@ -1158,15 +1164,26 @@ class HistoryActivity : Activity() {
         runText.text = "听着"
         val r = recorder ?: VoiceRecorder().also { recorder = it }
         r.onAutoStop = { ui.post { finishHold() } }
-        val ok = r.start()
-        if (!ok) {
-            micBusy = false
-            micBtn.alpha = 1f
-            micBtn.clearColorFilter()
-            runBar.visibility = View.GONE
-            sendServiceAction(FloatingPetService.ACTION_WAKE_RESUME)
-            toast("麦克风不可用")
+        // 开麦可能刚好撞上唤醒引擎松手的那一下，等它一下再开；不能一按就判「不可用」。
+        startRecorder(r, 0)
+    }
+
+    private fun startRecorder(r: VoiceRecorder, attempt: Int) {
+        if (!micDown && attempt > 0) {           // 手已经松了，别再跟他抢麦
+            if (micBusy) finishHold()
+            return
         }
+        if (r.start()) return
+        if (attempt < 3) {
+            ui.postDelayed({ if (micBusy) startRecorder(r, attempt + 1) }, 220)
+            return
+        }
+        micBusy = false
+        micBtn.alpha = 1f
+        micBtn.clearColorFilter()
+        runBar.visibility = View.GONE
+        sendServiceAction(FloatingPetService.ACTION_WAKE_RESUME)
+        toast("麦克风不可用")
     }
 
     private fun finishHold() {
