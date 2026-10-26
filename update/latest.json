@@ -6,6 +6,7 @@
   "file": "jingling-0.9.45.apk",
   "url": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.45/jingling-0.9.45.apk",
   "notes": "更新分两步：GitHub 只存档，放给用户靠 --promote；检查更新先看国内镜像",
-  "publishedAt": "2026-10-26T07:11:48.708Z",
-  "promotedAt": "2026-10-26T07:11:50.280Z"
+  "minPlugin": "0.1.9",
+  "publishedAt": "2026-10-26T07:12:42.162Z",
+  "promotedAt": "2026-10-26T07:12:43.766Z"
 }
