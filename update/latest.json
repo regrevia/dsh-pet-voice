@@ -1,11 +1,11 @@
 {
-  "versionCode": 116,
-  "versionName": "0.9.46",
-  "size": 29983630,
-  "sha256": "1881a867be41cc9d9bf1057b842535df7fa4a19773f6caed81c344404c6d2c15",
-  "file": "jingling-0.9.46.apk",
-  "url": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.46/jingling-0.9.46.apk",
-  "notes": "清理内部死代码，界面无变化",
-  "publishedAt": "2026-10-26T07:29:38.469Z",
-  "promotedAt": "2026-10-26T07:29:39.992Z"
+  "versionCode": 117,
+  "versionName": "0.9.47",
+  "size": 29983646,
+  "sha256": "9dd0b0968b2065067513065ba69601990cc5b3cd8a120bbcbbc58712b7c6197b",
+  "file": "jingling-0.9.47.apk",
+  "url": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.47/jingling-0.9.47.apk",
+  "notes": "信任自己装的根证书：用自签名域名的手机上不再报证书错",
+  "publishedAt": "2026-10-26T08:56:12.559Z",
+  "promotedAt": "2026-10-26T08:56:14.099Z"
 }
