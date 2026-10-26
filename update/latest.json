@@ -5,7 +5,7 @@
   "sha256": "1881a867be41cc9d9bf1057b842535df7fa4a19773f6caed81c344404c6d2c15",
   "file": "jingling-0.9.46.apk",
   "url": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.46/jingling-0.9.46.apk",
-  "notes": "「先更新插件」门槛上线：这版 App 需要插件 0.1.9 以上；顺手清掉没用的授权弹窗",
-  "publishedAt": "2026-10-26T07:29:04.299Z",
-  "promotedAt": "2026-10-26T07:29:06.059Z"
+  "notes": "清理内部死代码，界面无变化",
+  "publishedAt": "2026-10-26T07:29:38.469Z",
+  "promotedAt": "2026-10-26T07:29:39.992Z"
 }
