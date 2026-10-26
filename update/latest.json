@@ -1,12 +1,12 @@
 {
-  "versionCode": 129,
-  "versionName": "0.9.59",
-  "size": 29991610,
-  "sha256": "cca43684c9d17f6b2c659fa163a4662086b5db382e0bfb60d71c279a5aa007ba",
+  "versionCode": 130,
+  "versionName": "0.9.60",
+  "size": 29993782,
+  "sha256": "5c521d413acb342f5e7c707da33c209afe168315f9a33f298f0ab615dedf0d41",
   "file": "app-release.apk",
-  "url": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.59/app-release.apk",
-  "notes": "会话与历史里每条消息都按电脑端那样渲染：标题、列表、代码块、表格、图片；更早消息分页加载",
+  "url": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.60/app-release.apk",
+  "notes": "会话页加了停止按钮、发送自动排队、目标一行显示；会话列表标出正在执行的那只",
   "minPlugin": "0.1.12",
-  "publishedAt": "2026-10-26T11:12:11.359Z",
-  "promotedAt": "2026-10-26T11:12:14.384Z"
+  "publishedAt": "2026-10-26T11:24:13.790Z",
+  "promotedAt": "2026-10-26T11:24:15.357Z"
 }
