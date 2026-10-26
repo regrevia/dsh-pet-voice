@@ -209,20 +209,54 @@ function startTls(upstream) {
   })
 }
 
-function sshArgs(cfg) {
+function baseSshArgs(cfg) {
   const args = ['-N', '-T']
   if (cfg.keyPath) args.push('-i', cfg.keyPath)
   args.push(
     '-o', 'ExitOnForwardFailure=yes',
-    '-o', 'ServerAliveInterval=30',
-    '-o', 'ServerAliveCountMax=3',
+    // 半开连接（合盖、断网、进程被硬杀）时靠这条链路自己收尸：
+    // 远端端口属于 ssh 会话，会话不收，端口就一直被占，下次 -R 绑不上。
+    '-o', 'ServerAliveInterval=15',
+    '-o', 'ServerAliveCountMax=2',
+    '-o', 'TCPKeepAlive=yes',
     '-o', 'BatchMode=yes',
     '-o', 'StrictHostKeyChecking=accept-new',
     '-p', String(cfg.sshPort),
-    '-R', `0.0.0.0:${cfg.remotePort}:127.0.0.1:${cfg.tlsPort}`,
     cfg.user ? `${cfg.user}@${cfg.host}` : cfg.host,
   )
   return args
+}
+
+function sshArgs(cfg) {
+  const args = baseSshArgs(cfg)
+  const host = args.pop()
+  args.push('-R', `0.0.0.0:${cfg.remotePort}:127.0.0.1:${cfg.tlsPort}`, host)
+  return args
+}
+
+/** 上一次的会话死透了、却还占着远端端口时，把那个监听清掉再重连。 */
+function freeRemotePort(cfg) {
+  return new Promise((resolve) => {
+    const args = ['-T']
+    if (cfg.keyPath) args.push('-i', cfg.keyPath)
+    const host = cfg.user ? `${cfg.user}@${cfg.host}` : cfg.host
+    args.push(
+      '-o', 'BatchMode=yes',
+      '-o', 'StrictHostKeyChecking=accept-new',
+      '-o', 'ConnectTimeout=8',
+      '-p', String(cfg.sshPort),
+      host,
+      `sudo -n fuser -k ${Number(cfg.remotePort)}/tcp 2>&1 || true`,
+    )
+    const child = spawn('ssh', args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    let out = ''
+    child.stdout?.on('data', (c) => { out += c })
+    child.stderr?.on('data', (c) => { out += c })
+    const done = () => resolve(out.trim())
+    child.on('error', done)
+    child.on('exit', done)
+    setTimeout(done, 12_000)
+  })
 }
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -248,43 +282,55 @@ export async function connectPublic({ upstream } = {}) {
   state.tls = server
   state.tlsPort = cfg.tlsPort
 
-  const child = spawn('ssh', sshArgs(cfg), { stdio: ['ignore', 'ignore', 'pipe'] })
-  state.child = child
-  state.since = Date.now()
-  let errBuf = ''
-  child.stderr?.setEncoding('utf8')
-  child.stderr?.on('data', (chunk) => {
-    errBuf += chunk
-    const lines = errBuf.split('\n')
-    errBuf = lines.pop() ?? ''
-    for (const line of lines) note(line)
-  })
-  // ssh 不在 PATH（ENOENT）时，不注册 error 监听会让整个 Node 进程 exit(1)。
-  // 这里只让「公网转发」这一个功能失败，并把原因留给 connectPublic 抛出。
-  child.on('error', (error) => {
-    if (state.child !== child) return
-    state.child = null
-    const code = String(error?.code ?? '')
-    state.lastError = code === 'ENOENT'
-      ? '这台电脑没有 ssh，先在终端装好再连'
-      : `ssh 起不来（${code || error?.message || '未知原因'}）`
-    note(state.lastError)
-  })
-  child.on('exit', (code) => {
-    if (state.child === child) {
+  const launch = async () => {
+    const child = spawn('ssh', sshArgs(cfg), { stdio: ['ignore', 'ignore', 'pipe'] })
+    state.child = child
+    state.since = Date.now()
+    let errBuf = ''
+    child.stderr?.setEncoding('utf8')
+    child.stderr?.on('data', (chunk) => {
+      errBuf += chunk
+      const lines = errBuf.split('\n')
+      errBuf = lines.pop() ?? ''
+      for (const line of lines) note(line)
+    })
+    // ssh 不在 PATH（ENOENT）时，不注册 error 监听会让整个 Node 进程 exit(1)。
+    // 这里只让「公网转发」这一个功能失败，并把原因留给 connectPublic 抛出。
+    child.on('error', (error) => {
+      if (state.child !== child) return
       state.child = null
-      if (code) note(`ssh 退出（${code}）`)
-    }
-  })
+      const code = String(error?.code ?? '')
+      state.lastError = code === 'ENOENT'
+        ? '这台电脑没有 ssh，先在终端装好再连'
+        : `ssh 起不来（${code || error?.message || '未知原因'}）`
+      note(state.lastError)
+    })
+    child.on('exit', (code) => {
+      if (state.child === child) {
+        state.child = null
+        if (code) note(`ssh 退出（${code}）`)
+      }
+    })
 
-  // 隧道是否真起来：等 ssh 安静下来 + 进程没退
-  for (let i = 0; i < 40; i += 1) {
-    await wait(200)
-    if (!state.child) break
-    const running = state.child
-    if (running && i >= 3 && !errBuf) break
+    // 隧道是否真起来：等 ssh 安静下来 + 进程没退
+    for (let i = 0; i < 40; i += 1) {
+      await wait(200)
+      if (!state.child) break
+      const running = state.child
+      if (running && i >= 3 && !errBuf) break
+    }
+    return Boolean(state.child)
   }
-  if (!state.child) {
+
+  let up = await launch()
+  // 上一次的 ssh 会话半开死掉时，远端端口仍被它占着，-R 会直接失败；清一次再试。
+  if (!up && /forwarding failed|already in use/i.test(state.lastError)) {
+    note('上次的连接还占着服务器端口，先清掉再连')
+    state.lastError = ''
+    await freeRemotePort(cfg)
+    up = await launch()
+  }
+  if (!up) {
     await disconnectPublic()
     throw new Error(state.lastError || '隧道没起来')
   }
