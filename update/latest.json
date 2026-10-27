@@ -1,12 +1,12 @@
 {
-  "versionCode": 135,
-  "versionName": "0.9.65",
-  "size": 30026826,
-  "sha256": "4a12252b166a96881be9acb73d69578113d547c72f3339cc3380f4472b6a571b",
+  "versionCode": 136,
+  "versionName": "0.9.66",
+  "size": 30026942,
+  "sha256": "f4e74f50cad208478e2290fd2be80a825b08a4c511229fefbc77f82f5361cfe9",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.65/app-release.apk",
-  "notes": "面板里的下载链接改指 CNB 公开 release（国内直连快），下不动时自动换 GitHub 备份源；配对令牌失效时不再没反应，会提示重新扫码",
-  "publishedAt": "2026-10-27T13:24:21.806Z",
-  "promotedAt": "2026-10-27T13:24:23.443Z",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.65/app-release.apk"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.66/app-release.apk",
+  "notes": "按住说话遇到令牌失效不再没反应：气泡直接说「配对失效了 · 打开鲸灵重新扫码」；更新优先直连 CNB，下不动自动换 GitHub 备份",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.66/app-release.apk",
+  "publishedAt": "2026-10-27T13:54:35.434Z",
+  "promotedAt": "2026-10-27T13:54:37.194Z"
 }
