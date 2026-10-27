@@ -612,17 +612,28 @@ class FloatingPetService : Service() {
                 val json = r?.json ?: return@post
                 val items = json.optJSONArray("items")
                 var shown = 0
+                var consumed = -1L
                 if (items != null) {
                     for (i in 0 until items.length()) {
                         if (shown >= SAY_MAX_PER_POLL) break
-                        val text = items.optJSONObject(i)?.optString("text").orEmpty().trim()
-                        if (text.isEmpty()) continue
-                        say(text)
-                        shown += 1
+                        val o = items.optJSONObject(i) ?: continue
+                        val text = o.optString("text").orEmpty().trim()
+                        if (text.isNotEmpty()) {
+                            say(text)
+                            shown += 1
+                        }
+                        val seq = o.optLong("seq", -1L)
+                        if (seq > consumed) consumed = seq
                     }
                 }
-                val cursor = json.optLong("cursor", sayCursor)
-                if (cursor > sayCursor) sayCursor = cursor
+                // 游标只推到自己真正取到的那条：宿主返回的 cursor 是整批的尾巴，
+                // 连发超过 SAY_MAX_PER_POLL 时直接用它会把没搬的中间几句永久跳过。
+                if (consumed > sayCursor) {
+                    sayCursor = consumed
+                } else if (items == null || items.length() == 0) {
+                    val cursor = json.optLong("cursor", sayCursor)
+                    if (cursor > sayCursor) sayCursor = cursor
+                }
                 if (shown > 0) Log.i("PetSay", "气泡上屏 $shown 条 cursor=$sayCursor")
             }
         }, "pet-say").apply { isDaemon = true }.start()
