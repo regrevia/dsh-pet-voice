@@ -5079,10 +5079,16 @@ export function apply(ctx, config) {
     // （宿主前缀匹配不可靠，见 ensureDownloadRoute 的注释）。
     ensureDownloadRoute(meta.file)
     LOG(`更新查询：v${meta.versionName}（code ${meta.versionCode}）→ ${meta.file}`)
+    // 下载地址优先级：CNB 公开 release（手机直连，几十 MB 不经隧道）→ 宿主自己这口
+    // （隧道通就一定下得到）→ 发布记录里那条 GitHub 存档（App 只认两个源，排在最后）。
+    const local = `${DOWNLOAD}/${encodeURIComponent(meta.file)}`
+    const upstream = /^https:\/\//i.test(String(meta.url ?? '')) ? String(meta.url) : local
+    const backup = upstream === local ? String(meta.fallbackUrl ?? '') : local
     return sendJson(res, 200, {
       ...meta,
       versionCode: Number(meta.versionCode) || 0,
-      url: `${DOWNLOAD}/${encodeURIComponent(meta.file)}`,
+      url: upstream,
+      ...(backup ? { fallbackUrl: backup } : {}),
     })
   }
 

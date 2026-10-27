@@ -224,6 +224,12 @@ class FloatingPetService : Service() {
         tts.prewarm(FILLERS) // 口头填充句先合成好，宿主一句要 0.9s+，不能让用户干等
         createChannel()
         AppForeground.onChange = { on -> main.post { applyAppForeground(on) } }
+        // 401 = 这台手机的令牌跟宿主对不上：说一句，别让「按住说话没反应」变成哑谜。
+        AuthWatch.onUnauthorized = {
+            AuthWatch.remember(this)
+            main.post { hintOnce("配对失效了 · 打开鲸灵重新扫码") }
+        }
+        if (AuthWatch.pending(this)) main.post { hintOnce("配对失效了 · 打开鲸灵重新扫码") }
         registerScreenReceiver()
         if (BuildConfig.DEBUG) {
             try {

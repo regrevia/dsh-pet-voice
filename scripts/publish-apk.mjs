@@ -21,8 +21,8 @@
 
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -416,7 +416,7 @@ async function cnbUploadAsset(token, releaseId, fileName, bytes) {
   if (!confirmed.ok) fail(`CNB 确认上传 ${fileName} 失败：HTTP ${confirmed.status}`)
 }
 
-function cnbMetaFor({ fileName, size, sha256, versionCode, versionName, notes, minPlugin, base }) {
+function cnbMetaFor({ fileName, size, sha256, versionCode, versionName, notes, minPlugin, base, fallbackUrl }) {
   return {
     versionCode,
     versionName,
@@ -426,6 +426,7 @@ function cnbMetaFor({ fileName, size, sha256, versionCode, versionName, notes, m
     url: `${base}/${fileName}`,
     notes,
     ...(minPlugin ? { minPlugin } : {}),
+    ...(fallbackUrl ? { fallbackUrl } : {}),
     publishedAt: new Date().toISOString(),
   }
 }
@@ -457,7 +458,7 @@ function writePromotionRecord(githubMeta, versionName) {
 }
 
 /** 放给用户：CNB 传包 + 每版自带一份 meta（回滚要用）+ 换固定入口 + 改仓库里的推广记录。 */
-async function promote({ apkPath, fileName, size, sha256, versionCode, versionName, notes, minPlugin, github }) {
+async function promote({ apkPath, fileName, size, sha256, versionCode, versionName, notes, minPlugin, github, dir }) {
   const token = cnbToken()
   if (!token) {
     fail('没有 CNB 凭据，放不出去', 'CNB_TOKEN=... 或确认 git credential 里有 cnb.cool 的密码')
@@ -470,7 +471,18 @@ async function promote({ apkPath, fileName, size, sha256, versionCode, versionNa
     console.log(`· 同步国内镜像 ${CNB_REPO} ${tag}（cnb.cool 比 GitHub 快得多，几秒就好）`)
     await cnbUploadAsset(token, releaseId, fileName, readFileSync(apkPath))
   }
-  const cnbMeta = cnbMetaFor({ fileName, size, sha256, versionCode, versionName, notes, minPlugin, base: `${CNB_WEB}/download/${tag}` })
+  const cnbMeta = cnbMetaFor({
+    fileName,
+    size,
+    sha256,
+    versionCode,
+    versionName,
+    notes,
+    minPlugin,
+    base: `${CNB_WEB}/download/${tag}`,
+    // 国内直连 CNB；万一 CNB 抽风，App 会换这条 GitHub 存档再下一次
+    fallbackUrl: `${GITHUB_BASE}/download/${tag}/${fileName}`,
+  })
   // 每版 Release 自己留一份 meta：--rollback 直接取回来，不依赖本机缓存。
   await cnbUploadAsset(token, releaseId, 'latest.json', Buffer.from(`${JSON.stringify(cnbMeta, null, 2)}\n`))
   await cnbPointLatest(token, cnbMeta)
@@ -479,6 +491,8 @@ async function promote({ apkPath, fileName, size, sha256, versionCode, versionNa
     // 用户真正下载的地址。国内直连 GitHub Release 经常几十 KB/s，所以这里跟公开通道
     // 一样指 CNB（公开 release，免登录）。GitHub 只当存档，不再写进 url。
     writePromotionRecord(cnbMeta, versionName)
+    // 宿主兜底目录里的这份才是「用户点下载」真正读到的：只跟推广走，且必须指 CNB
+    writeJsonAtomic(join(dir || UPDATE_DIR, 'latest.json'), { ...cnbMeta, promotedAt: new Date().toISOString() })
   }
   console.log(`✓ 用户现在能看到 ${versionName} → ${cnbMeta.url}`)
 }
@@ -603,7 +617,10 @@ async function main() {
     if (!hasAsset(tag, fileName, size)) {
       runGh(['release', 'upload', tag, apkPath, '--clobber', '-R', GITHUB_REPO])
     }
-    const githubMetaPath = join(options.dir, 'latest.json')
+    // 存档用的那份 meta 不能写进发布目录：发布目录里的 latest.json 是用户点下载时读的，
+    // 只该由 promote 写（指 CNB）。这里用临时文件传上去即可。
+    const archiveDir = mkdtempSync(join(tmpdir(), 'pet-gh-'))
+    const githubMetaPath = join(archiveDir, 'latest.json')
     writeJsonAtomic(githubMetaPath, githubMeta)
     runGh(['release', 'upload', tag, githubMetaPath, '--clobber', '-R', GITHUB_REPO])
     try {
@@ -613,6 +630,7 @@ async function main() {
     }
     mkdirSync(join(REPO_ROOT, 'dist', 'mirror', 'github'), { recursive: true, mode: 0o700 })
     writeJsonAtomic(join(REPO_ROOT, 'dist', 'mirror', 'github', 'latest.json'), githubMeta)
+    rmSync(archiveDir, { recursive: true, force: true })
     console.log(`✓ GitHub 存档 → ${assetUrl}`)
   }
 
@@ -627,6 +645,7 @@ async function main() {
       notes: options.notes,
       minPlugin: options.minPlugin,
       github: options.github,
+      dir: options.dir,
     })
   } else {
     console.log('· 用户还看不到这版；要放出去再跑一次同一条命令加 --promote')

@@ -7,5 +7,6 @@
   "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.65/app-release.apk",
   "notes": "面板里的下载链接改指 CNB 公开 release（国内直连快），下不动时自动换 GitHub 备份源；配对令牌失效时不再没反应，会提示重新扫码",
   "publishedAt": "2026-10-27T13:24:21.806Z",
-  "promotedAt": "2026-10-27T13:24:23.443Z"
+  "promotedAt": "2026-10-27T13:24:23.443Z",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.65/app-release.apk"
 }

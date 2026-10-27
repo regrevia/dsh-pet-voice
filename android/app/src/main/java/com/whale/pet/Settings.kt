@@ -193,6 +193,8 @@ object PetSettings {
             .putString(K_OUTFIT, PetConfig.cleanOutfit(cfg.outfit))
             .putString(K_DISPLAY, PetConfig.cleanDisplayMode(cfg.displayMode))
             .apply()
+        // 新令牌落盘就算重新配对成功，401 的欠账清掉
+        AuthWatch.clear(context)
     }
 
     /**

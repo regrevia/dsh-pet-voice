@@ -513,6 +513,9 @@ class PetClient(private val config: () -> PetConfig) {
                         System.currentTimeMillis() - t0,
                         if (attempt > 1) "第 $attempt 次" else "",
                     )
+                    // 401 = 这台手机的令牌和宿主对不上了（宿主那边换过 token / 重装过）。
+                    // 以前只打一行日志，用户看到的是「点一下没反应」，必须说出来。
+                    if (code == 401) AuthWatch.fire()
                     return Result(code, text, text.toJsonOrNull())
                 } finally {
                     conn.disconnect()
