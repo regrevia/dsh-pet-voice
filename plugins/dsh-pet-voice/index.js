@@ -312,8 +312,12 @@ const SHARED = (globalThis[Symbol.for('dsh.pet-voice.shared')] ||= {
   buffers: new Map(),
   netLog: [],
   dispatchSeen: new Map(),
+  textSeen: new Map(),
 })
 const DISPATCH_SEEN = SHARED.dispatchSeen
+// 老客户端（build 132）不带 requestId，连点两下就发两句：第一句 200 起轮、第二句 202 排队，
+// 手机上看是「同一个问题问了两遍/后一句卡住」。没 rid 时按「会话+原句」在 2.5s 内认一次重发。
+const TEXT_SEEN = (SHARED.textSeen ||= new Map())  // 热重载会沿用旧 SHARED 对象，新字段必须兜底
 const NET_LOG = SHARED.netLog
 const NET_LOG_MAX = 400
 function netLog(ev, extra = {}) {
@@ -1784,9 +1788,9 @@ async function sessionRowsCached(ctx, ttlMs = SESSION_ROWS_TTL) {
  * App 打开、回前台、面板刷新、小爱自检都会打这条，让它干等 `list()`（实测 ~0.5 s）
  * 纯属白等：这个列表本来就允许几秒级滞后，真要用会话的地方（派发）自己会校验存在性。
  */
-function sessionRowsSoft(ctx) {
+function sessionRowsSoft(ctx, ttlMs = SESSION_ROWS_TTL) {
   if (sessionRowsCache.rows.length) {
-    if (Date.now() - sessionRowsCache.at >= SESSION_ROWS_TTL) void sessionRowsCached(ctx).catch(() => {})
+    if (Date.now() - sessionRowsCache.at >= ttlMs) void sessionRowsCached(ctx, ttlMs).catch(() => {})
     return Promise.resolve(sessionRowsCache.rows)
   }
   return sessionRowsCached(ctx)
@@ -2049,6 +2053,7 @@ export const __dispatchInternals = {
 /** 宿主列表缓存的单测入口（见 test/state-rows-cache.test.mjs）。 */
 export const __rowsInternals = {
   sessionRowsCached,
+  sessionRowsSoft,
   presetRowsCached,
   resetRowsCache() {
     sessionRowsCache = { at: 0, rows: [] }
@@ -3370,6 +3375,17 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
     DISPATCH_SEEN.set(rid, { at: Date.now(), sessionId })
     for (const [key, value] of DISPATCH_SEEN) {
       if (Date.now() - value.at > 120_000) DISPATCH_SEEN.delete(key)
+    }
+  } else if (text) {
+    const key = `${sessionId}|${text}`
+    const hit = TEXT_SEEN.get(key)
+    if (hit && Date.now() - hit.at < 2_500) {
+      netLog('dispatch-text-dedupe', { sessionId: bareSessionId(sessionId).slice(0, 8), chars: text.length })
+      return { status: 200, body: { ok: true, accepted: true, sessionId, usedSessionId: sessionId, deduped: true, attachments: attachmentPaths.length } }
+    }
+    TEXT_SEEN.set(key, { at: Date.now() })
+    for (const [k, v] of TEXT_SEEN) {
+      if (Date.now() - v.at > 10_000) TEXT_SEEN.delete(k)
     }
   }
 
@@ -5314,7 +5330,9 @@ export function apply(ctx, config) {
       if (route === 'state' && method === 'GET') {
         // 缓一缓存 + 并发合并：App 打开/回前台、面板刷新、小爱自检都会同时打这一条，
         // 每条都去宿主 list() 一次的话就是排队等宿主（实测 8 并发要 4 s）。
-        const [sessions, presets] = await Promise.all([sessionRowsCached(ctx), presetRowsCached(ctx)])
+        // 会话列表过期也先回旧的、后台再刷：这条是 App 的高频路径，不该为 0.5 s 的
+        // list() 干等（预设列表小，直接等）。
+        const [sessions, presets] = await Promise.all([sessionRowsSoft(ctx), presetRowsCached(ctx)])
         // 小爱专属会话不参与「界面当前会话」的推算：宿主 list() 按活跃度排序，我们自己
         // 往专属会话 prompt 一次就会把它顶到第一位。若直接把 sessions[0] 当 current，
         // 用户会看到界面上的当前会话被小爱「抢方向盘」。所以这里跳过专属会话那只。
