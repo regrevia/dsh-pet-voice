@@ -1,12 +1,12 @@
 {
-  "versionCode": 139,
-  "versionName": "0.9.69",
-  "size": 30027830,
-  "sha256": "119c7fc940ef2008e8af0693c45ef44b5280f082e39c684a93dc527a430ec67d",
+  "versionCode": 140,
+  "versionName": "0.9.70",
+  "size": 30027822,
+  "sha256": "2f006786183dabc3286ed9ff0780effa2779ede8da35aaddab02207166a6d1b4",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.69/app-release.apk",
-  "notes": "宿主遇到的句子现在会出现在气泡里：/pet-voice/api/say 入队后手机上屏（1.5s 内），同 id 不重复，熄屏停、亮屏接上。",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.69/app-release.apk",
-  "publishedAt": "2026-10-27T19:17:28.406Z",
-  "promotedAt": "2026-10-27T19:17:30.792Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.70/app-release.apk",
+  "notes": "连发多句不再丢中间那几句；主机说的话会按顺序一句句落到气泡里。",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.70/app-release.apk",
+  "publishedAt": "2026-10-27T19:37:31.687Z",
+  "promotedAt": "2026-10-27T19:37:33.617Z"
 }
