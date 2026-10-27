@@ -2,6 +2,7 @@ package com.whale.pet
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.MediaDataSource
 import android.media.MediaPlayer
 import android.os.Handler
 import android.os.Looper
@@ -41,6 +42,13 @@ class TtsPlayer(
     private val io = Executors.newFixedThreadPool(2) { r -> Thread(r, "pet-tts").apply { isDaemon = true } }
     private val queue = TtsQueue(maxAhead = 2)
     private var current: MediaPlayer? = null
+
+    /** 正在边下边播的缓冲：打断时先 abort，读线程立刻从 readAt 返回 -1。 */
+    @Volatile
+    private var liveStream: StreamBuf? = null
+
+    /** 已经边下边播完、等调度来还位的 seq：同一次出声不能放第二遍。 */
+    private val streamedPlayed = HashSet<Long>()
 
     /** 打断轮次：迟到的准备/下载回调据此判废；由 [doStop] 与 [TtsQueue.stopAll] 同时递增。 */
     @Volatile
@@ -136,7 +144,7 @@ class TtsPlayer(
             runIo {
                 val tmp = File(dest.parentFile, dest.name + ".warm-" + System.nanoTime() + ".part")
                 try {
-                    client.downloadTts(t, preset, tmp)
+                    client.downloadTts(t, preset, tmp, raw = false)
                     if (tmp.length() > 512L && myEpoch == epoch) {
                         moveInto(tmp, dest)
                         pruneCache()
@@ -207,15 +215,246 @@ class TtsPlayer(
     * 临时文件，先完成的把它改名拿走、后一个 copyTo 抛 NoSuchFileException 的老问题。
      * 异常只记原因，交回 [TtsQueue] 变成「跳过这一句或报一句错」，绝不往上抛。
      */
+    /* ---------------- 边下边播 ---------------- */
+
+    /**
+     * 边下边播的共享缓冲：io 线程边收边写，MediaPlayer 的读线程 [readAt] 阻塞等数据。
+     *
+     * `getSize() = -1`（长度未知）→ MediaPlayer 顺序读到 -1 为止。宿主 `?stream=1` 吐的是
+     * 裸 mp3 帧（PET_TTS_RAW），没有容器头，所以只顺序读、不 seek。
+     */
+    private inner class StreamBuf : MediaDataSource() {
+        private val lock = Object()
+        private var data = ByteArray(96 * 1024)
+        private var len = 0
+
+        @Volatile
+        private var done = false
+
+        @Volatile
+        private var aborted = false
+
+        @Volatile
+        var reason: String = ""
+
+        fun write(b: ByteArray, off: Int, n: Int) {
+            synchronized(lock) {
+                if (aborted || done) return
+                if (len + n > data.size) {
+                    var cap = data.size
+                    while (cap < len + n) cap *= 2
+                    data = data.copyOf(cap)
+                }
+                System.arraycopy(b, off, data, len, n)
+                len += n
+                lock.notifyAll()
+            }
+        }
+
+        fun finish() {
+            synchronized(lock) {
+                done = true
+                lock.notifyAll()
+            }
+        }
+
+        fun abort(why: String) {
+            synchronized(lock) {
+                if (!aborted) {
+                    aborted = true
+                    reason = why
+                }
+                done = true
+                lock.notifyAll()
+            }
+        }
+
+        fun isDone(): Boolean = done
+
+        override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
+            if (size <= 0) return 0
+            synchronized(lock) {
+                while (!aborted && position >= len && !done) {
+                    try {
+                        lock.wait(120)
+                    } catch (_: InterruptedException) {
+                        return -1
+                    }
+                }
+                if (aborted) return -1
+                if (position >= len) return -1 // 正常结束：一直读到 -1
+                val n = minOf(size.toLong(), len - position).toInt()
+                System.arraycopy(data, position.toInt(), buffer, offset, n)
+                return n
+            }
+        }
+
+        override fun getSize(): Long = -1L // 长度未知：不许按 size 预分配/跳读
+
+        override fun close() {
+            abort("已关闭")
+        }
+    }
+
+    /**
+     * 边下边播一句：请求头一到就挂播放器，body 边收边喂，同时照旧落盘缓存。
+     * 失败/被打断只把下载槽位还回去，不抛异常（规则同 [download]）。
+     */
+    private fun streamDownload(seq: Long, text: String, preset: String, tempTag: Long, myEpoch: Int) {
+        val buf = StreamBuf()
+        liveStream = buf
+        val startedAt = SystemClock.elapsedRealtime()
+        val notified = java.util.concurrent.atomic.AtomicBoolean(false)
+        val finish = { ok: Boolean, why: String ->
+            if (notified.compareAndSet(false, true)) {
+                main.post { queue.onDownloadDone(seq, ok, why) }
+            }
+        }
+        runIo({ finish(false, "已停止") }) {
+            val dest = cacheFile(text, preset)
+            val tmp = File(dest.parentFile, dest.name + "." + tempTag + ".part")
+            var out: java.io.OutputStream? = null
+            var got = 0L
+            var ok = false
+            var why = ""
+            try {
+                val stream = client.openTtsStream(text, preset)
+                Log.i(TurnLatency.TAG, "tts 流已连上 ${stream.headersMs}ms chars=${text.length}")
+                out = tmp.outputStream()
+                main.post {
+                    if (myEpoch == epoch && !buf.isDone()) {
+                        attachStream(seq, buf, myEpoch, startedAt)
+                    } else {
+                        buf.abort("已打断")
+                    }
+                }
+                val chunk = ByteArray(8 * 1024)
+                while (true) {
+                    if (myEpoch != epoch) {
+                        why = "已打断"
+                        break
+                    }
+                    val n = stream.input.read(chunk)
+                    if (n < 0) {
+                        ok = true
+                        break
+                    }
+                    if (n == 0) continue
+                    got += n
+                    buf.write(chunk, 0, n)
+                    try {
+                        out.write(chunk, 0, n)
+                    } catch (_: Exception) {
+                    }
+                }
+                buf.finish()
+                stream.close()
+                if (ok && got > 512L && myEpoch == epoch) {
+                    out.flush()
+                    out.close()
+                    out = null
+                    moveInto(tmp, dest)
+                    pruneCache()
+                }
+            } catch (e: Exception) {
+                why = e.message ?: e.javaClass.simpleName
+                buf.abort(why)
+                Log.w("PetTts", "流式 TTS 失败 seq=$seq：$why")
+            } finally {
+                try {
+                    out?.close()
+                } catch (_: Exception) {
+                }
+                if (!ok) {
+                    try {
+                        tmp.delete()
+                    } catch (_: Exception) {
+                    }
+                }
+                Log.i(TurnLatency.TAG, "tts 流结束 bytes=${got} ok=$ok 用时=${SystemClock.elapsedRealtime() - startedAt}ms")
+                // 播放器没挂上/中途被打断：槽位在这里还，队列不能饿死
+                finish(ok && got > 512L, why)
+            }
+        }
+    }
+
+    /** 流已连上：挂一个 MediaPlayer 读共享缓冲，边到边播。 */
+    private fun attachStream(seq: Long, buf: StreamBuf, myEpoch: Int, startedAt: Long) {
+        if (epoch != myEpoch || current != null || speaking) {
+            buf.abort("播放器被占用")
+            return
+        }
+        try {
+            val mp = MediaPlayer()
+            mp.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build(),
+            )
+            mp.setDataSource(buf)
+            mp.setOnPreparedListener {
+                if (epoch != myEpoch) {
+                    releaseQuietly(it)
+                    if (current === it) current = null
+                    setSpeaking(false)
+                    streamedPlayed.remove(seq)
+                    return@setOnPreparedListener
+                }
+                Log.i(TurnLatency.TAG, "流式首声 ${SystemClock.elapsedRealtime() - startedAt}ms（连上→出声）")
+                setSpeaking(true)
+                try {
+                    it.start()
+                } catch (e: Exception) {
+                    releaseQuietly(it)
+                    if (current === it) current = null
+                    setSpeaking(false)
+                    queue.onPlayFailed(seq, e.message ?: e.javaClass.simpleName)
+                }
+            }
+            mp.setOnCompletionListener {
+                releaseQuietly(it)
+                if (current === it) current = null
+                setSpeaking(false)
+                // 先记账再还调度：onSpeak 会立刻回调过来，speakNow 靠这个集合认出「已经放过了」
+                streamedPlayed.add(seq)
+                main.post {
+                    if (!queue.onDownloadDone(seq, true)) streamedPlayed.remove(seq)
+                }
+            }
+            mp.setOnErrorListener { p, what, extra ->
+                releaseQuietly(p)
+                if (current === p) current = null
+                setSpeaking(false)
+                Log.w("PetTts", "流式播放失败 seq=$seq what=$what extra=$extra ${buf.reason}")
+                streamedPlayed.remove(seq)
+                onError("播放失败（what=$what extra=$extra）")
+                queue.onPlayFailed(seq, "播放失败")
+                true
+            }
+            current = mp
+            mp.prepareAsync()
+        } catch (e: Exception) {
+            buf.abort(e.message ?: e.javaClass.simpleName)
+            onError("播放失败：${e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
     private fun download(seq: Long, text: String, preset: String, tempTag: Long) {
         val myEpoch = epoch
+        // 边下边播只在「轮到这一句、且现在没人在响」时值得：其余句子老实下完整段，
+        // 轮到它时文件已经在盘上（命中缓存比流式省事）。
+        if (current == null && !speaking) {
+            streamDownload(seq, text, preset, tempTag, myEpoch)
+            return
+        }
         runIo({ main.post { queue.onDownloadDone(seq, false, "已停止") } }) {
             val dest = cacheFile(text, preset)
             val tmp = File(dest.parentFile, dest.name + "." + tempTag + ".part")
             var ok = false
             var reason = ""
             try {
-                client.downloadTts(text, preset, tmp)
+                client.downloadTts(text, preset, tmp, raw = false)
                 if (tmp.length() <= 512L) {
                     reason = "合成结果为空"
                 } else if (myEpoch != epoch) {
@@ -283,6 +522,11 @@ class TtsPlayer(
 
     /** 轮到某一句出声：正文就绪时先掐掉填充句，接缝处听不到空档。 */
     private fun speakNow(seq: Long, text: String, preset: String, enqueuedAt: Long) {
+        // 这一句已经在边下边播里放完了：只把调度位置还回去，绝不再放一遍
+        if (streamedPlayed.remove(seq)) {
+            queue.onPlayDone(seq)
+            return
+        }
         val file = cacheFile(text, preset)
         if (!file.exists() || file.length() < 512L) {
             // 文件被淘汰或上一轮删掉了：跳过，别让整条队列停在这里
@@ -406,6 +650,7 @@ class TtsPlayer(
 
     private fun doStop() {
         epoch++
+        liveStream?.abort("已停止")
         queue.stopAll()
         releaseQuietly(current)
         current = null

@@ -7,7 +7,9 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.IOException
 import java.io.InputStreamReader
+import java.net.ConnectException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
 import java.util.concurrent.atomic.AtomicBoolean
@@ -270,10 +272,11 @@ class PetClient(private val config: () -> PetConfig) {
     }
 
     /** 拉一段 mp3 到本地文件；非音频/过短视为失败（TTS 缺 edge-tts 时服务端 503）。 */
-    fun downloadTts(text: String, preset: String, dest: File) {
+    fun downloadTts(text: String, preset: String, dest: File, raw: Boolean = true) {
         // 拆分「宿主合成(到响应头)」与「拉音频体」两段耗时，用来判断 TTS 慢在服务端还是链路。
         val t0 = System.nanoTime()
-        val conn = open("tts", mapOf("text" to text, "preset" to preset), "GET", 60_000)
+        // stream=1：宿主来一块吐一块（PET_TTS_RAW），不攒完整句、不跑 ffmpeg 掐头去尾
+        val conn = open("tts", mapOf("text" to text, "preset" to preset, "stream" to if (raw) "1" else "0"), "GET", 60_000)
         try {
             val code = conn.responseCode
             val headersMs = (System.nanoTime() - t0) / 1_000_000
@@ -294,6 +297,49 @@ class PetClient(private val config: () -> PetConfig) {
             )
         } finally {
             conn.disconnect()
+        }
+    }
+
+    /** 流式 TTS 会话：响应头已到手，body 由调用方边读边喂播放器。 */
+    class TtsStream(
+        private val conn: HttpURLConnection,
+        val input: java.io.InputStream,
+        val headersMs: Long,
+    ) {
+        fun close() {
+            try {
+                input.close()
+            } catch (_: Exception) {
+            }
+            try {
+                conn.disconnect()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /**
+     * 打开流式 TTS：拿到响应头就返回（`?stream=1`），不做整段下载。
+     * 非 200 / 不是音频立刻抛，调用方自行回退成整段下载。
+     */
+    fun openTtsStream(text: String, preset: String): TtsStream {
+        val t0 = System.nanoTime()
+        val conn = open("tts", mapOf("text" to text, "preset" to preset, "stream" to "1"), "GET", 60_000)
+        try {
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                val msg = conn.errorStream?.use { it.readBytes().toString(Charsets.UTF_8) }.orEmpty()
+                throw IOException("TTS HTTP $code ${msg.take(160)}")
+            }
+            val type = conn.contentType.orEmpty()
+            if (!type.startsWith("audio/")) throw IOException("TTS 返回的不是音频：$type")
+            return TtsStream(conn, conn.inputStream, (System.nanoTime() - t0) / 1_000_000)
+        } catch (e: Exception) {
+            try {
+                conn.disconnect()
+            } catch (_: Exception) {
+            }
+            throw e
         }
     }
 
@@ -347,6 +393,48 @@ class PetClient(private val config: () -> PetConfig) {
         }
     }
 
+    /**
+     * 传一个文件（视频/图片都走这条）：边读边发，不把 200 MB 的片子读进内存。
+     *
+     * [onProgress] 在发数据的线程里回调 0–100，调用方自己转主线程。
+     */
+    fun uploadMedia(file: java.io.File, name: String, mime: String, onProgress: (Int) -> Unit): Result {
+        val t0 = System.nanoTime()
+        val total = file.length()
+        val conn = open("upload", mapOf("name" to name), "POST", 600_000)
+        try {
+            conn.doOutput = true
+            conn.setFixedLengthStreamingMode(total)
+            conn.setRequestProperty("Content-Type", mime)
+            conn.outputStream.use { out ->
+                file.inputStream().use { input ->
+                    val buf = ByteArray(64 * 1024)
+                    var sent = 0L
+                    var last = -1
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        out.write(buf, 0, n)
+                        sent += n
+                        val pct = if (total > 0) ((sent * 100) / total).toInt() else 100
+                        if (pct != last) {
+                            last = pct
+                            onProgress(pct)
+                        }
+                    }
+                }
+            }
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.use { it.readBytes().toString(Charsets.UTF_8) }.orEmpty()
+            val ms = (System.nanoTime() - t0) / 1_000_000
+            NetLog.record("POST /api/upload", code, ms, "${total / 1024}KB $mime")
+            return Result(code, text, text.toJsonOrNull())
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     /** 宿主端有没有比本机新的 APK（`GET /api/update`）。 */
     fun update(): Result = get("update", emptyMap())
 
@@ -360,7 +448,7 @@ class PetClient(private val config: () -> PetConfig) {
         val abs = if (path.startsWith("/")) path else "/$path"
         val conn = URL("${uri.scheme}://${uri.rawAuthority}$abs").openConnection() as HttpURLConnection
         conn.requestMethod = "GET"
-        conn.connectTimeout = 8_000
+        conn.connectTimeout = 2_500
         conn.readTimeout = 180_000
         conn.instanceFollowRedirects = true
         conn.setRequestProperty("Cookie", cfg.cookieHeader)
@@ -404,7 +492,9 @@ class PetClient(private val config: () -> PetConfig) {
         attempts: Int = 1,
     ): Result {
         var last: Exception? = null
-        for (attempt in 1..attempts) {
+        var quickRetried = false
+        var attempt = 1
+        while (attempt <= attempts) {
             val t0 = System.currentTimeMillis()
             try {
                 val conn = open(path, query, method, readTimeoutMs)
@@ -429,13 +519,21 @@ class PetClient(private val config: () -> PetConfig) {
                 }
             } catch (e: Exception) {
                 last = e
+                val connectFail = e is SocketTimeoutException || e is ConnectException
+                val willRetry = attempt < attempts || (connectFail && !quickRetried)
                 NetLog.record(
                     "$method /api/$path",
                     0,
                     System.currentTimeMillis() - t0,
-                    "失败 ${e.javaClass.simpleName}" + if (attempt < attempts) " 重试" else "",
+                    "失败 ${e.javaClass.simpleName}" + if (willRetry) " 重试" else "",
                 )
+                if (connectFail && !quickRetried) {
+                    // 建连失败多半是握手包丢了：立刻重新握手，不等 600ms、更不等满建连超时
+                    quickRetried = true
+                    continue
+                }
                 if (attempt >= attempts) break
+                attempt++
                 // 网络切换的那一瞬间最容易失败：同一请求原地等 600ms 再试
                 try {
                     Thread.sleep(600)
@@ -464,7 +562,7 @@ class PetClient(private val config: () -> PetConfig) {
         }
         val conn = URL(sb.toString()).openConnection() as HttpURLConnection
         conn.requestMethod = method
-        conn.connectTimeout = 8_000
+        conn.connectTimeout = 2_500
         conn.readTimeout = readTimeoutMs
         conn.instanceFollowRedirects = true
         conn.setRequestProperty("Cookie", cfg.cookieHeader)

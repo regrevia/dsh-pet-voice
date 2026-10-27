@@ -78,14 +78,20 @@ class ChatRender(
     private val inflight = HashSet<String>()
     private val free = ArrayDeque<WebView>()
     private val all = ArrayList<WebView>()
+    /** 硬上限：一屏同时挂着的富文本超过这个数（长消息占满屏）才允许复用屏上那只。 */
+    private val hardMax = (maxViews * 2).coerceAtLeast(12)
     private val images = LinkedHashMap<String, ByteArray>()
 
     fun cached(text: String): String? = cache[text]
 
-    /** 拿一只空闲渲染器；池子满了（滚动时）复用最早那只。 */
+    /**
+     * 拿一只空闲渲染器。屏上正在显示的那些不能抢：抢过来下一帧就是白框。
+     * 优先用池子里没人挂的，都没有就再开一只；到硬上限才退化成复用最早那只。
+     */
     fun obtain(): WebView {
         free.removeFirstOrNull()?.let { return it }
-        if (all.size < maxViews) return create().also { all.add(it) }
+        all.firstOrNull { it.parent == null }?.let { return it }
+        if (all.size < hardMax) return create().also { all.add(it) }
         val recy = all.removeAt(0)
         detach(recy)
         all.add(recy)

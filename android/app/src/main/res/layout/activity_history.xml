@@ -140,6 +140,23 @@
                 android:visibility="gone" />
         </FrameLayout>
 
+        <!-- 选好还没发的图：一张一个缩略图，点 × 去掉 -->
+        <HorizontalScrollView
+            android:id="@+id/chatTrayScroll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:scrollbars="none"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:id="@+id/chatTray"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal" />
+        </HorizontalScrollView>
+
         <LinearLayout
             android:id="@+id/chatRun"
             android:layout_width="match_parent"
@@ -204,7 +221,7 @@
                 android:layout_height="46dp"
                 android:layout_marginStart="6dp"
                 android:background="?android:attr/selectableItemBackground"
-                android:contentDescription="发图片"
+                android:contentDescription="发图片或视频"
                 android:padding="10dp"
                 android:src="@drawable/ic_plus"
                 android:tint="@color/pet_text_dim" />

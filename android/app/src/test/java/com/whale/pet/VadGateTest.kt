@@ -29,33 +29,33 @@ class VadGateTest {
         return stop
     }
 
-    /** 说 600ms 然后住嘴：最后一个人声帧之后正好 1000ms 收尾。 */
+    /** 说 600ms 然后住嘴：最后一个人声帧之后正好 700ms 收尾。 */
     @Test
-    fun stopsOneSecondAfterLastVoicedFrame() {
+    fun stopsSevenHundredMsAfterLastVoicedFrame() {
         val gate = VadGate()
         val stop = run(gate, voiceMs = 600, silenceMs = 3_000)
         assertEquals(VadGate.Stop.TAIL_SILENCE, stop)
-        assertEquals(1_000, gate.silenceMs)
-        assertEquals(1_600, gate.elapsedMs)
-        assertTrue("听完就该收，不该等满 6s", gate.elapsedMs < 6_000)
+        assertEquals(700, gate.silenceMs)
+        assertEquals(1_300, gate.elapsedMs)
+        assertTrue("听完就该收，不该等满 4s", gate.elapsedMs < 4_000)
     }
 
-    /** 说得久一点，收尾点跟着往后挪，间距始终是 1s —— 不是固定总时长。 */
+    /** 说得久一点，收尾点跟着往后挪，间距始终是 700ms —— 不是固定总时长。 */
     @Test
     fun tailIsRelativeToSpeechEndNotFixedTotal() {
         val short = VadGate().also { run(it, voiceMs = 800, silenceMs = 3_000) }
         val long = VadGate().also { run(it, voiceMs = 4_000, silenceMs = 5_000) }
-        assertEquals(1_000, short.silenceMs)
-        assertEquals(1_000, long.silenceMs)
-        assertEquals(1_800, short.elapsedMs)
-        assertEquals(5_000, long.elapsedMs)
+        assertEquals(700, short.silenceMs)
+        assertEquals(700, long.silenceMs)
+        assertEquals(1_500, short.elapsedMs)
+        assertEquals(4_700, long.elapsedMs)
     }
 
-    /** 只有 200ms 的「嗯」不算开口，静音不再累加，最后按「没人说话」在 6s 放弃。 */
+    /** 只有 200ms 的「嗯」不算开口，静音不再累加，最后按「没人说话」在 4s 放弃。 */
     @Test
     fun tooShortVoiceDoesNotCountAsSpeech() {
         val gate = VadGate()
-        val stop = run(gate, voiceMs = 200, silenceMs = 7_000)
+        val stop = run(gate, voiceMs = 200, silenceMs = 5_000)
         assertEquals(VadGate.Stop.NO_SPEECH, stop)
         assertTrue(!gate.heardSpeech)
         assertTrue("没开口时不该累加尾静音", gate.silenceMs == 0)
@@ -75,10 +75,10 @@ class VadGateTest {
     fun shortBlipsBetweenSpeechKeepTailCounting() {
         val gate = VadGate()
         run(gate, voiceMs = 600, silenceMs = 0)
-        var stop = gate.feed(quiet, 500)
+        var stop = gate.feed(quiet, 350)
         assertEquals(VadGate.Stop.NONE, stop)
-        stop = gate.feed(quiet, 500)
-        // 中间没有新的人声，两段静音累加到 1s 就该收
+        stop = gate.feed(quiet, 350)
+        // 中间没有新的人声，两段静音累加到 700ms 就该收
         assertEquals(VadGate.Stop.TAIL_SILENCE, stop)
     }
 }

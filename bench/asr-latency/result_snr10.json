@@ -1,0 +1,449 @@
+{
+  "samples": 9,
+  "runs": 1,
+  "summary": [
+    {
+      "config": "turbo_cpu_current",
+      "ms_short": 1503,
+      "ms_mid": 1535,
+      "ms_all": 1531,
+      "cer": 0.698
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "ms_short": 1584,
+      "ms_mid": 1509,
+      "ms_all": 1532,
+      "cer": 0.01
+    },
+    {
+      "config": "turbo_cpu_no_ts_only",
+      "ms_short": 1774,
+      "ms_mid": 1523,
+      "ms_all": 1573,
+      "cer": 0.121
+    },
+    {
+      "config": "base_cpu_tuned",
+      "ms_short": 109,
+      "ms_mid": 165,
+      "ms_all": 160,
+      "cer": 0.178
+    },
+    {
+      "config": "base_cpu_current",
+      "ms_short": 133,
+      "ms_mid": 175,
+      "ms_all": 168,
+      "cer": 0.19
+    }
+  ],
+  "rows": [
+    {
+      "config": "turbo_cpu_current",
+      "file": "s1_short_keai.wav",
+      "audio_s": 0.72,
+      "ms": 8668,
+      "rtf": 11.99,
+      "cer": 6.0,
+      "text": "那这个东西博士 Rob Bitching"
+    },
+    {
+      "config": "turbo_cpu_current",
+      "file": "s2_short_ganma.wav",
+      "audio_s": 1.27,
+      "ms": 1427,
+      "rtf": 1.12,
+      "cer": 0.0,
+      "text": "你在干啥呢?"
+    },
+    {
+      "config": "turbo_cpu_current",
+      "file": "s3_short_xinlairen.wav",
+      "audio_s": 1.88,
+      "ms": 1503,
+      "rtf": 0.8,
+      "cer": 0.111,
+      "text": "新来的人要怎么用呢Ｂ"
+    },
+    {
+      "config": "turbo_cpu_current",
+      "file": "s4_mid_xiayibu.wav",
+      "audio_s": 4.02,
+      "ms": 1592,
+      "rtf": 0.4,
+      "cer": 0.0,
+      "text": "你感觉我们项目下一步要做点什么比较好?"
+    },
+    {
+      "config": "turbo_cpu_current",
+      "file": "s5_mid_xiangmu.wav",
+      "audio_s": 4.41,
+      "ms": 1531,
+      "rtf": 0.35,
+      "cer": 0.0,
+      "text": "你不要动了,我只是问你了解一下项目的情况。"
+    },
+    {
+      "config": "turbo_cpu_current",
+      "file": "s6_long_peizhi.wav",
+      "audio_s": 6.17,
+      "ms": 1644,
+      "rtf": 0.27,
+      "cer": 0.115,
+      "text": "我们现在的配置方式简单吧Ｂ如果是局域网,能够小码直接用吗Ｂ。"
+    },
+    {
+      "config": "turbo_cpu_current",
+      "file": "s7_mid_chuanwenjian.wav",
+      "audio_s": 4.43,
+      "ms": 1539,
+      "rtf": 0.35,
+      "cer": 0.0,
+      "text": "把那个文件传到服务器上,然后告诉我结果。"
+    },
+    {
+      "config": "turbo_cpu_current",
+      "file": "s8_mid_kouyin.wav",
+      "audio_s": 4.16,
+      "ms": 1476,
+      "rtf": 0.35,
+      "cer": 0.0,
+      "text": "你感觉我们项目下一步要做点什么比较好?"
+    },
+    {
+      "config": "turbo_cpu_current",
+      "file": "s9_mid_yuanchang.wav",
+      "audio_s": 4.41,
+      "ms": 1451,
+      "rtf": 0.33,
+      "cer": 0.053,
+      "text": "你不要动了,我只是为你了解一下项目的情况。"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s1_short_keai.wav",
+      "audio_s": 0.72,
+      "ms": 1489,
+      "rtf": 2.06,
+      "cer": 0.0,
+      "text": "可以啊。"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s2_short_ganma.wav",
+      "audio_s": 1.27,
+      "ms": 1584,
+      "rtf": 1.25,
+      "cer": 0.0,
+      "text": "你在干啥呢?"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s3_short_xinlairen.wav",
+      "audio_s": 1.88,
+      "ms": 1623,
+      "rtf": 0.86,
+      "cer": 0.0,
+      "text": "新来的人要怎么用呢?"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s4_mid_xiayibu.wav",
+      "audio_s": 4.02,
+      "ms": 1447,
+      "rtf": 0.36,
+      "cer": 0.0,
+      "text": "你感觉我们项目下一步要做点什么比较好?"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s5_mid_xiangmu.wav",
+      "audio_s": 4.41,
+      "ms": 1486,
+      "rtf": 0.34,
+      "cer": 0.0,
+      "text": "你不要动了,我只是问你了解一下项目的情况。"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s6_long_peizhi.wav",
+      "audio_s": 6.17,
+      "ms": 1532,
+      "rtf": 0.25,
+      "cer": 0.038,
+      "text": "我们现在的配置方式简单吧,如果是局域网,能够小码直接用吗?"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s7_mid_chuanwenjian.wav",
+      "audio_s": 4.43,
+      "ms": 1468,
+      "rtf": 0.33,
+      "cer": 0.0,
+      "text": "把那个文件传到服务器上,然后告诉我结果。"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s8_mid_kouyin.wav",
+      "audio_s": 4.16,
+      "ms": 1544,
+      "rtf": 0.37,
+      "cer": 0.0,
+      "text": "你感觉我们项目下一步要做点什么比较好?"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s9_mid_yuanchang.wav",
+      "audio_s": 4.41,
+      "ms": 1549,
+      "rtf": 0.35,
+      "cer": 0.053,
+      "text": "你不要动了,我只是为你了解一下项目的情况。"
+    },
+    {
+      "config": "turbo_cpu_no_ts_only",
+      "file": "s1_short_keai.wav",
+      "audio_s": 0.72,
+      "ms": 9909,
+      "rtf": 13.71,
+      "cer": 1.0,
+      "text": "说 我还可以啊。"
+    },
+    {
+      "config": "turbo_cpu_no_ts_only",
+      "file": "s2_short_ganma.wav",
+      "audio_s": 1.27,
+      "ms": 1773,
+      "rtf": 1.39,
+      "cer": 0.0,
+      "text": "你在干啥呢?"
+    },
+    {
+      "config": "turbo_cpu_no_ts_only",
+      "file": "s3_short_xinlairen.wav",
+      "audio_s": 1.88,
+      "ms": 1774,
+      "rtf": 0.94,
+      "cer": 0.0,
+      "text": "新来的人要怎么用呢?"
+    },
+    {
+      "config": "turbo_cpu_no_ts_only",
+      "file": "s4_mid_xiayibu.wav",
+      "audio_s": 4.02,
+      "ms": 1470,
+      "rtf": 0.37,
+      "cer": 0.0,
+      "text": "你感觉我们项目下一步要做点什么比较好?"
+    },
+    {
+      "config": "turbo_cpu_no_ts_only",
+      "file": "s5_mid_xiangmu.wav",
+      "audio_s": 4.41,
+      "ms": 1459,
+      "rtf": 0.33,
+      "cer": 0.0,
+      "text": "你不要动了,我只是问你了解一下项目的情况。"
+    },
+    {
+      "config": "turbo_cpu_no_ts_only",
+      "file": "s6_long_peizhi.wav",
+      "audio_s": 6.17,
+      "ms": 1619,
+      "rtf": 0.26,
+      "cer": 0.038,
+      "text": "我们现在的配置方式简单吧,如果是局域网,能够小码直接用吗?"
+    },
+    {
+      "config": "turbo_cpu_no_ts_only",
+      "file": "s7_mid_chuanwenjian.wav",
+      "audio_s": 4.43,
+      "ms": 1479,
+      "rtf": 0.33,
+      "cer": 0.0,
+      "text": "把那个文件传到服务器上,然后告诉我结果。"
+    },
+    {
+      "config": "turbo_cpu_no_ts_only",
+      "file": "s8_mid_kouyin.wav",
+      "audio_s": 4.16,
+      "ms": 1567,
+      "rtf": 0.38,
+      "cer": 0.0,
+      "text": "你感觉我们项目下一步要做点什么比较好?"
+    },
+    {
+      "config": "turbo_cpu_no_ts_only",
+      "file": "s9_mid_yuanchang.wav",
+      "audio_s": 4.41,
+      "ms": 1573,
+      "rtf": 0.36,
+      "cer": 0.053,
+      "text": "你不要动了,我只是为你了解一下项目的情况。"
+    },
+    {
+      "config": "base_cpu_tuned",
+      "file": "s1_short_keai.wav",
+      "audio_s": 0.72,
+      "ms": 91,
+      "rtf": 0.13,
+      "cer": 1.0,
+      "text": ""
+    },
+    {
+      "config": "base_cpu_tuned",
+      "file": "s2_short_ganma.wav",
+      "audio_s": 1.27,
+      "ms": 109,
+      "rtf": 0.09,
+      "cer": 0.0,
+      "text": "你在干啥呢?"
+    },
+    {
+      "config": "base_cpu_tuned",
+      "file": "s3_short_xinlairen.wav",
+      "audio_s": 1.88,
+      "ms": 111,
+      "rtf": 0.06,
+      "cer": 0.0,
+      "text": "新来的人要怎么用呢?"
+    },
+    {
+      "config": "base_cpu_tuned",
+      "file": "s4_mid_xiayibu.wav",
+      "audio_s": 4.02,
+      "ms": 147,
+      "rtf": 0.04,
+      "cer": 0.111,
+      "text": "比感觉我们向目下一步要做点什么比较好"
+    },
+    {
+      "config": "base_cpu_tuned",
+      "file": "s5_mid_xiangmu.wav",
+      "audio_s": 4.41,
+      "ms": 164,
+      "rtf": 0.04,
+      "cer": 0.0,
+      "text": "你不要动了,我只是问你了解一下项目的情况。"
+    },
+    {
+      "config": "base_cpu_tuned",
+      "file": "s6_long_peizhi.wav",
+      "audio_s": 6.17,
+      "ms": 200,
+      "rtf": 0.03,
+      "cer": 0.269,
+      "text": "我们现在的配置方式简单吧,如果是举与往,能够小马时间用吗?"
+    },
+    {
+      "config": "base_cpu_tuned",
+      "file": "s7_mid_chuanwenjian.wav",
+      "audio_s": 4.43,
+      "ms": 169,
+      "rtf": 0.04,
+      "cer": 0.111,
+      "text": "把那个文件传到服务器上,然后造型我结果。"
+    },
+    {
+      "config": "base_cpu_tuned",
+      "file": "s8_mid_kouyin.wav",
+      "audio_s": 4.16,
+      "ms": 167,
+      "rtf": 0.04,
+      "cer": 0.111,
+      "text": "你感觉我们上目下一步要做点,什么比照好?"
+    },
+    {
+      "config": "base_cpu_tuned",
+      "file": "s9_mid_yuanchang.wav",
+      "audio_s": 4.41,
+      "ms": 160,
+      "rtf": 0.04,
+      "cer": 0.0,
+      "text": "你不要动了,我只是问你了解一下项目的情况。"
+    },
+    {
+      "config": "base_cpu_current",
+      "file": "s1_short_keai.wav",
+      "audio_s": 0.72,
+      "ms": 135,
+      "rtf": 0.19,
+      "cer": 1.0,
+      "text": ""
+    },
+    {
+      "config": "base_cpu_current",
+      "file": "s2_short_ganma.wav",
+      "audio_s": 1.27,
+      "ms": 133,
+      "rtf": 0.1,
+      "cer": 0.0,
+      "text": "你在干啥呢?"
+    },
+    {
+      "config": "base_cpu_current",
+      "file": "s3_short_xinlairen.wav",
+      "audio_s": 1.88,
+      "ms": 118,
+      "rtf": 0.06,
+      "cer": 0.0,
+      "text": "新来的人要怎么用呢?"
+    },
+    {
+      "config": "base_cpu_current",
+      "file": "s4_mid_xiayibu.wav",
+      "audio_s": 4.02,
+      "ms": 162,
+      "rtf": 0.04,
+      "cer": 0.111,
+      "text": "比感觉我们向目下一步要做点什么比较好。"
+    },
+    {
+      "config": "base_cpu_current",
+      "file": "s5_mid_xiangmu.wav",
+      "audio_s": 4.41,
+      "ms": 172,
+      "rtf": 0.04,
+      "cer": 0.0,
+      "text": "你不要动了,我只是问你了解一下项目的情况。"
+    },
+    {
+      "config": "base_cpu_current",
+      "file": "s6_long_peizhi.wav",
+      "audio_s": 6.17,
+      "ms": 220,
+      "rtf": 0.04,
+      "cer": 0.269,
+      "text": "我们现在的配置方式简单吧,如果是举与往,能够小马时间用吗?"
+    },
+    {
+      "config": "base_cpu_current",
+      "file": "s7_mid_chuanwenjian.wav",
+      "audio_s": 4.43,
+      "ms": 178,
+      "rtf": 0.04,
+      "cer": 0.111,
+      "text": "把那个文件传到服务器上,然后造型我结果。"
+    },
+    {
+      "config": "base_cpu_current",
+      "file": "s8_mid_kouyin.wav",
+      "audio_s": 4.16,
+      "ms": 179,
+      "rtf": 0.04,
+      "cer": 0.222,
+      "text": "感觉我们上目下一步要做点,什么比照好?４"
+    },
+    {
+      "config": "base_cpu_current",
+      "file": "s9_mid_yuanchang.wav",
+      "audio_s": 4.41,
+      "ms": 168,
+      "rtf": 0.04,
+      "cer": 0.0,
+      "text": "你不要动了,我只是问你了解一下项目的情况。"
+    }
+  ],
+  "raw": []
+}

@@ -61,9 +61,17 @@ class HistoryActivity : Activity() {
         const val REQ_PROJECTION = 46
         /** 拍照前要的一次相机权限（清单里声明了相机，没授权系统就不让开相机）。 */
         const val REQ_SNAP_PERM = 47
+        /** 从相册挑一段视频。 */
+        const val REQ_PICK_VIDEO = 48
 
         /** 发出去之前先把长边缩到这个像素以内，再压成 JPEG。 */
         const val SEND_IMAGE_MAX_PX = 1600
+        /** 一次最多挑几张图：宿主那头也是 6。 */
+        const val SEND_IMAGE_MAX = 6
+        /** 一段视频的上限：宿主那头也是 200 MB。 */
+        const val SEND_VIDEO_MAX_BYTES = 200L * 1024 * 1024
+        /** 历史一页多少条：翻上去再取下一页。 */
+        const val HISTORY_PAGE = 30
         /** 页面开着时多久核一次「这只对话还在不在、叫什么」（不跟电脑切）。 */
         const val HOST_WATCH_MS = 20_000L
 
@@ -107,13 +115,43 @@ class HistoryActivity : Activity() {
 
     private var turn: PetTurn? = null
     private var turnStart = 0L
+
+    /**
+     * 轮的代号。切会话/收尾都会把它 +1：旧轮晚到的 onDone/onError 回来时对不上号就直接丢，
+     * 不会把新会话的界面当成旧轮的收尾来刷（否则切过去就被一句「没收到回复」盖住）。
+     */
+    private var turnSeq = 0
+    private var turnToken = 0
     /** 用户自己点了「停止」：这一轮不该再弹「没收到回复」。 */
     private var userStopped = false
+    /** 这一轮在宿主上排队（电脑上还在跑）：状态行别被计时器改成「处理中」抢掉。 */
+    private var queuedNote = false
+
+    /**
+     * 排队不是「这一轮已经跑了多久」：电脑那轮可能还要跑十分钟。
+     * 所以排队期间不计时（计时器不超时），等真的轮到我们了再把起点挪到现在，
+     * 否则手机上会出现「刚排上队就被判超时收工」。
+     */
+    private fun leaveQueue() {
+        if (!queuedNote) return
+        queuedNote = false
+        turnStart = System.currentTimeMillis()
+    }
     private var lastSent = ""
     /** 上一次带出去的图片路径：重发要跟着一起重发。 */
     private var lastAttachment = ""
     /** 带着这张图的那条气泡是谁（时间戳）：只给那一条挂缩略图，后面的文字行别跟着沾。 */
     private var lastAttachmentTs = 0L
+    /** 选好还没发的图（最多 6 张）：先在托盘里摆着，能删单张再发。 */
+    private val pending = ArrayList<PetHistory.Att>()
+    /** 历史一屏摆多少条。 */
+    private var historyLimit = HISTORY_PAGE
+    /** 加页时别贴底：翻上去看的是旧的，回到底部会把人踢回去。 */
+    private var keepScroll = false
+    private var trayScroll: View? = null
+    private var tray: LinearLayout? = null
+    private var videoLayer: View? = null
+    private var videoView: android.widget.VideoView? = null
     /** 屏幕上这只对话的名字（宿主说叫什么就叫什么，查不到就空着）。 */
     private var liveSessionTitle = ""
     private var peekTitle = ""
@@ -149,11 +187,13 @@ class HistoryActivity : Activity() {
     )
 
     private sealed class ChatRow {
-        data class Me(val text: String, val ts: Long = 0L) : ChatRow()
+        data class Me(val text: String, val ts: Long = 0L, val media: List<PetHistory.Att> = emptyList()) : ChatRow()
         data class Pet(val text: String, val rich: Boolean) : ChatRow()
         data class Live(val text: String) : ChatRow()
         /** 居中灰字提示（换过会话之类），不算谁说的话。 */
         data class Note(val text: String) : ChatRow()
+        /** 顶上那行「加载更早」：还有多少条压在下面。 */
+        data class More(val older: Int) : ChatRow()
     }
 
     private sealed class PickerRow {
@@ -205,7 +245,9 @@ class HistoryActivity : Activity() {
         list.adapter = adapter
         // 新回复、历史翻页都会重排列表，每次数据变化都重新贴底
         adapter.registerDataSetObserver(object : android.database.DataSetObserver() {
-            override fun onChanged() = scrollToBottom()
+            override fun onChanged() {
+                if (!keepScroll) scrollToBottom()
+            }
         })
         // 条目点击交给列表自己派发：挂在子视图上的监听在复用行里靠不住
         list.setOnItemClickListener { _, _, pos, _ -> adapter.tap(pos) }
@@ -226,7 +268,7 @@ class HistoryActivity : Activity() {
 
         sendBtn.setOnClickListener { sendChat() }
         emojiBtn.setOnClickListener { showEmojiPicker() }
-        attachBtn.setOnClickListener { pickImage() }
+        attachBtn.setOnClickListener { showAttachMenu() }
         runStop.setOnClickListener { stopTurn() }
         input.setOnEditorActionListener { _, actionId, ev ->
             if (actionId == EditorInfo.IME_ACTION_SEND || (ev?.keyCode == KeyEvent.KEYCODE_ENTER && ev.action == KeyEvent.ACTION_DOWN)) {
@@ -256,6 +298,9 @@ class HistoryActivity : Activity() {
         }
 
         adapter.onRetry = { resendLast() }
+        adapter.onMore = { loadEarlier() }
+        trayScroll = findViewById(R.id.chatTrayScroll)
+        tray = findViewById(R.id.chatTray)
         render = ChatRender(this, maxViews = 8) { PetSettings.load(this) }
 
         refreshHeader()
@@ -281,15 +326,32 @@ class HistoryActivity : Activity() {
         window.decorView.post { runSnap(kind) }
     }
 
-    /** 外面「分享 → 小精灵」进来的图：直接走发图，不弹相册。 */
+    /** 外面「分享 → 小精灵」进来的图或视频：直接走发送，不弹相册。 */
     private fun takeSharedImage(intent: Intent?) {
-        if (intent?.action != Intent.ACTION_SEND) return
+        val safe = intent ?: return
+        android.util.Log.i("PetPick", "share entry act=${safe.action}")
+        val many = safe.action == Intent.ACTION_SEND_MULTIPLE
+        if (!many && safe.action != Intent.ACTION_SEND) return
         @Suppress("DEPRECATION")
-        val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM) ?: return
+        val uris: List<Uri> = if (many) {
+            safe.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty().filterNotNull()
+        } else {
+            listOfNotNull(safe.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))
+        }
+        android.util.Log.i("PetPick", "share act=${safe.action} n=${uris.size} first=${uris.firstOrNull()}")
+        if (uris.isEmpty()) return
         // 同一个 Intent 只接一次，转屏/回前台别重发
-        intent.removeExtra(Intent.EXTRA_STREAM)
-        window.decorView.post { sendImage(uri) }
+        safe.removeExtra(Intent.EXTRA_STREAM)
+        val clip = uris.firstOrNull { isVideoUri(it) }
+        val imgs = uris.filterNot { isVideoUri(it) }
+        window.decorView.post {
+            if (clip != null) pickVideoResult(clip)
+            if (imgs.isNotEmpty()) addImages(imgs)
+        }
     }
+
+    private fun isVideoUri(uri: Uri): Boolean =
+        runCatching { contentResolver.getType(uri)?.startsWith("video/") == true }.getOrDefault(false)
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
@@ -328,6 +390,7 @@ class HistoryActivity : Activity() {
     }
 
     override fun onDestroy() {
+        closeVideo()
         ui.removeCallbacks(hostWatch)
         ui.removeCallbacksAndMessages(null)
         turn?.cancel()
@@ -495,13 +558,16 @@ class HistoryActivity : Activity() {
     }
 
     private fun reload() {
-        val items = PetHistory.all(this)
+        // 一屏只摆最近一页，翻上去再按页取：不从第一次就把几百条全塞进列表
+        val items = PetHistory.recent(this, historyLimit)
+        val older = PetHistory.count(this) - items.size
         val rows = ArrayList<ChatRow>(items.size + 2)
+        if (older > 0) rows.add(ChatRow.More(older))
         items.forEachIndexed { i, item ->
             if (item.isNote) {
                 rows.add(ChatRow.Note(item.text))
             } else if (item.isMe) {
-                rows.add(ChatRow.Me(item.text, item.ts))
+                rows.add(ChatRow.Me(item.text, item.ts, item.atts))
             } else {
                 // 只有最后一条助手消息挂富文本渲染器：历史长列表里塞多个 WebView 会卡
                 rows.add(ChatRow.Pet(item.text, rich = true))
@@ -512,7 +578,7 @@ class HistoryActivity : Activity() {
         adapter.rows = rows
         adapter.notifyDataSetChanged()
         empty.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
-        scrollToBottom()
+        if (!keepScroll) scrollToBottom()
     }
 
     private val pinJump = Runnable {
@@ -529,6 +595,23 @@ class HistoryActivity : Activity() {
             "PetChat",
             "pin count=${adapter.count} h=${list.height} last=${list.lastVisiblePosition} can=${list.canScrollVertically(1)}"
         )
+    }
+
+    /**
+     * 网上翻一页：先记住屏幕上第一行是哪条、偏了多少，取完下一页再贴回同一处，
+     * 不然加完行列表会自己跳。
+     */
+    private fun loadEarlier() {
+        if (adapter.rows.size >= PetHistory.count(this)) return
+        val first = list.firstVisiblePosition
+        val top = list.getChildAt(0)?.top ?: 0
+        val before = adapter.rows.size
+        keepScroll = true
+        historyLimit += HISTORY_PAGE
+        reload()
+        keepScroll = false
+        val added = (adapter.rows.size - before).coerceAtLeast(0)
+        ui.post { list.setSelectionFromTop((first + added).coerceAtLeast(0), top) }
     }
 
     private fun scrollToBottom() {
@@ -604,6 +687,14 @@ class HistoryActivity : Activity() {
 
     private fun sendChat() {
         val text = input.text?.toString()?.trim().orEmpty()
+        if (pending.isNotEmpty()) {
+            if (turn != null) {
+                toast("上一轮还没结束")
+                return
+            }
+            sendPending(text)
+            return
+        }
         if (text.isBlank()) return
         if (turn != null) {
             toast("上一轮还没结束")
@@ -635,14 +726,31 @@ class HistoryActivity : Activity() {
      * @param attachment 已经在宿主上落盘的图片路径（没发图就空着），插件把它拼在正文后面
      * @param shownAs 气泡里显示的字：光发图时正文是空的，气泡上得有个「图片」
      */
-    private fun send(text: String, attachment: String = "", shownAs: String = "") {
+    private fun send(
+        text: String,
+        attachment: String = "",
+        shownAs: String = "",
+        atts: List<PetHistory.Att> = emptyList(),
+    ) {
+        // 附件走一条道：老的单图参数也折成媒体列表，历史里才记得住、重进会话还在
+        val media = if (atts.isNotEmpty()) {
+            atts
+        } else if (attachment.isNotBlank()) {
+            listOf(PetHistory.Att(attachment, "", PetHistory.Att.KIND_IMAGE))
+        } else {
+            emptyList()
+        }
         lastSent = text
-        lastAttachment = attachment
+        lastAttachment = attachment.ifBlank { media.firstOrNull()?.host.orEmpty() }
         adapter.error = ""
         adapter.errorAction = null
         adapter.live = ""
         turnStart = System.currentTimeMillis()
-        lastAttachmentTs = PetHistory.append(this, PetHistory.ROLE_ME, shownAs.ifBlank { text })
+        // 每次发都换一个代号：切会话时也换，旧轮的回调就认不出自己了
+        turnToken = ++turnSeq
+        val token = turnToken
+        queuedNote = false
+        lastAttachmentTs = PetHistory.append(this, PetHistory.ROLE_ME, shownAs.ifBlank { text }, media)
         reload()
         typing.visibility = View.VISIBLE
         runBar.visibility = View.VISIBLE
@@ -655,32 +763,44 @@ class HistoryActivity : Activity() {
             object : PetTurn.Callback {
                 override fun onUser(text: String) {}
                 override fun onStatus(text: String) {
+                    if (token != turnToken) return
+                    // queued 是宿主说「排着队」，跟「思考中」不是一回事：计时器别去改它
+                    if (text == PET_QUEUED_TEXT) {
+                        queuedNote = true
+                    } else {
+                        leaveQueue()
+                    }
                     runText.text = text
                 }
 
                 override fun onAssistant(fullText: String, isFinal: Boolean) {
+                    if (token != turnToken) return
+                    leaveQueue()
                     adapter.live = fullText
                     adapter.notifyDataSetChanged()
                     scrollToBottom()
                 }
 
                 override fun onSentence(sentence: String) {
+                    if (token != turnToken) return
                     val cfg = PetSettings.load(this@HistoryActivity)
                     val player = tts ?: TtsPlayer(this@HistoryActivity, client, { cfg }, {}, {}).also { tts = it }
                     player.enqueue(sentence)
                 }
 
                 override fun onDone() {
+                    if (token != turnToken) return
                     finishTurn(null)
                 }
 
                 override fun onError(message: String) {
+                    if (token != turnToken) return
                     finishTurn(message)
                 }
             },
             PetSettings.chatSession(this),
             onSession = { id -> onSessionResolved(id) },
-            attachments = if (attachment.isBlank()) emptyList() else listOf(attachment),
+            attachments = media.map { it.host }.filter { it.isNotBlank() },
         )
         turn = t
         t.start()
@@ -689,6 +809,9 @@ class HistoryActivity : Activity() {
     private fun finishTurn(error: String?) {
         ui.removeCallbacks(ticker)
         turn = null
+        // 这轮到此为止：代号换掉，后续迟到的帧/回调一律不认识
+        turnToken = ++turnSeq
+        queuedNote = false
         typing.visibility = View.GONE
         runBar.visibility = View.GONE
         val finalText = adapter.live
@@ -724,8 +847,15 @@ class HistoryActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQ_PICK_IMAGE) {
+            val us = pickedUris(data)
+            android.util.Log.i("PetPick", "img res=$resultCode n=${us.size} clip=${data?.clipData?.itemCount} uri=${us.firstOrNull()}")
+            if (resultCode == RESULT_OK) addImages(us)
+            return
+        }
+        if (requestCode == REQ_PICK_VIDEO) {
             val uri = data?.data
-            if (resultCode == RESULT_OK && uri != null) sendImage(uri)
+            android.util.Log.i("PetPick", "vid res=$resultCode uri=$uri clip=${data?.clipData?.itemCount}")
+            if (resultCode == RESULT_OK && uri != null) pickVideoResult(uri)
             return
         }
         if (requestCode == REQ_CAMERA) {
@@ -736,7 +866,7 @@ class HistoryActivity : Activity() {
             val thumb = data?.extras?.get("data") as? Bitmap
             when {
                 resultCode != RESULT_OK -> toast("没拍")
-                uri != null -> sendImage(uri)
+                uri != null -> addImages(listOf(uri))
                 thumb != null -> sendShot(ScreenSnap.jpeg(thumb))
                 else -> toast("没拍成")
             }
@@ -771,6 +901,11 @@ class HistoryActivity : Activity() {
     private val ticker = object : Runnable {
         override fun run() {
             val t = turn ?: return
+            // 还排在电脑那轮后面：不算超时，等轮到我们
+            if (queuedNote) {
+                ui.postDelayed(this, 1000)
+                return
+            }
             val ms = System.currentTimeMillis() - turnStart
             // 慢不等于坏：电脑上真在跑（长命令、多步任务）就该继续等。
             // 以前这里 45 s 没出字就自己收工，一轮长活干完却没人接了。
@@ -785,48 +920,230 @@ class HistoryActivity : Activity() {
         }
     }
 
-    /* ---------------- 发图片 ---------------- */
+    /* ---------------- 发图 / 发视频 ---------------- */
+
+    /** 加号：先问发图还是发视频。 */
+    private fun showAttachMenu() {
+        if (turn != null) {
+            toast("上一轮还没结束")
+            return
+        }
+        android.app.AlertDialog.Builder(this)
+            .setItems(arrayOf("图片", "视频")) { _, which ->
+                if (which == 0) pickImage() else pickVideo()
+            }
+            .show()
+    }
 
     private fun pickImage() {
         if (turn != null) {
             toast("上一轮还没结束")
             return
         }
+        if (pending.size >= SEND_IMAGE_MAX) {
+            toast("一次最多 6 张")
+            return
+        }
         val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
             type = "image/*"
             addCategory(Intent.CATEGORY_OPENABLE)
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         }
         try {
-            startActivityForResult(Intent.createChooser(intent, "选一张图"), REQ_PICK_IMAGE)
+            startActivityForResult(Intent.createChooser(intent, "选图（最多 6 张）"), REQ_PICK_IMAGE)
         } catch (_: Exception) {
             toast("打不开相册")
         }
     }
 
+    private fun pickVideo() {
+        if (turn != null) {
+            toast("上一轮还没结束")
+            return
+        }
+        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+            type = "video/*"
+            addCategory(Intent.CATEGORY_OPENABLE)
+        }
+        try {
+            startActivityForResult(Intent.createChooser(intent, "选一段视频"), REQ_PICK_VIDEO)
+        } catch (_: Exception) {
+            toast("打不开相册")
+        }
+    }
+
+    /** 相册回来的一批 Uri：多选在 clipData 里，单选在 data 里。 */
+    private fun pickedUris(data: Intent?): List<Uri> {
+        if (data == null) return emptyList()
+        val clip = data.clipData
+        if (clip != null && clip.itemCount > 0) {
+            return (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }
+        }
+        return listOfNotNull(data.data)
+    }
+
     /**
-     * 挑完图：先在本地缩到 1600 px、压成 JPEG 再传上去，传完的路径就是这一问的附件。
-     *
-     * 原图三五兆，走隧道传一遍再让电脑读一遍都是白等；模型看 1600 px 足够。
-     * 输入框里有字就一起发（那句话当正文），没字就只发图。
+     * 挑完图：先在本地缩到 [SEND_IMAGE_MAX_PX]、压成 JPEG，并落到本机一份
+     * （重进会话还能看，不用为了显图再走一趟网络）。
      */
-    private fun sendImage(uri: Uri) {
+    private fun addImages(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        val room = SEND_IMAGE_MAX - pending.size
+        if (room <= 0) {
+            toast("一次最多 6 张")
+            return
+        }
+        if (uris.size > room) toast("一次最多 6 张")
+        val take = uris.take(room)
+        android.util.Log.i("PetPick", "add n=${take.size} room=$room")
         runBar.visibility = View.VISIBLE
-        runText.text = "传图片"
+        runText.text = "读图"
         Thread({
-            val bytes = try { scaledJpeg(uri) } catch (_: Exception) { null }
+            val made = ArrayList<PetHistory.Att>()
+            take.forEachIndexed { i, u ->
+                val bytes = try { scaledJpeg(u) } catch (e: Exception) {
+                    android.util.Log.i("PetPick", "decode fail $u ${e.javaClass.simpleName}:${e.message}")
+                    null
+                } ?: return@forEachIndexed
+                val dir = mediaDir("images")
+                val f = java.io.File(dir, "img-${System.currentTimeMillis()}-$i.jpg")
+                val w = runCatching { f.writeBytes(bytes) }
+                android.util.Log.i("PetPick", "i=$i bytes=${bytes.size} dir=$dir ok=${w.isSuccess} err=${w.exceptionOrNull()} out=${f.absolutePath}")
+                if (w.isSuccess) {
+                    made.add(PetHistory.Att("", f.absolutePath, PetHistory.Att.KIND_IMAGE))
+                }
+            }
             runOnUiThread {
                 runBar.visibility = View.GONE
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                if (bytes == null) toast("这张图读不出来") else sendShot(bytes)
+                if (made.isEmpty()) {
+                    toast("这张图读不出来")
+                    return@runOnUiThread
+                }
+                pending.addAll(made)
+                renderTray()
             }
         }, "pet-decode").apply { isDaemon = true }.start()
     }
 
-    /**
-     * 图已经在手上（刚拍的、刚截的）：先传到电脑落盘，再把路径当这一问的附件发出去。
-     *
-     * 电脑那边只能读它自己磁盘上的路径，所以必须先 `/api/upload`，不能直接把位图塞给对话。
-     */
+    /** 待发托盘：一张一个缩略图，右上角 × 去掉，不用重选。 */
+    private fun renderTray() {
+        val row = tray ?: return
+        val scroll = trayScroll ?: return
+        row.removeAllViews()
+        if (pending.isEmpty()) {
+            scroll.visibility = View.GONE
+            return
+        }
+        scroll.visibility = View.VISIBLE
+        pending.forEachIndexed { i, att ->
+            val side = dp(56)
+            val cell = FrameLayout(this)
+            cell.layoutParams = LinearLayout.LayoutParams(side, side).apply { marginEnd = dp(8) }
+            val iv = android.widget.ImageView(this)
+            iv.layoutParams = FrameLayout.LayoutParams(side, side)
+            iv.scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+            iv.clipToOutline = true
+            iv.background = GradientDrawable().apply {
+                cornerRadius = 12f * resources.displayMetrics.density
+                setColor(getColor(R.color.pet_hint_bg))
+            }
+            iv.tag = att.shown
+            HostImage.peek(att.shown, side)?.let { iv.setImageBitmap(it) }
+            HostImage.load(this, att.shown, side) { bmp ->
+                if (bmp != null && iv.tag == att.shown) iv.setImageBitmap(bmp)
+            }
+            cell.addView(iv)
+            val x = TextView(this)
+            x.text = "×"
+            x.textSize = 12f
+            x.setTextColor(getColor(R.color.pet_bg))
+            x.gravity = Gravity.CENTER
+            x.background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0x99000000.toInt())
+            }
+            val box = dp(18)
+            val lp = FrameLayout.LayoutParams(box, box)
+            lp.gravity = Gravity.END or Gravity.TOP
+            lp.topMargin = dp(2)
+            lp.marginEnd = dp(2)
+            cell.addView(x, lp)
+            x.setOnClickListener {
+                if (i < pending.size) {
+                    pending.removeAt(i)
+                    renderTray()
+                }
+            }
+            row.addView(cell)
+        }
+    }
+
+    /** 把托盘里的图一起发出去：先一张张传，全上去再合成一条消息进历史。 */
+    private fun sendPending(text: String) {
+        val shots = ArrayList(pending)
+        if (shots.isEmpty()) return
+        pending.clear()
+        renderTray()
+        input.setText("")
+        runBar.visibility = View.VISIBLE
+        runText.text = "传图 0/${shots.size}"
+        Thread({
+            val client = PetClient { PetSettings.load(this) }
+            val done = ArrayList<PetHistory.Att>()
+            var err = ""
+            var failedAt = -1
+            for ((i, a) in shots.withIndex()) {
+                if (err.isNotBlank()) break
+                var path = ""
+                try {
+                    val up = client.uploadMedia(
+                        java.io.File(a.local),
+                        "chat-${System.currentTimeMillis()}-$i.jpg",
+                        "image/jpeg",
+                    ) { pct ->
+                        runOnUiThread {
+                            if (runBar.visibility == View.VISIBLE) runText.text = "传图 ${i + 1}/${shots.size} $pct%"
+                        }
+                    }
+                    path = up.json?.optString("path").orEmpty()
+                    if (path.isBlank()) err = up.json?.optString("error").orEmpty().ifBlank { "图片没传上去" }
+                } catch (_: Exception) {
+                    err = "图片没传上去，网络不通"
+                }
+                if (path.isNotBlank()) {
+                    done.add(PetHistory.Att(path, a.local, PetHistory.Att.KIND_IMAGE))
+                } else {
+                    failedAt = i
+                }
+            }
+            runOnUiThread {
+                runBar.visibility = View.GONE
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                when {
+                    // 一张都没上去：图放回托盘，重试不用再选一遍
+                    done.isEmpty() -> {
+                        pending.addAll(shots)
+                        renderTray()
+                        toast(err.ifBlank { "图片没传上去" })
+                    }
+                    // 上去了一部分：剩下的放回托盘，先把这半条发出去
+                    failedAt >= 0 -> {
+                        pending.addAll(shots.drop(failedAt))
+                        renderTray()
+                        toast("有些图没传上去")
+                        send(text, atts = done, shownAs = captionOf(text, done))
+                    }
+                    else -> send(text, atts = done, shownAs = captionOf(text, done))
+                }
+            }
+        }, "pet-upload").apply { isDaemon = true }.start()
+    }
+
+    private fun captionOf(text: String, media: List<PetHistory.Att>): String =
+        text.ifBlank { if (media.size > 1) "${media.size}张图" else "图片" }
+
+    /** 手上已经有 JPEG 字节（刚拍的、刚截的）：落本机一份，再走同一条发送。 */
     private fun sendShot(bytes: ByteArray) {
         if (isFinishing || isDestroyed) return
         if (bytes.isEmpty()) {
@@ -834,27 +1151,151 @@ class HistoryActivity : Activity() {
             return
         }
         val caption = input.text?.toString()?.trim().orEmpty()
-        val client = PetClient { PetSettings.load(this) }
-        runBar.visibility = View.VISIBLE
-        runText.text = "传图片"
         Thread({
-            val up = try {
-                client.uploadImage(bytes, "chat-${System.currentTimeMillis()}", "image/jpeg")
-            } catch (_: Exception) {
-                null
+            val f = java.io.File(mediaDir("images"), "shot-${System.currentTimeMillis()}.jpg")
+            val ok = runCatching { f.writeBytes(bytes) }.isSuccess
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (!ok) {
+                    toast("这张图存不下来")
+                    return@runOnUiThread
+                }
+                pending.add(PetHistory.Att("", f.absolutePath, PetHistory.Att.KIND_IMAGE))
+                sendPending(caption)
             }
-            val path = up?.json?.optString("path").orEmpty()
-            val err = up?.json?.optString("error").orEmpty()
+        }, "pet-decode").apply { isDaemon = true }.start()
+    }
+
+    /** 挑完视频：先看大小，再落到本机一份（重进会话还能播），最后才传。 */
+    private fun pickVideoResult(uri: Uri) {
+        if (querySize(uri) > SEND_VIDEO_MAX_BYTES) {
+            toast("视频太大（上限 200 MB）")
+            return
+        }
+        runBar.visibility = View.VISIBLE
+        runText.text = "读视频"
+        Thread({
+            val local = copyVideoLocal(uri)
             runOnUiThread {
                 runBar.visibility = View.GONE
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                when {
-                    up == null -> toast("图片没传上去，网络不通")
-                    path.isBlank() -> toast(err.ifBlank { "图片没传上去" })
-                    else -> {
-                        input.setText("")
-                        send(caption, path, if (caption.isBlank()) "图片" else caption)
+                if (local == null) {
+                    toast("读不到这段视频")
+                    return@runOnUiThread
+                }
+                uploadVideo(PetHistory.Att("", local.absolutePath, PetHistory.Att.KIND_VIDEO))
+            }
+        }, "pet-video").apply { isDaemon = true }.start()
+    }
+
+    /** 视频边读边落到 files/videos：超了就删掉当没选过，别把手机塞满。 */
+    private fun copyVideoLocal(uri: Uri): java.io.File? {
+        val f = java.io.File(mediaDir("videos"), "v-${System.currentTimeMillis()}.mp4")
+        var read = 0L
+        return try {
+            contentResolver.openInputStream(uri).use { input ->
+                if (input == null) return null
+                f.outputStream().use { out ->
+                    val buf = ByteArray(256 * 1024)
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        read += n
+                        if (read > SEND_VIDEO_MAX_BYTES) {
+                            out.close()
+                            f.delete()
+                            toast("视频太大（上限 200 MB）")
+                            return null
+                        }
+                        out.write(buf, 0, n)
                     }
+                }
+            }
+            if (read <= 0) {
+                f.delete()
+                null
+            } else {
+                f
+            }
+        } catch (e: Throwable) {
+            android.util.Log.i("PetPick", "vidcopy fail ${e.javaClass.simpleName}:${e.message}")
+            f.delete()
+            null
+        }
+    }
+
+    /** 相册给的视频大小：拿不到就当 0（拷贝时还有一道上限）。 */
+    private fun querySize(uri: Uri): Long {
+        try {
+            contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                if (afd.length > 0) return afd.length
+            }
+        } catch (_: Throwable) {
+        }
+        return try {
+            contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use { c ->
+                if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else 0L
+            } ?: 0L
+        } catch (_: Throwable) {
+            0L
+        }
+    }
+
+    private fun mediaDir(kind: String): java.io.File {
+        val dir = java.io.File(getExternalFilesDir(null) ?: filesDir, kind)
+        if (!dir.isDirectory) dir.mkdirs()
+        return dir
+    }
+
+    /** 传视频：进度摆在跑马灯那一行，失败留着本机副本，点重试就再传一次。 */
+    private fun uploadVideo(att: PetHistory.Att) {
+        if (turn != null) {
+            toast("上一轮还没结束")
+            return
+        }
+        val caption = input.text?.toString()?.trim().orEmpty()
+        adapter.error = ""
+        adapter.errorAction = null
+        runBar.visibility = View.VISIBLE
+        runText.text = "传视频 0%"
+        Thread({
+            val client = PetClient { PetSettings.load(this) }
+            var path = ""
+            var err = ""
+            try {
+                val up = client.uploadMedia(
+                    java.io.File(att.local),
+                    "chat-${System.currentTimeMillis()}.mp4",
+                    "video/mp4",
+                ) { pct ->
+                    runOnUiThread {
+                        if (runBar.visibility == View.VISIBLE) runText.text = "传视频 $pct%"
+                    }
+                }
+                path = up.json?.optString("path").orEmpty()
+                if (path.isBlank()) {
+                    err = when (up.code) {
+                        413 -> "视频太大（上限 200 MB）"
+                        else -> up.json?.optString("error").orEmpty().ifBlank { "视频没传上去" }
+                    }
+                }
+            } catch (_: Exception) {
+                err = "视频没传上去，网络不通"
+            }
+            runOnUiThread {
+                runBar.visibility = View.GONE
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (path.isNotBlank()) {
+                    input.setText("")
+                    send(
+                        caption,
+                        atts = listOf(PetHistory.Att(path, att.local, PetHistory.Att.KIND_VIDEO)),
+                        shownAs = caption.ifBlank { "视频" },
+                    )
+                } else {
+                    toast(err.ifBlank { "视频没传上去" })
+                    showRetry("视频没传上去，点这里重试", { uploadVideo(att) })
+                    reload()
                 }
             }
         }, "pet-upload").apply { isDaemon = true }.start()
@@ -981,6 +1422,9 @@ class HistoryActivity : Activity() {
                     liveSessionTitle = ""
                     refreshHeader()
                     PetHistory.clear(this)
+        historyLimit = HISTORY_PAGE
+        pending.clear()
+        renderTray()
                     liveText = ""
                     reload()
                     toast("新对话已开")
@@ -1258,6 +1702,22 @@ class HistoryActivity : Activity() {
 
     private fun pickSession(s: Sess) {
         closePicker()
+        // 切会话前先把旧会话上那一轮收掉：不 cancel 的话 turn 一直非空，新会话里连一个字
+        // 都发不出去（提示永远是「上一轮还没结束」），跑着的那轮还会往新会话里写状态。
+        turn?.cancel()
+        turn = null
+        turnToken = ++turnSeq
+        ui.removeCallbacks(ticker)
+        queuedNote = false
+        userStopped = false
+        liveText = ""
+        typing.visibility = View.GONE
+        runBar.visibility = View.GONE
+        // 指针先落库再 reload：列表按新会话重排，旧会话的消息一条都不留在屏上
+        PetSettings.saveChatSession(this, s.id)
+        liveSessionTitle = s.title
+        refreshHeader()
+        reload()
         val client = PetClient { PetSettings.load(this) }
         Thread({
             try { client.bind(s.id) } catch (_: Exception) {
@@ -1428,6 +1888,54 @@ class HistoryActivity : Activity() {
         get() = adapter.live
         set(v) { adapter.live = v }
 
+    /* ---------------- 视频播放 ---------------- */
+
+    /** 在页面里盖一层播放：不另开 Activity（清单不动），也没有额外依赖。 */
+    private fun playVideo(att: PetHistory.Att) {
+        val path = att.shown
+        if (path.isBlank() || !java.io.File(path).isFile) {
+            toast("这段视频只在电脑上")
+            return
+        }
+        closeVideo()
+        val rootV = findViewById<ViewGroup>(R.id.historyRoot)
+        val layer = FrameLayout(this)
+        layer.setBackgroundColor(0xF0000000.toInt())
+        layer.isClickable = true
+        val vv = android.widget.VideoView(this)
+        val match = ViewGroup.LayoutParams.MATCH_PARENT
+        layer.addView(vv, FrameLayout.LayoutParams(match, match))
+        rootV.addView(layer, FrameLayout.LayoutParams(match, match))
+        videoLayer = layer
+        videoView = vv
+        layer.setOnClickListener { closeVideo() }
+        vv.setMediaController(android.widget.MediaController(this).also { it.setAnchorView(vv) })
+        vv.setOnErrorListener { _, _, _ ->
+            toast("这段视频播不了")
+            closeVideo()
+            true
+        }
+        vv.setOnCompletionListener { closeVideo() }
+        try {
+            vv.setVideoPath(path)
+            vv.setOnPreparedListener { mp ->
+                mp.isLooping = false
+                vv.start()
+            }
+        } catch (_: Throwable) {
+            toast("这段视频播不了")
+            closeVideo()
+        }
+    }
+
+    private fun closeVideo() {
+        val vv = videoView ?: return
+        runCatching { if (vv.isPlaying) vv.stopPlayback() }
+        (videoLayer?.parent as? ViewGroup)?.removeView(videoLayer)
+        videoView = null
+        videoLayer = null
+    }
+
     /* ---------------- 列表适配器 ---------------- */
 
     private inner class ChatAdapter : BaseAdapter() {
@@ -1436,17 +1944,23 @@ class HistoryActivity : Activity() {
         var error: String = ""
         var errorAction: (() -> Unit)? = null
         var onRetry: () -> Unit = {}
+        var onMore: () -> Unit = {}
 
         override fun getCount(): Int = rows.size + (if (error.isNotBlank()) 1 else 0)
         override fun getItem(position: Int): Any? = rows.getOrNull(position)
         override fun getItemId(position: Int): Long = position.toLong()
 
-        /** 点了一行：只有发送失败那行能点（重发），其余不动。 */
+        /** 点了一行：「加载更早」翻页、发送失败那行重发，其余不动。 */
         fun tap(position: Int) {
+            if (rows.getOrNull(position) is ChatRow.More) {
+                onMore()
+                return
+            }
             if (position >= rows.size) (errorAction ?: onRetry)()
         }
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            if (rows.getOrNull(position) is ChatRow.More) return bindMore(convertView, parent)
             if (position >= rows.size) {
                 // 发送失败的那一行：可点，点一下重发
                 val v = convertView ?: layoutInflater.inflate(R.layout.item_history, parent, false)
@@ -1463,10 +1977,11 @@ class HistoryActivity : Activity() {
             }
             val row = rows[position]
             return when (row) {
-                is ChatRow.Me -> bindText(convertView, parent, row.text, mine = true, extraImages = meImages(position))
+                is ChatRow.Me -> bindText(convertView, parent, row.text, mine = true, media = row.media)
                 is ChatRow.Pet -> if (row.rich) bindRich(convertView, parent, row.text) else bindText(convertView, parent, row.text, mine = false)
                 is ChatRow.Live -> bindText(convertView, parent, row.text, mine = false)
                 is ChatRow.Note -> bindNote(convertView, parent, row.text)
+                is ChatRow.More -> bindMore(convertView, parent)
             }
         }
 
@@ -1503,20 +2018,16 @@ class HistoryActivity : Activity() {
             holder.visibility = View.GONE
         }
 
-        /** 自己刚发的图：只挂在带图那条气泡上；重启后没记住路径就不显示。 */
-        private fun meImages(position: Int): List<String> {
-            if (lastAttachment.isBlank()) return emptyList()
-            val row = rows.getOrNull(position) as? ChatRow.Me ?: return emptyList()
-            if (row.ts != lastAttachmentTs) return emptyList()
-            return listOf(lastAttachment)
-        }
+        /** 这一条带的图/视频：路径早写进历史了，重进会话照旧能看。 */
+        private fun mediaOf(position: Int): List<PetHistory.Att> =
+            (rows.getOrNull(position) as? ChatRow.Me)?.media ?: emptyList()
 
         private fun bindText(
             convertView: View?,
             parent: ViewGroup,
             raw: String,
             mine: Boolean,
-            extraImages: List<String> = emptyList(),
+            media: List<PetHistory.Att> = emptyList(),
         ): View {
             val v = convertView ?: layoutInflater.inflate(R.layout.item_history, parent, false)
             plainRow(v)
@@ -1541,7 +2052,9 @@ class HistoryActivity : Activity() {
             }
             // 列表复用：先把可能挂在上面的渲染器摘掉，别让 WebView 跟着旧行跑
             if (bubble.childCount > 1) bubble.removeViews(1, bubble.childCount - 1)
-            val thumbs = bindThumbs(v, raw, extraImages)
+            val imgs = media.filter { !it.isVideo }.map { it.shown }
+            val clips = media.filter { it.isVideo }
+            val thumbs = bindThumbs(v, raw, imgs, clips)
             // 只有图的行：正文已经是缩略图了，别在气泡里剩一截空文本
             if (!mine && thumbs > 0 && onlyImages(raw)) text.visibility = View.GONE
             text.setOnLongClickListener { copy(raw); true }
@@ -1554,11 +2067,16 @@ class HistoryActivity : Activity() {
          *
          * @return 放了几张
          */
-        private fun bindThumbs(v: View, raw: String, extra: List<String>): Int {
+        private fun bindThumbs(
+            v: View,
+            raw: String,
+            extra: List<String>,
+            clips: List<PetHistory.Att> = emptyList(),
+        ): Int {
             val holder = v.findViewById<LinearLayout>(R.id.itemThumbs) ?: return 0
             holder.removeAllViews()
             val paths = imagePathsOf(raw, extra).take(4)
-            if (paths.isEmpty()) {
+            if (paths.isEmpty() && clips.isEmpty()) {
                 holder.visibility = View.GONE
                 return 0
             }
@@ -1587,7 +2105,64 @@ class HistoryActivity : Activity() {
                 }
                 iv.setOnClickListener { ImageActivity.open(this@HistoryActivity, paths, i) }
             }
-            return paths.size
+            clips.forEach { clip -> holder.addView(videoRow(clip, holder)) }
+            return paths.size + clips.size
+        }
+
+        /** 视频在气泡里给一格：首帧 + 文件名，点开就在这儿播。 */
+        private fun videoRow(clip: PetHistory.Att, holder: LinearLayout): View {
+            val density = resources.displayMetrics.density
+            val width = minOf(
+                (200 * density).toInt(),
+                (resources.displayMetrics.widthPixels - dp(24)) * 3 / 4,
+            )
+            val box = LinearLayout(this@HistoryActivity)
+            box.orientation = LinearLayout.VERTICAL
+            box.layoutParams = LinearLayout.LayoutParams(width, LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(6) }
+            val iv = android.widget.ImageView(this@HistoryActivity)
+            iv.layoutParams = LinearLayout.LayoutParams(width, (width * 0.56f).toInt())
+            iv.scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+            iv.clipToOutline = true
+            iv.background = GradientDrawable().apply {
+                cornerRadius = 16f * density
+                setColor(getColor(R.color.pet_hint_bg))
+            }
+            iv.tag = clip.shown
+            box.addView(iv)
+            VideoThumb.peek(clip.shown)?.let { iv.setImageBitmap(it) }
+            VideoThumb.load(clip.shown) { bmp ->
+                if (bmp != null && iv.tag == clip.shown && holder.indexOfChild(box) >= 0) iv.setImageBitmap(bmp)
+            }
+            val name = TextView(this@HistoryActivity)
+            name.text = clip.shown.substringAfterLast('/')
+            name.textSize = 12f
+            name.maxLines = 1
+            name.ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+            name.setTextColor(getColor(R.color.pet_hint))
+            name.layoutParams = LinearLayout.LayoutParams(width, LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(4) }
+            box.addView(name)
+            box.setOnClickListener { playVideo(clip) }
+            return box
+        }
+
+        /** 顶上那行「加载更早」：只标一句，点了往前取一页。 */
+        private fun bindMore(convertView: View?, parent: ViewGroup): View {
+            val v = convertView ?: layoutInflater.inflate(R.layout.item_history, parent, false)
+            plainRow(v)
+            val bubble = v.findViewById<FrameLayout>(R.id.itemBubble)
+            bubble.background = null
+            bubble.setPadding(0, dp(6), 0, dp(6))
+            val text = v.findViewById<TextView>(R.id.itemText)
+            text.visibility = View.VISIBLE
+            text.textSize = 13f
+            text.text = "加载更早"
+            text.setTextColor(getColor(R.color.pet_accent))
+            (v as android.widget.LinearLayout).gravity = Gravity.CENTER
+            text.setOnLongClickListener(null)
+            v.setOnClickListener { loadEarlier() }
+            return v
         }
 
         /** 固定宽度、按图比例给高度，超高裁掉中间一段（点开看整张）。 */

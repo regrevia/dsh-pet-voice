@@ -1,0 +1,278 @@
+{
+  "samples": 9,
+  "runs": 2,
+  "summary": [
+    {
+      "config": "turbo_cpu_current",
+      "ms_short": 1338,
+      "ms_mid": 1379,
+      "ms_all": 1361,
+      "cer": 0.0
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "ms_short": 1200,
+      "ms_mid": 1404,
+      "ms_all": 1347,
+      "cer": 0.0
+    },
+    {
+      "config": "small_cpu_tuned",
+      "ms_short": 110,
+      "ms_mid": 163,
+      "ms_all": 155,
+      "cer": 0.006
+    }
+  ],
+  "rows": [
+    {
+      "config": "turbo_cpu_current",
+      "file": "s1_short_keai.wav",
+      "audio_s": 0.72,
+      "ms": 1306,
+      "rtf": 1.81,
+      "cer": 0.0,
+      "text": "可以啊。"
+    },
+    {
+      "config": "turbo_cpu_current",
+      "file": "s2_short_ganma.wav",
+      "audio_s": 1.27,
+      "ms": 1405,
+      "rtf": 1.11,
+      "cer": 0.0,
+      "text": "你在干啥呢?"
+    },
+    {
+      "config": "turbo_cpu_current",
+      "file": "s3_short_xinlairen.wav",
+      "audio_s": 1.88,
+      "ms": 1338,
+      "rtf": 0.71,
+      "cer": 0.0,
+      "text": "新来的人要怎么用呢?"
+    },
+    {
+      "config": "turbo_cpu_current",
+      "file": "s4_mid_xiayibu.wav",
+      "audio_s": 4.02,
+      "ms": 1435,
+      "rtf": 0.36,
+      "cer": 0.0,
+      "text": "你感觉我们项目下一步要做点什么比较好?"
+    },
+    {
+      "config": "turbo_cpu_current",
+      "file": "s5_mid_xiangmu.wav",
+      "audio_s": 4.41,
+      "ms": 1361,
+      "rtf": 0.31,
+      "cer": 0.0,
+      "text": "你不要动了,我只是问你了解一下项目的情况。"
+    },
+    {
+      "config": "turbo_cpu_current",
+      "file": "s6_long_peizhi.wav",
+      "audio_s": 6.17,
+      "ms": 1423,
+      "rtf": 0.23,
+      "cer": 0.0,
+      "text": "我们现在的配置方式简单吧,如果是局域网,能够扫码直接用吗?"
+    },
+    {
+      "config": "turbo_cpu_current",
+      "file": "s7_mid_chuanwenjian.wav",
+      "audio_s": 4.43,
+      "ms": 1397,
+      "rtf": 0.32,
+      "cer": 0.0,
+      "text": "把那个文件传到服务器上,然后告诉我结果。"
+    },
+    {
+      "config": "turbo_cpu_current",
+      "file": "s8_mid_kouyin.wav",
+      "audio_s": 4.16,
+      "ms": 1306,
+      "rtf": 0.31,
+      "cer": 0.0,
+      "text": "你感觉我们项目下一步要做点什么比较好?"
+    },
+    {
+      "config": "turbo_cpu_current",
+      "file": "s9_mid_yuanchang.wav",
+      "audio_s": 4.41,
+      "ms": 1338,
+      "rtf": 0.3,
+      "cer": 0.0,
+      "text": "你不要动了,我只是问你了解一下项目的情况。"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s1_short_keai.wav",
+      "audio_s": 0.72,
+      "ms": 1196,
+      "rtf": 1.65,
+      "cer": 0.0,
+      "text": "可以啊。"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s2_short_ganma.wav",
+      "audio_s": 1.27,
+      "ms": 1238,
+      "rtf": 0.97,
+      "cer": 0.0,
+      "text": "你在干啥呢?"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s3_short_xinlairen.wav",
+      "audio_s": 1.88,
+      "ms": 1200,
+      "rtf": 0.64,
+      "cer": 0.0,
+      "text": "新来的人要怎么用呢?"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s4_mid_xiayibu.wav",
+      "audio_s": 4.02,
+      "ms": 1314,
+      "rtf": 0.33,
+      "cer": 0.0,
+      "text": "你感觉我们项目下一步要做点什么比较好?"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s5_mid_xiangmu.wav",
+      "audio_s": 4.41,
+      "ms": 1347,
+      "rtf": 0.31,
+      "cer": 0.0,
+      "text": "你不要动了,我只是问你了解一下项目的情况。"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s6_long_peizhi.wav",
+      "audio_s": 6.17,
+      "ms": 1462,
+      "rtf": 0.24,
+      "cer": 0.0,
+      "text": "我们现在的配置方式简单吧,如果是局域网,能够扫码直接用吗?"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s7_mid_chuanwenjian.wav",
+      "audio_s": 4.43,
+      "ms": 1426,
+      "rtf": 0.32,
+      "cer": 0.0,
+      "text": "把那个文件传到服务器上,然后告诉我结果。"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s8_mid_kouyin.wav",
+      "audio_s": 4.16,
+      "ms": 1382,
+      "rtf": 0.33,
+      "cer": 0.0,
+      "text": "你感觉我们项目下一步要做点什么比较好?"
+    },
+    {
+      "config": "turbo_cpu_tuned",
+      "file": "s9_mid_yuanchang.wav",
+      "audio_s": 4.41,
+      "ms": 1503,
+      "rtf": 0.34,
+      "cer": 0.0,
+      "text": "你不要动了,我只是问你了解一下项目的情况。"
+    },
+    {
+      "config": "small_cpu_tuned",
+      "file": "s1_short_keai.wav",
+      "audio_s": 0.72,
+      "ms": 91,
+      "rtf": 0.13,
+      "cer": 0.0,
+      "text": "可以啊"
+    },
+    {
+      "config": "small_cpu_tuned",
+      "file": "s2_short_ganma.wav",
+      "audio_s": 1.27,
+      "ms": 110,
+      "rtf": 0.09,
+      "cer": 0.0,
+      "text": "你在干啥呢?"
+    },
+    {
+      "config": "small_cpu_tuned",
+      "file": "s3_short_xinlairen.wav",
+      "audio_s": 1.88,
+      "ms": 133,
+      "rtf": 0.07,
+      "cer": 0.0,
+      "text": "新来的人要怎么用呢?"
+    },
+    {
+      "config": "small_cpu_tuned",
+      "file": "s4_mid_xiayibu.wav",
+      "audio_s": 4.02,
+      "ms": 164,
+      "rtf": 0.04,
+      "cer": 0.056,
+      "text": "你感觉我们向目下一步要做点什么比较好?"
+    },
+    {
+      "config": "small_cpu_tuned",
+      "file": "s5_mid_xiangmu.wav",
+      "audio_s": 4.41,
+      "ms": 155,
+      "rtf": 0.04,
+      "cer": 0.0,
+      "text": "你不要动了,我只是问你了解一下项目的情况。"
+    },
+    {
+      "config": "small_cpu_tuned",
+      "file": "s6_long_peizhi.wav",
+      "audio_s": 6.17,
+      "ms": 203,
+      "rtf": 0.03,
+      "cer": 0.0,
+      "text": "我们现在的配置方式简单吧,如果是局域网,能够扫码直接用吗?"
+    },
+    {
+      "config": "small_cpu_tuned",
+      "file": "s7_mid_chuanwenjian.wav",
+      "audio_s": 4.43,
+      "ms": 168,
+      "rtf": 0.04,
+      "cer": 0.0,
+      "text": "把那个文件传到服务器上,然后告诉我结果。"
+    },
+    {
+      "config": "small_cpu_tuned",
+      "file": "s8_mid_kouyin.wav",
+      "audio_s": 4.16,
+      "ms": 163,
+      "rtf": 0.04,
+      "cer": 0.0,
+      "text": "你感觉我们项目下一步要做点,什么比较好?"
+    },
+    {
+      "config": "small_cpu_tuned",
+      "file": "s9_mid_yuanchang.wav",
+      "audio_s": 4.41,
+      "ms": 152,
+      "rtf": 0.03,
+      "cer": 0.0,
+      "text": "你不要动了,我只是问你了解一下项目的情况。"
+    }
+  ],
+  "raw": [
+    {
+      "config": "turbo_mps_tuned",
+      "error": "NotImplementedError: Could not run 'aten::_sparse_coo_tensor_with_dims_and_tensors' with arguments from the 'SparseMPS' backend. This could be because the operator doesn't exist for this backend, or was omitted during the selective/custom build process (if using custom build). If you are a Facebook employee using PyTorch on mobile, please visit https://fburl.com/ptmfixes for possible resolutions. 'aten::_sparse_coo_tensor_with_dims_and_tensors' is only available for these backends: [MPS, Meta, SparseCPU, SparseMeta, BackendSelect, Python, FuncTorchDynamicLayerBackMode, Functionalize, Named, Conjugate, Negative, ZeroTensor, ADInplaceOrView, AutogradOther, AutogradCPU, AutogradCUDA, AutogradHIP, AutogradXLA, AutogradMPS, AutogradIPU, AutogradXPU, AutogradHPU, AutogradVE, AutogradLazy, AutogradMTIA, AutogradMAIA, AutogradPrivateUse1, AutogradPrivateUse2, AutogradPrivateUse3, AutogradMeta, AutogradNestedTensor, Tracer, AutocastCPU, AutocastMTIA, AutocastMAIA, AutocastXPU, AutocastMPS, AutocastCUDA, FuncTorchBatched, BatchedNestedTensor, FuncTorchVmapMode, Batched, VmapMode, FuncTorchGradWrapper, PythonTLSSnapshot, FuncTorchDynamicLayerFrontMode, PreDispatch, PythonDispatcher].\n\nMPS: registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/mps/MPSFallback.mm:79 [backend fallback]\nMeta: registered at /Users/runner/work/pytorch/pytorch/pytorch/build/aten/src/ATen/RegisterMeta_0.cpp:13978 [kernel]\nSparseCPU: registered at /Users/runner/work/pytorch/pytorch/pytorch/build/aten/src/ATen/RegisterSparseCPU_0.cpp:2598 [kernel]\nSparseMeta: registered at /Users/runner/work/pytorch/pytorch/pytorch/build/aten/src/ATen/RegisterSparseMeta_0.cpp:342 [kernel]\nBackendSelect: registered at /Users/runner/work/pytorch/pytorch/pytorch/build/aten/src/ATen/RegisterBackendSelect.cpp:792 [kernel]\nPython: registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/core/PythonFallbackKernel.cpp:194 [backend fallback]\nFuncTorchDynamicLayerBackMode: registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/functorch/DynamicLayer.cpp:479 [backend fallback]\nFunctionalize: registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/FunctionalizeFallbackKernel.cpp:375 [backend fallback]\nNamed: registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/core/NamedRegistrations.cpp:7 [backend fallback]\nConjugate: registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/ConjugateFallback.cpp:17 [backend fallback]\nNegative: registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/native/NegateFallback.cpp:18 [backend fallback]\nZeroTensor: registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/ZeroTensorFallback.cpp:86 [backend fallback]\nADInplaceOrView: fallthrough registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/core/VariableFallbackKernel.cpp:104 [backend fallback]\nAutogradOther: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradCPU: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradCUDA: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradHIP: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradXLA: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradMPS: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradIPU: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradXPU: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradHPU: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradVE: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradLazy: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradMTIA: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradMAIA: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradPrivateUse1: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradPrivateUse2: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradPrivateUse3: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradMeta: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nAutogradNestedTensor: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/VariableType_2.cpp:20142 [autograd kernel]\nTracer: registered at /Users/runner/work/pytorch/pytorch/pytorch/torch/csrc/autograd/generated/TraceType_2.cpp:17887 [kernel]\nAutocastCPU: fallthrough registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/autocast_mode.cpp:322 [backend fallback]\nAutocastMTIA: fallthrough registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/autocast_mode.cpp:466 [backend fallback]\nAutocastMAIA: fallthrough registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/autocast_mode.cpp:504 [backend fallback]\nAutocastXPU: fallthrough registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/autocast_mode.cpp:542 [backend fallback]\nAutocastMPS: fallthrough registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/autocast_mode.cpp:209 [backend fallback]\nAutocastCUDA: fallthrough registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/autocast_mode.cpp:165 [backend fallback]\nFuncTorchBatched: registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/functorch/LegacyBatchingRegistrations.cpp:731 [backend fallback]\nBatchedNestedTensor: registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/functorch/LegacyBatchingRegistrations.cpp:758 [backend fallback]\nFuncTorchVmapMode: fallthrough registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/functorch/VmapModeRegistrations.cpp:27 [backend fallback]\nBatched: registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/LegacyBatchingRegistrations.cpp:1075 [backend fallback]\nVmapMode: fallthrough registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/VmapModeRegistrations.cpp:33 [backend fallback]\nFuncTorchGradWrapper: registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/functorch/TensorWrapper.cpp:210 [backend fallback]\nPythonTLSSnapshot: registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/core/PythonFallbackKernel.cpp:202 [backend fallback]\nFuncTorchDynamicLayerFrontMode: registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/functorch/DynamicLayer.cpp:475 [backend fallback]\nPreDispatch: registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/core/PythonFallbackKernel.cpp:206 [backend fallback]\nPythonDispatcher: registered at /Users/runner/work/pytorch/pytorch/pytorch/aten/src/ATen/core/PythonFallbackKernel.cpp:198 [backend fallback]\n"
+    }
+  ]
+}

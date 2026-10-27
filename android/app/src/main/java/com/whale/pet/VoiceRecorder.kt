@@ -36,17 +36,20 @@ class VoiceRecorder {
         /** 单句上限 12s：比「一口气说完」略宽，超出就当地说完收尾。 */
         private const val MAX_MS = 12_000
 
-        /** 尾静音 1s 收尾：Siri 0.8–1.2s、小爱约 1.5s，取 1s 既不切断尾音也不迟钝。 */
-        private const val TAIL_SILENCE_MS = 1_000
+        /** 尾静音 700ms 收尾：比 Siri（0.8s）再快一点，说完到「在想…」的空档更短。 */
+        private const val TAIL_SILENCE_MS = 700
 
         /** 有效人声下限 300ms：更短的「嗯/啊」不算开口，避免噪声触发整轮对话。 */
         private const val MIN_VOICED_MS = 300
 
-        /** 一直没人说话：6s 就放弃，别把麦克风攥着。 */
-        private const val NO_SPEECH_MS = 6_000
+        /** 一直没人说话：4s 就放弃，误触/空场更快回待机，别把麦克风攥着。 */
+        private const val NO_SPEECH_MS = 4_000
 
-        /** 最短一轮 800ms：更短的点击是误触，不出 WAV、不上传宿主，避免垃圾轮次。 */
-        private const val MIN_RECORD_MS = 800
+        /**
+         * 最短一轮 800ms：更短的点击是误触，不出 WAV、不上传宿主，避免垃圾轮次。
+         * 按住说话（松手即发）由调用方传更小的 [stop] 门槛：松手本身就是结束，300ms 的「好」也算说过。
+         */
+        const val MIN_RECORD_MS = 800
 
         /** 开录后的探测窗：这段里读不到帧 / 全是数字静音，就判这个录音源拿不到声音。 */
         private const val PROBE_MS = 1_000
@@ -71,7 +74,7 @@ class VoiceRecorder {
         /** 用户能看懂的失败文案。调用方用 [takeFaultText] 取走上屏，别让这些只活在日志里。 */
         const val MSG_NO_SIGNAL = "麦克风没声音，检查是否被别的应用占着"
         const val MSG_TOO_SHORT = "说得太短了，再说一次"
-    const val MSG_NO_SPEECH = "没听到声音，再说一次"
+        const val MSG_NO_SPEECH = "没听到声音，再说一次"
 
         /** 源名只给日志和诊断用，不上屏。 */
         fun sourceName(src: Int): String = when (src) {
@@ -355,10 +358,10 @@ class VoiceRecorder {
     }
 
     /**
-     * 停录并返回完整 WAV（含 44 字节头）；没录到东西、或短于 [MIN_RECORD_MS] 返回 null。
+     * 停录并返回完整 WAV（含 44 字节头）；没录到东西、或短于 [minMs] 返回 null。
      * 要幂等，可能被点两次。
      */
-    fun stop(): ByteArray? {
+    fun stop(minMs: Int = MIN_RECORD_MS): ByteArray? {
         if (thread == null && !recording) return null
         recording = false
         stopping = true
@@ -377,12 +380,12 @@ class VoiceRecorder {
         val ms = data.size * 1_000 / (SAMPLE_RATE * 2)
         // 录了够久但一句人声都没有（对着一屋子安静按了一下）：本地就判掉，
         // 不传上去等识别，省掉好几秒的空等。
-        if (ms >= MIN_RECORD_MS && lastVoicedMs <= 0 && !noSignal) {
+        if (ms >= minMs && lastVoicedMs <= 0 && !noSignal) {
             faultText = MSG_NO_SPEECH
             Log.i(TAG, "录音 ${ms}ms 没有人声，不送识别")
             return null
         }
-        if (ms < MIN_RECORD_MS) {
+        if (ms < minMs) {
             if (!noSignal) {
                 faultText = MSG_TOO_SHORT
                 Log.i(TAG, "录音只有 ${ms}ms，当误触，不生成一轮")

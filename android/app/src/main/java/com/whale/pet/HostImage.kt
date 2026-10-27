@@ -85,6 +85,9 @@ object HostImage {
     private fun keyOf(path: String, maxPx: Int): String = "$path\u0000$maxPx"
 
     private fun obtain(app: Context, path: String, maxPx: Int): Bitmap? {
+        // 自己发出去的图/视频封面在本机有副本：直接读盘，不走网络也不吃隧道
+        val local = File(path)
+        if (local.isAbsolute && local.isFile && local.length() > 0) return decode(local, maxPx)
         val cfg = PetSettings.load(app)
         if (!cfg.ready) return null
         val file = diskFile(app, path)

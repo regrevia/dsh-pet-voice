@@ -6,17 +6,18 @@ package com.whale.pet
  * 之所以从 [VoiceRecorder] 里拆出来，是因为收尾时机直接决定体感（用户说完到看见「识别中」
  * 之间的空档），而它原来混在读线程里、只有真机麦克风才能验。拆成纯函数后，
  * JVM 单测可以按毫秒断言：`VadGateTest` 用合成音量喂进去，断言「最后一个人声帧之后
- * 正好 1000ms 收尾」，并且断言不会退化成固定 6s。
+ * 正好 700ms 收尾」，并且断言不会退化成固定 4s。
  */
 class VadGate(
-    /** 尾静音多久算说完。Siri 0.8–1.2s、小爱约 1.5s，1s 既不切断尾音也不迟钝。 */
-    private val tailSilenceMs: Int = 1_000,
+    /** 尾静音多久算说完。Siri 0.8–1.2s、小爱约 1.5s；这里取 700ms——比 Siri 再快一点，
+     *  真机听感切尾音就调回 800ms（只改这一处，VadGateTest 同步）。 */
+    private val tailSilenceMs: Int = 700,
     /** 有效人声下限：更短的「嗯/啊」不算开口，避免噪声触发整轮对话。 */
     private val minVoicedMs: Int = 300,
     /** 单句上限：比「一口气说完」略宽，超出就当地说完收尾。 */
     private val maxMs: Int = 12_000,
-    /** 一直没人说话就放弃，别把麦克风攥着。 */
-    private val noSpeechMs: Int = 6_000,
+    /** 一直没人说话就放弃，别把麦克风攥着。4s：比原来 6s 少等 2s，误触后回待机更快。 */
+    private val noSpeechMs: Int = 4_000,
 ) {
 
     enum class Stop {

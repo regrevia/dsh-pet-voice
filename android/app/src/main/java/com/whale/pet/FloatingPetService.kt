@@ -76,7 +76,22 @@ class FloatingPetService : Service() {
     private var webPaused = false
     private var currentMode = "idle"
 
+    /** 当前前台服务是否带 microphone 类型：没有这一位，Android 12+ 会把后台录音整段静音成全零。 */
+    private var fgsMic = false
+    /** 流式气泡节流：60ms 内只刷一次，60fps 下看不出跳。 */
+    private var lastBubbleAt = 0L
+    /** 嘴型合帧：录音线程 50Hz 推上来，只把最后一个值交给主线程，别把 JS 队列灌满。 */
+    @Volatile private var mouthLatest = 0f
+    @Volatile private var mouthQueued = false
+
     private var pttActive = false
+
+    /** 这一次按住是「按住说话」（松手发送），不是唤醒词/指令接续的自动开麦。 */
+    @Volatile
+    private var pttHolding = false
+
+    /** 按住短于这个时间当误触：不发音频，只提示怎么用。 */
+    private val HOLD_MIN_MS = 300L
     /** 对话页按住说话期间为 true：唤醒引擎停着，松手再交回去。 */
     @Volatile private var wakePausedByApp = false
 
@@ -107,6 +122,17 @@ class FloatingPetService : Service() {
     /** 每次开口递增：`/api/command` 的回包只在还是同一轮时才生效（用户可能已经重新点我）。 */
     private var commandGen = 0
 
+    /** 上一次「连点打断」的时刻：900ms 内的后续点按只回执，不打断也不新建一轮。 */
+    private var lastPreemptAt = 0L
+
+    /** 本次按下只给回执（连点第二下起）：UP 时不要走 finishPtt。 */
+    private var receiptOnly = false
+
+    /** 宿主面板上的称呼（`GET /api/state` → `pet.wakeName`）；空 = 还没拿到，用本地配对时存的值。 */
+    private var hostWakeName = ""
+    private var hostStateAt = 0L
+    private var hostTick: Runnable? = null
+
     /** 点一下说话：手机只负责录音，识别交给宿主 whisper（真机常没有系统识别器）。 */
     private val recorder by lazy { VoiceRecorder() }
 
@@ -126,13 +152,6 @@ class FloatingPetService : Service() {
     private var pendingX = 0
     private var pendingY = 0
     private var dragFlushScheduled = false
-
-    private val longPress = Runnable {
-        if (!dragging) {
-            haptic(HapticFeedbackConstants.LONG_PRESS)
-            openHistory()
-        }
-    }
 
     private val mouthTick = object : Runnable {
         override fun run() {
@@ -235,12 +254,11 @@ class FloatingPetService : Service() {
             applyDisplayMode()
             val granted = intent?.getBooleanExtra(EXTRA_MIC_GRANTED, false) == true
             if (granted) {
-                updateNotification("点我说话")
-                say("听见你啦")
-                // 用户刚点的是「说话」，授权一拿到就接着听他讲，别让他再点一次
-                main.postDelayed({ startPtt() }, 350)
+                updateNotification(getString(R.string.notif_text))
+                say("听见你啦，按住说话")
+                // 按住说话由手指决定，授权回来不替他开麦（没按住就开麦会录进环境音）
             } else {
-                updateNotification("点我开麦克风")
+                updateNotification("按住说话 · 缺麦克风权限")
                 say("没有麦克风")
                 openSettings()
             }
@@ -302,10 +320,11 @@ class FloatingPetService : Service() {
         }
         applyConfigIfChanged()
         ensureOverlay()
+        startHostStateTick()
         applyDisplayMode()
         maybeAutoUpdate()
         if (restored) {
-            updateNotification("点我说话")
+            updateNotification("按住说话")
         } else {
             main.postDelayed({ maybeStartWake() }, 600)
         }
@@ -493,8 +512,68 @@ class FloatingPetService : Service() {
         tts.prewarm(FILLERS)
         }
         if (lookChanged) applyWindowSize()
+        syncHostState()
         // 常听开关可能刚被改：关掉立即停麦克风，打开则此刻就起（仍受「待机 + 可见」约束）
         if (!cfg.wakeEnabled) wake.stop() else maybeStartWake()
+    }
+
+    /**
+     * 面板上的称呼才是真称呼：`GET /api/state` 的 `pet.wakeName` 改了以后，
+     * 唤醒词和气泡里的名字都得跟着换，不能只在配对那一刻取一次本地值。
+     * 30s 一次，失败下一分钟再试；只读 state，不写任何配置。
+     */
+    private fun syncHostState() {
+        if (!cfg.ready) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - hostStateAt < 30_000L) return
+        hostStateAt = now
+        val snapshot = cfg
+        Thread({
+            val r = try { PetClient { snapshot }.state() } catch (e: Exception) {
+                Log.i("PetWake", "读宿主称呼异常 ${e.javaClass.simpleName}: ${e.message?.take(90)}")
+                null
+            }
+            val name = r?.json?.optJSONObject("pet")?.optString("wakeName").orEmpty().trim()
+            main.post {
+                if (destroyed) return@post
+                if (name.isEmpty()) {
+                    hostStateAt = 0L
+                    if (r == null || !r.ok) Log.i("PetWake", "读宿主称呼失败 code=${r?.code ?: -1}")
+                } else {
+                    Log.i("PetWake", "读到称呼=$name")
+                    applyHostWakeName(name)
+                }
+            }
+        }, "pet-host-state").apply { isDaemon = true }.start()
+    }
+
+    /**
+     * 面板上改称呼后不该等用户点一下才生效：常驻时每分钟读一次 state
+     * （syncHostState 自带宽 30s 闸），失败下一分钟自然重试。
+     */
+    private fun startHostStateTick() {
+        if (hostTick != null) return
+        val r = object : Runnable {
+            override fun run() {
+                if (destroyed) return
+                syncHostState()
+                main.postDelayed(this, 60_000L)
+            }
+        }
+        hostTick = r
+        main.postDelayed(r, 60_000L)
+    }
+
+    private fun applyHostWakeName(name: String) {
+        if (destroyed || name == hostWakeName) return
+        hostWakeName = name
+        Log.i("PetWake", "宿主称呼=$name 唤醒词=${wakeWords().joinToString("|")}")
+        eval("window.PetBridge&&PetBridge.setWho(${JSONObject.quote(who())})")
+        // 唤醒词集合变了：正在常听就重启引擎，否则新称呼叫不动
+        if (cfg.wakeEnabled) {
+            wake.stop()
+            main.postDelayed({ if (!destroyed) maybeStartWake() }, 400)
+        }
     }
 
     /* ---------------- 悬浮窗 ---------------- */
@@ -670,16 +749,37 @@ class FloatingPetService : Service() {
                 downRawY = ev.rawY
                 downAt = SystemClock.elapsedRealtime()
                 dragging = false
+                receiptOnly = false
                 params?.let {
                     dragBaseX = it.x
                     dragBaseY = it.y
                 }
-                // 手感：按下去就有反馈（震动 + 立刻做反应），别等 UP 才动——
-                // 从 DOWN 到挥手原来差 100~200ms，主观就是「点了没反应」。
+                // 按下去就有反馈（震动 + 立刻做反应），别等 UP 才动：按住说话要马上进 listening
                 haptic(HapticFeedbackConstants.CLOCK_TICK)
-                evalAck("点击", "window.PetBridge&&PetBridge.action('tap')")
-                main.removeCallbacks(longPress)
-                main.postDelayed(longPress, 500)
+                evalAck("按住", "window.PetBridge&&PetBridge.action('tap')")
+                if (cfg.ready) {
+                    // 微信式按住说话：DOWN 就开录，不等 VAD 判定、也不等 700ms 尾静音
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastPreemptAt < 900L) {
+                        // 连点第二下起只给回执：不打断、不新建一轮、也不排进队列
+                        Log.i(
+                            "PetTap",
+                            "连点收口：${now - lastPreemptAt}ms 内第二下只回执 turn=$turnActive speaking=$speaking tts=${tts.busy}",
+                        )
+                        receiptOnly = true
+                        say("等等，还在回")
+                        return true
+                    }
+                    if (turnActive || speaking || tts.busy) {
+                        lastPreemptAt = now
+                        Log.i("PetTap", "连点：打断上一轮 turn=$turnActive speaking=$speaking tts=${tts.busy}")
+                        turn?.cancel()
+                        turnActive = false
+                        tts.stopAll()
+                        speaking = false
+                    }
+                    startPtt(hold = true)
+                }
                 return true
             }
 
@@ -688,7 +788,8 @@ class FloatingPetService : Service() {
                 val dy = ev.rawY - downRawY
                 if (!dragging && hypot(dx, dy) > threshold) {
                     dragging = true
-                    main.removeCallbacks(longPress)
+                    // 拖窗不是说话：把这次按住录的那点声音丢掉，别发一段拖动杂音
+                    cancelPtt()
                     stopContinuous("拖动悬浮窗")
                     haptic(HapticFeedbackConstants.LONG_PRESS)
                     evalAck("拖动", "window.PetBridge&&PetBridge.setDragging(true)")
@@ -700,24 +801,29 @@ class FloatingPetService : Service() {
             }
 
             MotionEvent.ACTION_UP -> {
-                main.removeCallbacks(longPress)
                 val held = SystemClock.elapsedRealtime() - downAt
-                val moved = hypot(ev.rawX - downRawX, ev.rawY - downRawY)
                 val wasDragging = dragging
                 dragging = false
                 if (wasDragging) {
                     eval("window.PetBridge&&PetBridge.setDragging(false)")
                     snapToEdge()
-                } else if (moved <= threshold && held < 500) {
-                    onPetTap()
+                } else if (!cfg.ready) {
+                    openSettings()
+                } else if (receiptOnly) {
+                    receiptOnly = false
+                    Log.i("PetTap", "松手：这一下只回执，没有新的一轮")
+                } else {
+                    finishPtt(held)
                 }
                 return true
             }
 
             MotionEvent.ACTION_CANCEL -> {
-                main.removeCallbacks(longPress)
-                if (dragging) eval("window.PetBridge&&PetBridge.setDragging(false)")
+                // 系统把手势收走（来电、通知栏、多指）：安全收尾，别留一条永远在录的音
                 dragging = false
+                receiptOnly = false
+                cancelPtt()
+                eval("window.PetBridge&&PetBridge.setDragging(false)")
                 return true
             }
         }
@@ -807,6 +913,13 @@ class FloatingPetService : Service() {
 
     private fun eval(code: String) {
         if (!pageReady) return
+        // WebView 只能在主线程调。录音线程的 onLevel 会直接走到这里，
+        // 不守卫就是 `A WebView method was called on thread 'pet-recorder'`：整个进程崩掉，
+        // 悬浮窗随之消失，MIUI 还拒绝自动重启服务（AutoStartManagerService: Reject RestartService）。
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            main.post { eval(code) }
+            return
+        }
         web?.evaluateJavascript(code, null)
     }
 
@@ -820,9 +933,25 @@ class FloatingPetService : Service() {
     /** 带往返打点的 eval：用来量「点下去 → JS 开始做动作」的真实延迟。 */
     private fun evalAck(label: String, code: String) {
         if (!pageReady) return
+        // 和 eval 同一条规矩：WebView 只认主线程，从后台调就是整进程崩。
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            main.post { evalAck(label, code) }
+            return
+        }
         val sentAt = SystemClock.elapsedRealtime()
         web?.evaluateJavascript(code) { _ ->
             Log.i("PetLatency", "$label→JS 往返 ${SystemClock.elapsedRealtime() - sentAt}ms")
+        }
+    }
+
+    /** 录音线程调：合并成一帧交给主线程。 */
+    private fun postMouth(value: Float) {
+        mouthLatest = value
+        if (mouthQueued) return
+        mouthQueued = true
+        main.post {
+            mouthQueued = false
+            setMouth(mouthLatest)
         }
     }
 
@@ -850,7 +979,8 @@ class FloatingPetService : Service() {
         eval("window.PetBridge&&PetBridge.setOutfit&&PetBridge.setOutfit(${JSONObject.quote(key)})")
     }
 
-    private fun who(): String = cfg.wakeName.ifBlank { PetConfig.DEFAULT_WAKE_NAME }
+    private fun who(): String =
+        hostWakeName.ifBlank { cfg.wakeName }.ifBlank { PetConfig.DEFAULT_WAKE_NAME }
 
     private fun pauseRendering() {
         if (webPaused) return
@@ -868,28 +998,51 @@ class FloatingPetService : Service() {
 
     /* ---------------- 交互 ---------------- */
 
-    /** 点一下：唤醒（说话中/思考中则打断，直接进收音）。 */
-    private fun onPetTap() {
-        if (!cfg.ready) {
-            openSettings()
+    /**
+     * 松手：立刻停录并发送，不等 700ms 尾静音——松手本身就是「我说完了」。
+     *
+     * 短于 [HOLD_MIN_MS] 的按住当误触，整段没人声的也不送识别：两种都只提示怎么用，
+     * 别让宿主识别一段空音频再干等几秒。
+     */
+    private fun finishPtt(heldMs: Long) {
+        pttHolding = false
+        if (!pttActive) {
+            Log.i("PetTap", "松手：没在录 turn=$turnActive tts=${tts.busy} speaking=$speaking")
+            // 录音还没起来就松手了（抢麦失败 / 上一轮还在收尾）：给一句提示就回待机
+            if (!turnActive && !tts.busy && !speaking) {
+                say("按住说话，松手发送")
+                updateNotification(getString(R.string.notif_text))
+            }
             return
         }
-        if (pttActive) {
-            // 第二下点击 = 「我说完了」；不点也会被 VoiceRecorder 的静音 VAD 自动收尾
-            finishRecording()
+        if (heldMs < HOLD_MIN_MS) {
+            cancelPtt()
+            say("按住说话，松手发送")
             return
         }
-        if (turnActive || speaking) {
-            turn?.cancel()
-            turnActive = false
-            tts.stopAll()
-            speaking = false
+        finishRecording(HOLD_MIN_MS.toInt())
+    }
+
+    /** 按住说话被打断（拖动 / 系统收走手势）：停录丢弃，别留一条永不结束的录音。 */
+    private fun cancelPtt() {
+        pttHolding = false
+        if (!pttActive) return
+        pttActive = false
+        recorder.onAutoStop = null
+        recorder.onLevel = null
+        try {
+            recorder.stop()
+        } catch (_: Exception) {
         }
-        startPtt()
+        main.removeCallbacks(noVoiceWatch)
+        setMode("idle")
+        setMouth(0f)
+        updateNotification(getString(R.string.notif_text))
     }
 
     /** 点一下开始说：AudioRecord 录 WAV → 宿主 `POST /api/asr` 识别；本机识别只作兜底。 */
-    private fun startPtt() {
+    private fun startPtt(hold: Boolean = false) {
+        Log.i("PetTap", "开麦 hold=$hold turn=$turnActive speaking=$speaking tts=${tts.busy}")
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             // 明确说缺什么，并把授权弹窗直接拉起来；万一被 MIUI「后台弹出界面」拦了，
             // 通知栏也留着这句话，点通知进 App 还能授权。
@@ -899,25 +1052,26 @@ class FloatingPetService : Service() {
             return
         }
         if (!cfg.ready) {
-            updateNotification("还没配对 · 点我进 App")
+            updateNotification("还没配对 · 点一下进 App")
             openSettings()
             return
         }
-        continuous = true
+        // 按住说话是一次性的：松手就发，发完回待机，不自动续听（续听会让用户以为又开麦了）
+        continuous = !hold
+        pttHolding = hold
         emptyRounds = 0
-        // 用户自己开口 = 一串新的连续对话：自动续听轮数和 8s 计时都从头算
         autoRounds = 0
         autoListenSince = 0L
         main.removeCallbacks(resumeListen)
         main.removeCallbacks(noVoiceWatch)
-        startBgWatch()
+        if (!hold) startBgWatch()
         turn?.cancel()
         tts.stopAll()
         // 常听唤醒会一直握着 SpeechRecognizer 的麦克风，而 cancel() 是异步 destroy。
         // 立刻开 AudioRecord 在真机上常常抢不到麦克风（录音起来但全是静音，或干脆失败），
         // 表现就是「点了一下没反应、也不说话」。所以先停唤醒，再退避重试几次。
         wake.stop()
-        updateNotification("在听 · 说完停一下或再点我")
+        updateNotification(if (hold) "在听 · 松手发送" else "在听 · 说完停一下或再点我")
         beginListening(0)
     }
 
@@ -925,6 +1079,16 @@ class FloatingPetService : Service() {
     private fun beginListening(attempt: Int) {
         if (!cfg.ready) {
             openSettings()
+            return
+        }
+        // 开机恢复 / START_STICKY / REFRESH 起的都是 specialUse 类型的前台服务，
+        // 而 Android 12+ 只允许带 microphone 类型的前台服务在后台录音：缺了这一位，
+        // AudioRecord 照常开、帧也照常到，但 PCM 全是 0（AudioService 里标 silenced），
+        // 三个录音源各 1s 探测窗全判死 → 3.3s 后收麦，用户看到的就是「麦克风只闪一下」。
+        if (attempt == 0 && !ensureMicForeground()) {
+            updateNotification("麦克风被系统拦住 · 进 App 再按住我")
+            say("麦克风被拦住了，进 App 里按住我")
+            stopContinuous("前台服务类型升不上去", resumeWake = false)
             return
         }
         // 播报没结束绝不开麦：TTS 声音会被自己录进去，一问一答变成叠音自激。
@@ -946,9 +1110,9 @@ class FloatingPetService : Service() {
             armNoVoiceWatch()
             setMode("listening")
             say("")
-            updateNotification("在听 · 说完停一下或再点我")
+            updateNotification(if (pttHolding) "在听 · 松手发送" else "在听 · 说完停一下或再点我")
             recorder.onAutoStop = { main.post { finishRecording() } }
-            recorder.onLevel = { v -> if (v > 0.35f) setMouth(v) }
+            recorder.onLevel = { v -> if (v > 0.35f) postMouth(v) }
             return
         }
         if (attempt < 3) {
@@ -960,20 +1124,21 @@ class FloatingPetService : Service() {
             updateNotification("录音启动失败 · 改用本机识别")
             startNativePtt()
         } else {
-            updateNotification("麦克风打不开 · 点我再试")
-            say("麦克风好像被占着，等一下再点我")
+            updateNotification("麦克风打不开 · 按住再试")
+            say("麦克风好像被占着，等一下再按住我")
             // 自动重听里起不来就不再自己攒重试：退出连续对话，把唤醒词还回去
             if (continuous) stopContinuous("麦克风打不开") else toIdle()
         }
     }
 
     /** 收尾：停录 → 上传宿主识别 → 进一轮对话。 */
-    private fun finishRecording() {
+    private fun finishRecording(minMs: Int = VoiceRecorder.MIN_RECORD_MS) {
         if (!pttActive) return
         pttActive = false
         recorder.onLevel = null
         recorder.onAutoStop = null
-        val wav = recorder.stop()
+        // 松手即发：门槛是「按住了 300ms」；VAD 自动收尾仍用 800ms 的老门槛
+        val wav = recorder.stop(minMs)
         val heard = recorder.heardSpeech
         val listenedMs = if (listenStartedAt > 0L) SystemClock.elapsedRealtime() - listenStartedAt else 0L
         // 全程没人声（录音自己按静音收的尾）：6s 静音送去识别没有意义，
@@ -988,6 +1153,10 @@ class FloatingPetService : Service() {
             // 录音这边知道为什么没声（拿不到帧 / 说得太短），别只写日志——用户在等一个说法。
             val fault = recorder.takeFaultText()
             updateNotification(fault ?: "没听到声音 · 点我再说")
+            // 按住说话没录到人声：直接教怎么用，别只留在通知栏里
+            if (fault == VoiceRecorder.MSG_TOO_SHORT || fault == VoiceRecorder.MSG_NO_SPEECH) {
+                say("按住说话，松手发送")
+            }
             // 点一下就抬手：不算一轮，直接回待机，别自动重听（重听会让用户以为卡住了）。
             if (fault == VoiceRecorder.MSG_TOO_SHORT || fault == VoiceRecorder.MSG_NO_SIGNAL ||
                     fault == VoiceRecorder.MSG_NO_SPEECH) {
@@ -1036,7 +1205,7 @@ class FloatingPetService : Service() {
                     }
                     else -> {
                         toIdle()
-                        updateNotification("识别失败 · 点我再试（${res?.code ?: "网络"}）")
+                        updateNotification("识别失败 · 按住再试（${res?.code ?: "网络"}）")
                     }
                 }
             }
@@ -1073,7 +1242,7 @@ class FloatingPetService : Service() {
                 pttActive = false
                 val soft = code == SpeechRecognizer.ERROR_NO_MATCH ||
                     code == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
-                if (!soft) updateNotification("识别失败 · 点我再试")
+                if (!soft) updateNotification("识别失败 · 按住再试")
                 flashHappy()
             }
 
@@ -1162,7 +1331,10 @@ class FloatingPetService : Service() {
     private fun onWake(hit: WakeHit) {
         if (destroyed) return
         if (!cfg.wakeEnabled) return
-        if (turnActive || pttActive || speaking || tts.busy) return
+        if (turnActive || pttActive || speaking || tts.busy) {
+            Log.i("PetTap", "唤醒：上一轮没结束，忽略 turn=$turnActive ptt=$pttActive speaking=$speaking tts=${tts.busy}")
+            return
+        }
         wake.stop() // 呼出后立刻停引擎：别把自己 TTS 的声音当唤醒词（回声自激）
         updateNotification("听到「${hit.word}」")
         continuous = true
@@ -1304,9 +1476,17 @@ class FloatingPetService : Service() {
             override fun onStatus(text: String) = Unit
 
             override fun onAssistant(fullText: String, isFinal: Boolean) {
-                if (destroyed) return
-                if (!isFinal || fullText.isBlank()) return
-                PetHistory.append(this@FloatingPetService, PetHistory.ROLE_PET, fullText)
+                if (destroyed || fullText.isBlank()) return
+                if (isFinal) {
+                    PetHistory.append(this@FloatingPetService, PetHistory.ROLE_PET, fullText)
+                    return
+                }
+                // 增量出字：气泡跟着流走，别等整段（宿主已按帧回调）。60ms 节流免得 JS 被灌爆。
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastBubbleAt < 60) return
+                lastBubbleAt = now
+                // 气泡只显示尾巴：长回复不挤爆窗口（boot.js 本来也只留 90 字）。
+                say(fullText.takeLast(72).trimStart('，', '。', '、', ' ', '\n'))
             }
 
             override fun onSentence(sentence: String) {
@@ -1396,7 +1576,7 @@ class FloatingPetService : Service() {
     private fun flashHappy() {
         setMode("happy")
         say("")
-        updateNotification("待机 · 点我说话")
+        updateNotification("待机 · 按住说话")
         main.postDelayed({
             if (!turnActive && !pttActive && !speaking) toIdle()
         }, 900)
@@ -1469,6 +1649,12 @@ class FloatingPetService : Service() {
             autoRounds = 0
             autoListenSince = 0L
             main.removeCallbacks(noVoiceWatch)
+            // 还没排空就别回待机：toIdle 会 say("") 把气泡收掉，此刻句子还在下载/出声，
+            // 用户看到的就是「气泡闪一下就没了」。
+            if (tts.busy || speaking) {
+                scheduleResume(250)
+                return@Runnable
+            }
             toIdle()
             return@Runnable
         }
@@ -1522,6 +1708,13 @@ class FloatingPetService : Service() {
         if (continuous && emptyRounds < 2) {
             updateNotification("没听清 · 再说一次")
             scheduleResume(300)
+            return
+        }
+        if (!continuous) {
+            // 按住说话没有「自动再来一次」：识别空就回待机并教怎么用，别停在「在想…」
+            updateNotification("没听清 · 按住再说")
+            say("没听清，按住再说")
+            main.postDelayed({ if (!turnActive && !pttActive) toIdle() }, 1500)
             return
         }
         val reason = if (emptyRounds >= 2) "连续两轮没听清" else "未在连续对话"
@@ -1585,6 +1778,7 @@ class FloatingPetService : Service() {
 
     private fun toIdle() {
         if (turnActive || pttActive || speaking) return
+        pttHolding = false
         setMode("idle")
         setMouth(0f)
         say("")
@@ -1666,16 +1860,6 @@ class FloatingPetService : Service() {
         }
     }
 
-    private fun openHistory() {
-        try {
-            startActivity(
-                Intent(this, HistoryActivity::class.java)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            )
-        } catch (_: Exception) {
-        }
-    }
-
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     /* ---------------- 前台通知 ---------------- */
@@ -1704,7 +1888,7 @@ class FloatingPetService : Service() {
             PendingIntent.FLAG_IMMUTABLE,
         )
         val text = if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            "点我开麦克风"
+            "按住说话 · 缺麦克风权限"
         } else {
             statusText
         }
@@ -1726,13 +1910,23 @@ class FloatingPetService : Service() {
             .build()
     }
 
+    /** 录音前确认前台服务带 microphone 类型；不带就当场升一次（同一进程内 startForeground 换类型是允许的）。 */
+    private fun ensureMicForeground(): Boolean {
+        if (fgsMic) return true
+        val ok = startAsForeground(mic = true)
+        Log.i(PetCommand.TAG, "前台服务类型升级 microphone → ${if (ok && fgsMic) "成功" else "失败"}")
+        return ok && fgsMic
+    }
+
     private fun startAsForeground(mic: Boolean): Boolean {
         val n = buildNotification()
         if (Build.VERSION.SDK_INT < 29) {
             return try {
                 startForeground(NOTIF_ID, n)
+                fgsMic = mic
                 true
             } catch (e: Exception) {
+                fgsMic = false
                 false
             }
         }
@@ -1740,8 +1934,10 @@ class FloatingPetService : Service() {
             if (mic) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
         try {
             startForeground(NOTIF_ID, n, preferred)
+            fgsMic = mic
             return true
         } catch (_: Exception) {
+            fgsMic = false
         }
         try {
             startForeground(
@@ -1749,8 +1945,11 @@ class FloatingPetService : Service() {
                 buildNotification(if (mic) "麦克风前台服务被拒，降级为常驻" else "常驻（后台恢复模式）"),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
             )
+            Log.w(PetCommand.TAG, "前台服务降级为 specialUse：后台录音会被系统静音")
+            fgsMic = false
             return true
         } catch (_: Exception) {
+            fgsMic = false
         }
         return try {
             startForeground(NOTIF_ID, buildNotification("前台服务受限"))

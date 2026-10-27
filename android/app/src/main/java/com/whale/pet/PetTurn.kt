@@ -9,6 +9,9 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
+/** 电脑上那一轮还在跑时宿主回的 queued 帧：这句在排队，不是在思考。 */
+const val PET_QUEUED_TEXT = "电脑上还在跑，已排队"
+
 /**
  * 一轮对话：SSE 先连上（拿到 hello）再派发，保证 delta 不丢；
  * 隧道/代理把 SSE 掐掉时退回 poll（先取 cursor=-1 基线再派发，同样不丢帧）。
@@ -500,6 +503,14 @@ class PetTurn(
 
     private fun handleEvent(event: String, data: JSONObject) {
         if (cancelled.get()) return
+        // 宿主把电脑上正在跑的那一轮也广播过来（origin=desktop，同一只会话里就会撞上）：
+        // 它的 start/delta/message/final 混进来，手机就显示电脑端的操作；它的 end 更糟，
+        // 直接把本轮收尾。这里一律丢，不渲染也不结束。旧宿主没有这个字段，按原样放行。
+        val origin = data.optString("origin")
+        if (origin.isNotBlank() && origin != "pet" && event != "hello") {
+            dbg("drop origin=$origin $event sid=${data.optString("sessionId")}")
+            return
+        }
         if (event != "delta") dbg("event $event seq=${data.optInt("seq", -1)} sid=${data.optString("sessionId")} want=$expectedSession feeder=${feeder.get()}")
         // 宿主会把所有会话的事件广播过来：别的会话（比如电脑上正在用的那只）的 delta 不能串进手机字幕
         val evSession = data.optString("sessionId")
@@ -531,6 +542,9 @@ class PetTurn(
             }
 
             "start" -> post { cb.onStatus("思考中…") }
+
+            // 电脑上那一轮还没跑完，这句进了队列：不是「我们在思考」，别显示成思考中。
+            "queued" -> post { cb.onStatus(PET_QUEUED_TEXT) }
 
             "delta" -> {
                 val d = data.optString("text")
@@ -668,6 +682,11 @@ class PetTurn(
             if (c == '。' || c == '！' || c == '？' || c == '!' || c == '?' || c == '；' || c == ';' || c == '\n') {
                 if (i + 1 >= 2) return i + 1
             }
+        }
+        // 首句要早：过 24 字就在最后一个分句处切一刀，第一句 TTS 不必等整段说完。
+        if (buf.length > 24) {
+            val cut = buf.lastIndexOfAny(charArrayOf('，', ',', '、', ' '))
+            if (cut > 12) return cut + 1
         }
         if (buf.length > 90) {
             val idx = buf.lastIndexOfAny(charArrayOf('，', ',', '、', ' '))

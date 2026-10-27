@@ -1,13 +1,18 @@
 package com.whale.pet
 
+import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
@@ -53,12 +58,17 @@ class SessionActivity : Activity() {
     private lateinit var emptyBox: View
     private lateinit var emptyText: TextView
     private lateinit var peekLine: TextView
-    private lateinit var stopBtn: TextView
     private lateinit var goalLine: TextView
     private lateinit var more: TextView
     private lateinit var input: EditText
+    private lateinit var micBtn: TextView
     private lateinit var adapter: MsgAdapter
     private var render: ChatRender? = null
+
+    /* 按住说话：按下录、松手出字并且直接发。VAD 只在按太久时兜底。 */
+    private var recorder: VoiceRecorder? = null
+    private var micBusy = false
+    @Volatile private var micDown = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -71,9 +81,27 @@ class SessionActivity : Activity() {
         emptyText = emptyBox as TextView
         input = findViewById(R.id.chatInput)
         peekLine = findViewById(R.id.chatPeek)
-        stopBtn = findViewById(R.id.chatStop)
         goalLine = findViewById(R.id.chatGoal)
-        stopBtn.setOnClickListener { doStop() }
+        micBtn = findViewById(R.id.chatMic)
+        micBtn.setOnTouchListener { v, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    micDown = true
+                    v.animate().scaleX(1.06f).scaleY(1.06f).setDuration(90).start()
+                    buzz()
+                    startHold()
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    micDown = false
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(90).start()
+                    finishHold()
+                    v.performClick()
+                    true
+                }
+                else -> true
+            }
+        }
 
         more = TextView(this).apply {
             text = "加载更早"
@@ -104,6 +132,66 @@ class SessionActivity : Activity() {
         super.onDestroy()
     }
 
+    /**
+     * 从别的会话切回来：本页钉的那只已经不是 App 当前那只，就整页换掉。
+     * 以前这里什么都没有，页面一直拿着 onCreate 时那份 id/标题，看起来就是「不更新」。
+     */
+    override fun onResume() {
+        super.onResume()
+        val wanted = PetSettings.chatSession(this)
+        if (wanted.isNotBlank() && wanted != sessionId) adopt(wanted)
+    }
+
+    /** singleTop 复用（manifest :115）不会再走 onCreate，新 intent 只能在这里接住。 */
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val id = intent?.getStringExtra(EXTRA_ID).orEmpty()
+        if (id.isBlank()) return
+        title = intent?.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { "对话" }
+        findViewById<TextView>(R.id.chatTitle).text = title
+        adopt(id)
+    }
+
+    /** 换到 [id]：上一只的行、游标、状态一起清掉再重新拉，避免两只会话的内容叠在一页上。 */
+    private fun adopt(id: String) {
+        if (id.isBlank()) return
+        sessionId = id
+        // 标题也是上一只的：先退回中性标题，再从会话列表里把这句的真名取回来
+        title = "对话"
+        findViewById<TextView>(R.id.chatTitle).text = title
+        loading = false
+        rows.clear()
+        seen.clear()
+        hasMore = false
+        nextBefore = 0
+        maxSeq = 0
+        errorLine = ""
+        queued = ""
+        running = false
+        adapter.notifyDataSetChanged()
+        load()
+        refreshStatus()
+        io.execute {
+            val arr = runCatching { client.sessions() }.getOrNull()?.json?.optJSONArray("sessions")
+                ?: return@execute
+            var found = ""
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                if (o.optString("id") == id) {
+                    found = o.optString("title").trim()
+                    break
+                }
+            }
+            if (found.isBlank()) return@execute
+            ui.post {
+                if (sessionId != id) return@post
+                title = found
+                findViewById<TextView>(R.id.chatTitle).text = found
+            }
+        }
+    }
+
     /* ---------------- 读 ---------------- */
 
     private fun load() {
@@ -111,12 +199,15 @@ class SessionActivity : Activity() {
         loading = true
         emptyText.text = "读取中"
         emptyBox.visibility = View.VISIBLE
+        val sid = sessionId
         io.execute {
-            val r = client.session(sessionId, 20)
+            val r = client.session(sid, 20)
             val page = parse(r)
             val more = r.json?.optBoolean("hasMore", false) == true
             val next = r.json?.optLong("nextBefore", 0) ?: 0
             ui.post {
+                // 读的过程中切了会话：这一页是上一只的，丢掉，别糊到新会话上
+                if (sid != sessionId) return@post
                 loading = false
                 rows.clear()
                 seen.clear()
@@ -134,7 +225,7 @@ class SessionActivity : Activity() {
                 } else {
                     emptyBox.visibility = View.GONE
                 }
-                scrollBottom()
+                scrollBottom(force = true)
             }
         }
     }
@@ -143,12 +234,14 @@ class SessionActivity : Activity() {
         if (loading || !hasMore || nextBefore <= 0) return
         loading = true
         more.text = "读取中"
+        val sid = sessionId
         io.execute {
-            val r = client.session(sessionId, 20, nextBefore)
+            val r = client.session(sid, 20, nextBefore)
             val page = parse(r)
             val moreFlag = r.json?.optBoolean("hasMore", false) == true
             val next = r.json?.optLong("nextBefore", 0) ?: 0
             ui.post {
+                if (sid != sessionId) return@post
                 loading = false
                 val add = page.filter { it.seq !in seen }
                 add.forEach { seen.add(it.seq) }
@@ -296,30 +389,13 @@ class SessionActivity : Activity() {
             val objective = goals?.json?.optJSONArray("goals")
                 ?.optJSONObject(0)?.optString("objective").orEmpty().trim()
             ui.post {
+                if (sid != sessionId) return@post
                 running = busy
-                stopBtn.visibility = if (busy || sending) View.VISIBLE else View.GONE
                 goalLine.text = if (objective.isBlank()) "" else "目标 · " + objective
                 goalLine.visibility = if (objective.isBlank()) View.GONE else View.VISIBLE
             }
         }
         ui.postDelayed({ if (!isFinishing) refreshStatus() }, 6_000)
-    }
-
-    /** 这一轮不想要了：让宿主掐掉，界面立刻还回可输入。 */
-    private fun doStop() {
-        val sid = sessionId
-        if (sid.isBlank()) return
-        stopBtn.visibility = View.GONE
-        io.execute {
-            val r = runCatching { client.cancel(sid) }.getOrNull()
-            ui.post {
-                sending = false
-                errorLine = ""
-                findViewById<android.widget.ImageView>(R.id.chatSend).isEnabled = true
-                adapter.notifyDataSetChanged()
-                if (r?.ok == true) toast("已停止") else toast("没接上，再点一次")
-            }
-        }
     }
 
     private fun toast(text: String) =
@@ -362,7 +438,7 @@ class SessionActivity : Activity() {
         rows.add(Msg(0, "user", text, ""))
         adapter.notifyDataSetChanged()
         emptyBox.visibility = View.GONE
-        scrollBottom()
+        scrollBottom(force = true)
     }
 
     /** dispatch 之后：先等宿主的长轮询，再补拉一次最新一页；45 s 内没有回复就给一行可点的重试。 */
@@ -377,28 +453,40 @@ class SessionActivity : Activity() {
             val more = r.json?.optBoolean("hasMore", false) == true
             val next = r.json?.optLong("nextBefore", 0) ?: 0
             ui.post {
+                if (sid != sessionId) {
+                    // 这一轮属于上一只了：把等待态收掉，别让新会话永远显示「发送中」
+                    sending = false
+                    findViewById<android.widget.ImageView>(R.id.chatSend).isEnabled = true
+                    return@post
+                }
                 var replied = false
+                var added = false
+                // 加行之前先记下用户是不是贴着底：加了之后 lastVisiblePosition 会落后，
+                // 那会儿再问就永远「没贴底」，新回复也就不跟下来了。
+                val stick = nearBottom()
                 for (m in page) {
                     if (m.seq in seen) continue
                     seen.add(m.seq)
                     rows.add(m)
+                    added = true
                     if (m.role == "assistant") replied = true
                 }
                 maxSeq = maxOf(maxSeq, page.maxOfOrNull { it.seq } ?: 0)
                 hasMore = more
                 nextBefore = next
                 applyPeek(r)
-                adapter.notifyDataSetChanged()
+                // 没有新行就不 notify：整表重绑会把每只气泡里的 WebView 再挂一遍，那一下就是闪
+                if (added) adapter.notifyDataSetChanged()
                 refreshMore()
                 if (rows.isNotEmpty()) emptyBox.visibility = View.GONE
                 if (replied) {
                     finishSending("")
-                    scrollBottom()
+                    if (stick) scrollBottom(force = true)
                     return@post
                 }
                 if (System.currentTimeMillis() > deadline) {
                     finishSending("没收到回复，重试")
-                    scrollBottom()
+                    if (stick) scrollBottom(force = true)
                     return@post
                 }
                 ui.postDelayed({ pollUntilReply(deadline) }, 1200)
@@ -420,11 +508,18 @@ class SessionActivity : Activity() {
         }
     }
 
-    /** 贴底：这一帧布局完再滚一次，键盘弹出/收起会改高度，立刻滚会滚到一半。 */
-    private fun scrollBottom() {
+    /** 贴底：只在本来就贴着底时跟一下；用户翻上去看历史就别抢滚动。 */
+    private fun scrollBottom(force: Boolean = false) {
         if (rows.isEmpty()) return
+        if (!force && !nearBottom()) return
         list.post { list.setSelection(list.count - 1) }
-        list.postDelayed({ list.setSelection(list.count - 1) }, 200)
+    }
+
+    /** 离底不到两行就算贴底：键盘弹起/收起会差一两行，别因此判定「用户翻上去了」。 */
+    private fun nearBottom(): Boolean {
+        if (list.count == 0) return true
+        val last = list.lastVisiblePosition
+        return last < 0 || last >= list.count - 2
     }
 
     /** 发出去就把键盘收起来，回复才有地方露脸。 */
@@ -513,15 +608,25 @@ class SessionActivity : Activity() {
                     bubble.background = null
                     bubble.setPadding(0, 0, 0, 0)
                     text.maxWidth = resources.displayMetrics.widthPixels - dp(24)
-                    if (bubble.childCount > 1) bubble.removeViews(1, bubble.childCount - 1)
                     text.text = MdPlain.of(row.text)
                     val box = render ?: return v
-                    if (row.text.isBlank()) return v
+                    if (row.text.isBlank()) {
+                        if (bubble.childCount > 1) bubble.removeViews(1, bubble.childCount - 1)
+                        return v
+                    }
                     val html = box.cached(row.text)
                     if (html != null) {
                         text.visibility = View.GONE
+                        // attach 里已有同文 WebView 会直接返回；以前这里先 removeViews 再挂，
+                        // 等于每条气泡每刷一次都重新载一遍页面，屏上就是白闪一下。
                         box.attach(bubble, row.text, html)
                     } else {
+                        // 只有旧内容确实不是这一条时才摘掉，避免留下上一句的富文本
+                        val old = bubble.getChildAt(1)
+                        if (old != null && (old.tag as? String) != row.text) {
+                            bubble.removeViews(1, bubble.childCount - 1)
+                        }
+                        text.visibility = View.VISIBLE
                         box.request(row.text) {
                             ui.post {
                                 if (!isFinishing && !isDestroyed && indexOf(row.text) >= 0) notifyDataSetChanged()
@@ -560,9 +665,100 @@ class SessionActivity : Activity() {
         }
     }
 
+    /* ---------------- 按住说话 ---------------- */
+
+    /** 按下那一下就抖 24ms：手指有反馈，也知道自己按对了地方。 */
+    private fun buzz() {
+        runCatching {
+            val v = getSystemService(Vibrator::class.java) ?: return
+            v.vibrate(VibrationEffect.createOneShot(24, VibrationEffect.DEFAULT_AMPLITUDE))
+        }
+    }
+
+    private fun startHold() {
+        if (micBusy || sessionId.isBlank()) return
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_MIC)
+            return
+        }
+        micBusy = true
+        micBtn.text = "松开 结束"
+        // 录的时候别让唤醒引擎把这句话吞了
+        wakeAction("com.whale.pet.action.WAKE_PAUSE")
+        val r = recorder ?: VoiceRecorder().also { recorder = it }
+        r.onAutoStop = { ui.post { finishHold() } }
+        startRecorder(r, 0)
+    }
+
+    private fun startRecorder(r: VoiceRecorder, attempt: Int) {
+        if (!micDown) {                          // 手已经松了，别再跟他抢麦
+            if (micBusy) finishHold()
+            return
+        }
+        if (r.start()) return
+        if (attempt < 3) {
+            ui.postDelayed({ if (micBusy) startRecorder(r, attempt + 1) }, 220)
+            return
+        }
+        micBusy = false
+        micBtn.text = "按住 说话"
+        wakeAction("com.whale.pet.action.WAKE_RESUME")
+        toast("麦克风不可用")
+    }
+
+    /** 松手就停：拿 WAV 走现有的识别接口，出来的字直接发出去，不等 VAD 那一秒尾巴。 */
+    private fun finishHold() {
+        if (!micBusy) return
+        micBusy = false
+        micBtn.text = "按住 说话"
+        val r = recorder ?: return
+        val wav = runCatching { r.stop() }.getOrNull()
+        wakeAction("com.whale.pet.action.WAKE_RESUME")
+        if (wav == null || wav.size < 1024) {
+            toast(r.takeFaultText() ?: "没听清，再说一次")
+            return
+        }
+        io.execute {
+            val text = runCatching { client.asr(wav).json?.optString("text").orEmpty().trim() }
+                .getOrDefault("")
+            ui.post {
+                if (isFinishing || isDestroyed) return@post
+                if (text.isBlank()) {
+                    toast("没听清，再说一次")
+                    return@post
+                }
+                input.setText(text)
+                send()
+            }
+        }
+    }
+
+    private fun wakeAction(action: String) {
+        runCatching { startService(Intent(this, FloatingPetService::class.java).setAction(action)) }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_MIC && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED && micDown) {
+            startHold()
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // 离开页面就别再攥着麦克风；按住中被打断也按松手处理
+        micDown = false
+        if (micBusy) finishHold()
+    }
+
     companion object {
         private const val EXTRA_ID = "sessionId"
         private const val EXTRA_TITLE = "sessionTitle"
+        private const val REQ_MIC = 41
 
         fun intent(context: Context, sessionId: String, title: String): Intent =
             Intent(context, SessionActivity::class.java)

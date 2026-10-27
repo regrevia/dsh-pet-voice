@@ -38,20 +38,6 @@
                 android:paddingStart="4dp"
                 android:textColor="@color/pet_text"
                 android:textSize="15sp" />
-
-            <TextView
-                android:id="@+id/chatStop"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:background="?android:attr/selectableItemBackground"
-                android:paddingStart="12dp"
-                android:paddingTop="6dp"
-                android:paddingEnd="12dp"
-                android:paddingBottom="6dp"
-                android:text="停止"
-                android:textColor="@color/pet_accent"
-                android:textSize="13.5sp"
-                android:visibility="gone" />
         </LinearLayout>
 
         <TextView
@@ -96,8 +82,7 @@
                 android:listSelector="@android:color/transparent"
                 android:paddingTop="6dp"
                 android:paddingBottom="12dp"
-                android:scrollbars="none"
-                android:transcriptMode="alwaysScroll" />
+                android:scrollbars="none" />
 
             <TextView
                 android:id="@+id/chatEmpty"
@@ -151,6 +136,19 @@
                 android:textColor="@color/pet_text"
                 android:textColorHint="@color/pet_hint"
                 android:textSize="15sp" />
+
+            <TextView
+                android:id="@+id/chatMic"
+                android:layout_width="76dp"
+                android:layout_height="76dp"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_mic"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:text="按住&#10;说话"
+                android:textColor="@color/pet_bg"
+                android:textSize="12.5sp" />
 
             <ImageView
                 android:id="@+id/chatSend"

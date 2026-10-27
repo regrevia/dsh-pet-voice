@@ -1,0 +1,556 @@
+{
+ "prod_beam5_ladder": {
+  "n": 27,
+  "cold_start_ms": 10686,
+  "median_ms": 2179,
+  "mean_ms": 2677,
+  "p90_ms": 2559,
+  "max_ms": 9497,
+  "short_median_ms": 1951,
+  "mean_cer": 0.082,
+  "zero_cer_pct": 78,
+  "empty": 2,
+  "per_set": {
+   "samples": {
+    "n": 9,
+    "median_ms": 2162,
+    "mean_cer": 0.0,
+    "drop": 0
+   },
+   "snr10": {
+    "n": 9,
+    "median_ms": 2146,
+    "mean_cer": 0.128,
+    "drop": 1
+   },
+   "snr5": {
+    "n": 9,
+    "median_ms": 2222,
+    "mean_cer": 0.118,
+    "drop": 1
+   }
+  },
+  "rows": [
+   {
+    "set": "samples",
+    "file": "s1_short_keai.wav",
+    "audio_s": 0.73,
+    "ms": 2228,
+    "cer": 0.0,
+    "text": "可以啊。",
+    "wav": "samples/s1_short_keai.wav"
+   },
+   {
+    "set": "samples",
+    "file": "s2_short_ganma.wav",
+    "audio_s": 1.27,
+    "ms": 1859,
+    "cer": 0.0,
+    "text": "你在干啥呢?",
+    "wav": "samples/s2_short_ganma.wav"
+   },
+   {
+    "set": "samples",
+    "file": "s3_short_xinlairen.wav",
+    "audio_s": 1.89,
+    "ms": 1997,
+    "cer": 0.0,
+    "text": "新来的人要怎么用呢?",
+    "wav": "samples/s3_short_xinlairen.wav"
+   },
+   {
+    "set": "samples",
+    "file": "s4_mid_xiayibu.wav",
+    "audio_s": 4.03,
+    "ms": 2208,
+    "cer": 0.0,
+    "text": "你感觉我们项目下一步要做点什么比较好?",
+    "wav": "samples/s4_mid_xiayibu.wav"
+   },
+   {
+    "set": "samples",
+    "file": "s5_mid_xiangmu.wav",
+    "audio_s": 4.41,
+    "ms": 2083,
+    "cer": 0.0,
+    "text": "你不要动了,我只是问你了解一下项目的情况。",
+    "wav": "samples/s5_mid_xiangmu.wav"
+   },
+   {
+    "set": "samples",
+    "file": "s6_long_peizhi.wav",
+    "audio_s": 6.17,
+    "ms": 2447,
+    "cer": 0.0,
+    "text": "我们现在的配置方式简单吧,如果是局域网,能够扫码直接用吗?",
+    "wav": "samples/s6_long_peizhi.wav"
+   },
+   {
+    "set": "samples",
+    "file": "s7_mid_chuanwenjian.wav",
+    "audio_s": 4.43,
+    "ms": 2162,
+    "cer": 0.0,
+    "text": "把那个文件传到服务器上,然后告诉我结果。",
+    "wav": "samples/s7_mid_chuanwenjian.wav"
+   },
+   {
+    "set": "samples",
+    "file": "s8_mid_kouyin.wav",
+    "audio_s": 4.17,
+    "ms": 2295,
+    "cer": 0.0,
+    "text": "你感觉我们项目下一步要做点,什么比较好?",
+    "wav": "samples/s8_mid_kouyin.wav"
+   },
+   {
+    "set": "samples",
+    "file": "s9_mid_yuanchang.wav",
+    "audio_s": 4.42,
+    "ms": 2153,
+    "cer": 0.0,
+    "text": "你不要动了,我只是问你了解一下项目的情况。",
+    "wav": "samples/s9_mid_yuanchang.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s1_short_keai.wav",
+    "audio_s": 0.72,
+    "ms": 9497,
+    "cer": 1.0,
+    "text": "",
+    "wav": "snr10/s1_short_keai.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s2_short_ganma.wav",
+    "audio_s": 1.27,
+    "ms": 1849,
+    "cer": 0.0,
+    "text": "你在干啥呢?",
+    "wav": "snr10/s2_short_ganma.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s3_short_xinlairen.wav",
+    "audio_s": 1.88,
+    "ms": 1951,
+    "cer": 0.0,
+    "text": "新来的人要怎么用呢?",
+    "wav": "snr10/s3_short_xinlairen.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s4_mid_xiayibu.wav",
+    "audio_s": 4.02,
+    "ms": 2188,
+    "cer": 0.0,
+    "text": "你感觉我们项目下一步要做点什么比较好?",
+    "wav": "snr10/s4_mid_xiayibu.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s5_mid_xiangmu.wav",
+    "audio_s": 4.41,
+    "ms": 2135,
+    "cer": 0.0,
+    "text": "你不要动了,我只是问你了解一下项目的情况。",
+    "wav": "snr10/s5_mid_xiangmu.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s6_long_peizhi.wav",
+    "audio_s": 6.17,
+    "ms": 2559,
+    "cer": 0.04,
+    "text": "我们现在的配置方式简单吧,如果是局域网,能够小码直接用吗?",
+    "wav": "snr10/s6_long_peizhi.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s7_mid_chuanwenjian.wav",
+    "audio_s": 4.43,
+    "ms": 2146,
+    "cer": 0.0,
+    "text": "把那个文件传到服务器上,然后告诉我结果。",
+    "wav": "snr10/s7_mid_chuanwenjian.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s8_mid_kouyin.wav",
+    "audio_s": 4.17,
+    "ms": 2325,
+    "cer": 0.06,
+    "text": "你感觉我们项目下一步要做点,什么比较好Ｂ。",
+    "wav": "snr10/s8_mid_kouyin.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s9_mid_yuanchang.wav",
+    "audio_s": 4.42,
+    "ms": 1987,
+    "cer": 0.05,
+    "text": "你不要动了,我只是为你了解一下项目的情况。",
+    "wav": "snr10/s9_mid_yuanchang.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s1_short_keai.wav",
+    "audio_s": 0.72,
+    "ms": 8493,
+    "cer": 1.0,
+    "text": "",
+    "wav": "snr5/s1_short_keai.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s2_short_ganma.wav",
+    "audio_s": 1.27,
+    "ms": 1731,
+    "cer": 0.0,
+    "text": "你在干啥呢?",
+    "wav": "snr5/s2_short_ganma.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s3_short_xinlairen.wav",
+    "audio_s": 1.88,
+    "ms": 1945,
+    "cer": 0.0,
+    "text": "新来的人要怎么用呢?",
+    "wav": "snr5/s3_short_xinlairen.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s4_mid_xiayibu.wav",
+    "audio_s": 4.02,
+    "ms": 2820,
+    "cer": 0.0,
+    "text": "你感觉我们项目下一步要做点什么比较好。",
+    "wav": "snr5/s4_mid_xiayibu.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s5_mid_xiangmu.wav",
+    "audio_s": 4.41,
+    "ms": 2139,
+    "cer": 0.0,
+    "text": "你不要动了,我只是问你了解一下项目的情况。",
+    "wav": "snr5/s5_mid_xiangmu.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s6_long_peizhi.wav",
+    "audio_s": 6.17,
+    "ms": 2346,
+    "cer": 0.0,
+    "text": "我们现在的配置方式简单吧,如果是局域网,能够扫码直接用吗?",
+    "wav": "snr5/s6_long_peizhi.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s7_mid_chuanwenjian.wav",
+    "audio_s": 4.43,
+    "ms": 2222,
+    "cer": 0.0,
+    "text": "把那个文件传到服务器上,然后告诉我结果。",
+    "wav": "snr5/s7_mid_chuanwenjian.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s8_mid_kouyin.wav",
+    "audio_s": 4.17,
+    "ms": 2327,
+    "cer": 0.06,
+    "text": "你感觉我们项目下一步要做点,什么比较好Ｂ。",
+    "wav": "snr5/s8_mid_kouyin.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s9_mid_yuanchang.wav",
+    "audio_s": 4.42,
+    "ms": 2179,
+    "cer": 0.0,
+    "text": "你不要动了,我只是问你了解一下项目的情况。",
+    "wav": "snr5/s9_mid_yuanchang.wav"
+   }
+  ]
+ },
+ "new_temp0_beam1": {
+  "n": 27,
+  "cold_start_ms": 8197,
+  "median_ms": 1592,
+  "mean_ms": 1648,
+  "p90_ms": 1865,
+  "max_ms": 2505,
+  "short_median_ms": 1562,
+  "mean_cer": 0.04,
+  "zero_cer_pct": 89,
+  "empty": 1,
+  "per_set": {
+   "samples": {
+    "n": 9,
+    "median_ms": 1562,
+    "mean_cer": 0.0,
+    "drop": 0
+   },
+   "snr10": {
+    "n": 9,
+    "median_ms": 1592,
+    "mean_cer": 0.121,
+    "drop": 1
+   },
+   "snr5": {
+    "n": 9,
+    "median_ms": 1683,
+    "mean_cer": 0.0,
+    "drop": 0
+   }
+  },
+  "rows": [
+   {
+    "set": "samples",
+    "file": "s1_short_keai.wav",
+    "audio_s": 0.73,
+    "ms": 1697,
+    "cer": 0.0,
+    "text": "可以啊。",
+    "wav": "samples/s1_short_keai.wav"
+   },
+   {
+    "set": "samples",
+    "file": "s2_short_ganma.wav",
+    "audio_s": 1.27,
+    "ms": 1562,
+    "cer": 0.0,
+    "text": "你在干啥呢?",
+    "wav": "samples/s2_short_ganma.wav"
+   },
+   {
+    "set": "samples",
+    "file": "s3_short_xinlairen.wav",
+    "audio_s": 1.89,
+    "ms": 1651,
+    "cer": 0.0,
+    "text": "新来的人要怎么用呢?",
+    "wav": "samples/s3_short_xinlairen.wav"
+   },
+   {
+    "set": "samples",
+    "file": "s4_mid_xiayibu.wav",
+    "audio_s": 4.03,
+    "ms": 1593,
+    "cer": 0.0,
+    "text": "你感觉我们项目下一步要做点什么比较好?",
+    "wav": "samples/s4_mid_xiayibu.wav"
+   },
+   {
+    "set": "samples",
+    "file": "s5_mid_xiangmu.wav",
+    "audio_s": 4.41,
+    "ms": 1516,
+    "cer": 0.0,
+    "text": "你不要动了,我只是问你了解一下项目的情况。",
+    "wav": "samples/s5_mid_xiangmu.wav"
+   },
+   {
+    "set": "samples",
+    "file": "s6_long_peizhi.wav",
+    "audio_s": 6.17,
+    "ms": 1515,
+    "cer": 0.0,
+    "text": "我们现在的配置方式简单吧,如果是局域网,能够扫码直接用吗?",
+    "wav": "samples/s6_long_peizhi.wav"
+   },
+   {
+    "set": "samples",
+    "file": "s7_mid_chuanwenjian.wav",
+    "audio_s": 4.43,
+    "ms": 1540,
+    "cer": 0.0,
+    "text": "把那个文件传到服务器上,然后告诉我结果。",
+    "wav": "samples/s7_mid_chuanwenjian.wav"
+   },
+   {
+    "set": "samples",
+    "file": "s8_mid_kouyin.wav",
+    "audio_s": 4.17,
+    "ms": 1582,
+    "cer": 0.0,
+    "text": "你感觉我们项目下一步要做点什么比较好?",
+    "wav": "samples/s8_mid_kouyin.wav"
+   },
+   {
+    "set": "samples",
+    "file": "s9_mid_yuanchang.wav",
+    "audio_s": 4.42,
+    "ms": 1501,
+    "cer": 0.0,
+    "text": "你不要动了,我只是问你了解一下项目的情况。",
+    "wav": "samples/s9_mid_yuanchang.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s1_short_keai.wav",
+    "audio_s": 0.72,
+    "ms": 1347,
+    "cer": 1.0,
+    "text": "",
+    "wav": "snr10/s1_short_keai.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s2_short_ganma.wav",
+    "audio_s": 1.27,
+    "ms": 1575,
+    "cer": 0.0,
+    "text": "你在干啥呢?",
+    "wav": "snr10/s2_short_ganma.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s3_short_xinlairen.wav",
+    "audio_s": 1.88,
+    "ms": 1590,
+    "cer": 0.0,
+    "text": "新来的人要怎么用呢?",
+    "wav": "snr10/s3_short_xinlairen.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s4_mid_xiayibu.wav",
+    "audio_s": 4.02,
+    "ms": 1650,
+    "cer": 0.0,
+    "text": "你感觉我们项目下一步要做点什么比较好?",
+    "wav": "snr10/s4_mid_xiayibu.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s5_mid_xiangmu.wav",
+    "audio_s": 4.41,
+    "ms": 1865,
+    "cer": 0.0,
+    "text": "你不要动了,我只是问你了解一下项目的情况。",
+    "wav": "snr10/s5_mid_xiangmu.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s6_long_peizhi.wav",
+    "audio_s": 6.17,
+    "ms": 1645,
+    "cer": 0.04,
+    "text": "我们现在的配置方式简单吧,如果是局域网,能够小码直接用吗?",
+    "wav": "snr10/s6_long_peizhi.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s7_mid_chuanwenjian.wav",
+    "audio_s": 4.43,
+    "ms": 1493,
+    "cer": 0.0,
+    "text": "把那个文件传到服务器上,然后告诉我结果。",
+    "wav": "snr10/s7_mid_chuanwenjian.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s8_mid_kouyin.wav",
+    "audio_s": 4.17,
+    "ms": 1592,
+    "cer": 0.0,
+    "text": "你感觉我们项目下一步要做点什么比较好?",
+    "wav": "snr10/s8_mid_kouyin.wav"
+   },
+   {
+    "set": "snr10",
+    "file": "s9_mid_yuanchang.wav",
+    "audio_s": 4.42,
+    "ms": 1622,
+    "cer": 0.05,
+    "text": "你不要动了,我只是为你了解一下项目的情况。",
+    "wav": "snr10/s9_mid_yuanchang.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s1_short_keai.wav",
+    "audio_s": 0.72,
+    "ms": 1478,
+    "cer": 0.0,
+    "text": "可以啊。",
+    "wav": "snr5/s1_short_keai.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s2_short_ganma.wav",
+    "audio_s": 1.27,
+    "ms": 1531,
+    "cer": 0.0,
+    "text": "你在干啥呢?",
+    "wav": "snr5/s2_short_ganma.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s3_short_xinlairen.wav",
+    "audio_s": 1.88,
+    "ms": 1500,
+    "cer": 0.0,
+    "text": "新来的人要怎么用呢?",
+    "wav": "snr5/s3_short_xinlairen.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s4_mid_xiayibu.wav",
+    "audio_s": 4.02,
+    "ms": 1683,
+    "cer": 0.0,
+    "text": "你感觉我们项目下一步要做点什么比较好?",
+    "wav": "snr5/s4_mid_xiayibu.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s5_mid_xiangmu.wav",
+    "audio_s": 4.41,
+    "ms": 1639,
+    "cer": 0.0,
+    "text": "你不要动了,我只是问你了解一下项目的情况。",
+    "wav": "snr5/s5_mid_xiangmu.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s6_long_peizhi.wav",
+    "audio_s": 6.17,
+    "ms": 1985,
+    "cer": 0.0,
+    "text": "我们现在的配置方式简单吧,如果是局域网,能够扫码直接用吗?",
+    "wav": "snr5/s6_long_peizhi.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s7_mid_chuanwenjian.wav",
+    "audio_s": 4.43,
+    "ms": 2505,
+    "cer": 0.0,
+    "text": "把那个文件传到服务器上,然后告诉我结果。",
+    "wav": "snr5/s7_mid_chuanwenjian.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s8_mid_kouyin.wav",
+    "audio_s": 4.17,
+    "ms": 1905,
+    "cer": 0.0,
+    "text": "你感觉我们项目下一步要做点什么比较好?",
+    "wav": "snr5/s8_mid_kouyin.wav"
+   },
+   {
+    "set": "snr5",
+    "file": "s9_mid_yuanchang.wav",
+    "audio_s": 4.42,
+    "ms": 1739,
+    "cer": 0.0,
+    "text": "你不要动了,我只是问你了解一下项目的情况。",
+    "wav": "snr5/s9_mid_yuanchang.wav"
+   }
+  ]
+ }
+}
