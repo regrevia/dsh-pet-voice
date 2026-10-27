@@ -1,12 +1,12 @@
 {
-  "versionCode": 140,
-  "versionName": "0.9.70",
-  "size": 30027822,
-  "sha256": "2f006786183dabc3286ed9ff0780effa2779ede8da35aaddab02207166a6d1b4",
+  "versionCode": 143,
+  "versionName": "0.9.73",
+  "size": 30028162,
+  "sha256": "249f65adfbaf0a33e2f93eae6c42cbcabb351702a51077c29dc75aebd04433bc",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.70/app-release.apk",
-  "notes": "连发多句不再丢中间那几句；主机说的话会按顺序一句句落到气泡里。",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.70/app-release.apk",
-  "publishedAt": "2026-10-27T19:38:39.082Z",
-  "promotedAt": "2026-10-27T19:38:41.211Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.73/app-release.apk",
+  "notes": "App 内文字回复也会落到大肥鱼的气泡；App 在前台时先挂起，回桌面立刻补上，不再「问了看不见」。",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.73/app-release.apk",
+  "publishedAt": "2026-10-27T21:25:43.197Z",
+  "promotedAt": "2026-10-27T21:25:45.242Z"
 }
