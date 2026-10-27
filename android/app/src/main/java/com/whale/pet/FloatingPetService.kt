@@ -782,8 +782,10 @@ class FloatingPetService : Service() {
                         say("等等，还在回")
                         return true
                     }
+                    // 记在放行之后、与有没有在回无关：空闲时连点两下同样是「第二下只回执」，
+                    // 以前只在打断分支里记时间，空闲连点永远进不了收口，第二下会再起一轮。
+                    lastPreemptAt = now
                     if (turnActive || speaking || tts.busy) {
-                        lastPreemptAt = now
                         Log.i("PetTap", "连点：打断上一轮 turn=$turnActive speaking=$speaking tts=${tts.busy}")
                         turn?.cancel()
                         turnActive = false
@@ -1044,6 +1046,7 @@ class FloatingPetService : Service() {
             return
         }
         if (heldMs < HOLD_MIN_MS) {
+            Log.i("PetTap", "松手：按太短 ${heldMs}ms < ${HOLD_MIN_MS}ms，丢弃这段当误触")
             cancelPtt()
             hintOnce("按住说话，松手发送")
             return
