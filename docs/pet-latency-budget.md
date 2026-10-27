@@ -53,6 +53,24 @@
    跟连接建立的一次性开销也有关，档位不是固定的 1.2 s。
 6. **App 侧**：`PetLatency` 埋点（`preflight` / `tts 流已连上` / 首句）已经在 132 里，抓够 10 轮就能把 5→6 之间的缝补上。
 
+## 待机 CPU：亮屏 ~0.9 个核，灭屏 ~5%（2026-10-28，0.9.68 真机）
+
+`/proc/<pid>/stat` 的 `utime+stime` 在 5 秒窗口里前后差（USER_HZ=100）：
+
+| 场景 | `com.whale.pet` | WebView sandbox | 合计 |
+| --- | --- | --- | --- |
+| 亮屏、桌宠待机在桌面 | 245 拍 ≈ 49% 单核 | 224 拍 ≈ 45% 单核 | ≈ 0.94 核 |
+| 灭屏（`input keyevent 26`） | 19 拍 ≈ 3.8% | 8 拍 ≈ 1.6% | ≈ 5% |
+
+线程归因：renderer 侧 CrRendererMain 11% / Media 7.4% / Chrome_ChildIOT 7.4% / CodecWorker 3.7% /
+Compositor 3.7%；app 进程 main 18.5% / VizWebView 7.4% / Chrome_IOThread 7.4% / RenderThread 7.4%。
+待机素材只有 `idle.webm 420x465 @10fps`，成本是**解码 + 每帧画布重绘 + 合成**。
+
+已试并回滚：画布背衬 `dpr` 上限 2.5 → 1.5（每帧清像素 1.7M → 0.6M），实测 47.4% / 45.6%，
+与改前无差别 ⇒ 像素填充不是瓶颈，别在这条路上再花时间；要降待机成本只能动解码或帧率。
+
+灭屏自动停帧，没有息屏偷跑电的问题。量法与完整日志见 `local/evidence/round-summary.md` 第 7 轮。
+
 ## 量法
 
 ```bash

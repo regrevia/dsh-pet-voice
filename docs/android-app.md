@@ -603,6 +603,9 @@ adb shell am broadcast -a com.whale.pet.action.DEBUG_TURN -p com.whale.pet --es 
   静态检查改到联网机器上 `gradle :app:lintDebug` 另跑。
 - 产物：`dist/jingling-0.2.0.apk`（= `android/app/build/outputs/apk/release/app-release.apk`，3,388,437 B，SHA-256 `6fff49d7…c946e`）。
 - 真机安装/权限/接线步骤见 [`docs/real-device-install.md`](real-device-install.md)。
+- **已发布版本都能用当前仓库重建**（2026-10-28 验证 0.9.68）：`cd android && JAVA_HOME=/Users/apple/jdk17/Contents/Home ./gradlew :app:assembleRelease -q`
+  重建出 30,027,270 B、SHA-256 `276e280b…573c`，与线上 `latest.json` 逐字节一致；生成物 `assets/pet/index.html` 也由 `genPetAsset` 还原（`git diff` 干净）。
+  所以不要用「环境里没有 JDK / 构建不了」当理由，先按上面这条命令试。
 
 ### 16.2 链路安全（做了什么）
 
