@@ -107,10 +107,14 @@ function readDeviceStore() {
   const devices = []
   for (const item of Array.isArray(raw?.devices) ? raw.devices : []) {
     if (typeof item?.id !== 'string' || !item.id) continue
+    const platform = PLATFORMS.includes(item.platform) ? item.platform : 'unknown'
     devices.push({
       id: item.id,
       label: String(item.label ?? ''),
-      platform: PLATFORMS.includes(item.platform) ? item.platform : 'unknown',
+      platform,
+      // claimed 必须原样保留：读的时候丢掉，写回去就没了，额度判断下一轮又退回按 platform 猜，
+      // 结果「移除一台」的语义和「上限还剩几台」全都对不上。
+      claimed: item.claimed === true || (item.claimed === undefined && platform === 'android'),
       ip: String(item.ip ?? ''),
       firstSeen: Number(item.firstSeen) || 0,
       lastSeen: Number(item.lastSeen) || 0,
@@ -167,6 +171,16 @@ function devicePlatform(ua) {
  * 每个请求都会调一次，所以整段包在 try/catch 里：
  * 磁盘满了、文件被别人改成乱码，都不能把宠物页本身搞挂。
  */
+/**
+ * 算「配过对的手机」台数：只数请求自报过设备 id 的行。
+ * 老数据没有 claimed 字段，按 platform 兜底（本机探测留下的行一定是 unknown/非 android）。
+ */
+function claimedCount(store) {
+  return (store.devices ?? []).filter(
+    (item) => item && (item.claimed === true || (item.claimed === undefined && item.platform === 'android')),
+  ).length
+}
+
 export function touchDevice(req) {
   try {
     const ua = String(req?.headers?.['user-agent'] ?? '')
@@ -175,14 +189,21 @@ export function touchDevice(req) {
     const explicit = explicitLabel(req)
     // App 会给稳定设备 id：同一台手机换 UA、换网络、重装都还是同一行。
     const claimed = String(req?.headers?.['x-pet-device-id'] ?? '').toLowerCase()
-    const id = /^[a-f0-9]{8,32}$/.test(claimed)
+    const claimedMatch = /^[a-f0-9]{8,32}$/.test(claimed)
+    const id = claimedMatch
       ? claimed
       : createHash('sha1').update(`${ua}${ip}`).digest('hex').slice(0, 12)
     const store = readDeviceStore()
     const existing = store.devices.find((item) => item.id === id)
     // 绑定上限以前只是面板上的一个数字：不执行就等于没设。新设备超限不再记录，
     // 由调用方回 429（旧设备继续用不受影响，否则自己把自己锁在门外）。
-    if (!existing && store.devices.length >= store.maxDevices) {
+    //
+    // 上限只管「自报设备 id」的手机：面板里那个数字说的是配过对几台，
+    // 不是本机 curl / 基准脚本 / 浏览器算几台。
+    // 以前一律执行，于是没有 x-pet-device-id 的本机探测各占一行额度，新手机被 429 挡在门外，
+    // 连 /api/update 都拿不到——外部脚本靠它找端口，断了就退回写死的旧端口，静默测错。
+    // 计数也只看 claimed 行：老版本留下的 unclaimed 行（面板里显示「未知设备」）不该占额度。
+    if (!existing && claimedMatch && claimedCount(store) >= store.maxDevices) {
       return { ok: false, reason: 'limit', maxDevices: store.maxDevices }
     }
     if (existing) {
@@ -196,7 +217,11 @@ export function touchDevice(req) {
       store.devices.push({
         id,
         label: deviceLabel(ua, explicit),
-        platform: explicit ? 'android' : devicePlatform(ua),
+        // 自报了设备 id 就是 App 在跑（Android）；别再用 explicit 标签头去推平台。
+        platform: claimedMatch ? 'android' : devicePlatform(ua),
+        // claimed = 请求自己报了设备 id（真手机）。只有这些行算绑定额度，
+        // 也只有这些行是「用户配过对的设备」；其余是本机探测留下的行。
+        claimed: claimedMatch,
         ip,
         firstSeen: now,
         lastSeen: now,

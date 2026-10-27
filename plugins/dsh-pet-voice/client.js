@@ -150,6 +150,7 @@ window.__ModuleLoader__.load({
       }),
       pair: { display: 'flex', gap: 20, alignItems: 'flex-start', flexWrap: 'wrap' },
       pairSide: { display: 'flex', flexDirection: 'column', gap: 10, flex: '1 1 240px', minWidth: 0 },
+      pairUrl: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12, lineHeight: 1.6, padding: '8px 10px', borderRadius: 8, border: `1px solid ${C.border}`, color: C.dim, wordBreak: 'break-all', userSelect: 'all' },
       error: { fontSize: 12, color: C.error, padding: '8px 12px', border: `1px solid ${C.errorBg}`, borderRadius: 8 },
     }
 
@@ -395,6 +396,21 @@ window.__ModuleLoader__.load({
         return h('div', { style: S.view }, error ? h('div', { style: S.error }, error) : null)
       }
 
+      // 显示用：只露令牌首尾，完整链接仍走复制/二维码。
+      const maskPairing = (url) => {
+        if (!url) return ''
+        try {
+          const u = new URL(url)
+          const k = u.searchParams.get('k')
+          if (!k) return url
+          // 不用 URL.toString()：它会把省略号编码成 %E2%80%A6，上屏全是转义。
+          const shown = k.length > 10 ? `${k.slice(0, 4)}…${k.slice(-4)}` : '…'
+          return `${u.origin}${u.pathname}?k=${shown}`
+        } catch {
+          return url.replace(/([?&]k=)([^&]{10,})/, (_, head, k) => `${head}${k.slice(0, 4)}…${k.slice(-4)}`)
+        }
+      }
+
       const copyLink = async () => {
         if (!pairingUrl) return
         try {
@@ -600,12 +616,7 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { style: S.pairSide },
-                h('input', {
-                  value: pairingUrl,
-                  readOnly: true,
-                  onFocus: (e) => e.target.select(),
-                  style: { ...S.input, width: '100%', color: C.dim },
-                }),
+                h('div', { style: S.pairUrl }, maskPairing(pairingUrl)),
                 h(
                   'div',
                   { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },

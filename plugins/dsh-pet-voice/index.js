@@ -40,6 +40,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { request as httpsRequest } from 'node:https'
+import { createConnection } from 'node:net'
 import { homedir, networkInterfaces } from 'node:os'
 import { dirname, extname, isAbsolute, join, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -56,10 +57,10 @@ try {
 } catch {
   zstdDecompressSync = null
 }
-import { getPanelConfig, normalizeTransport, panelState, qrSvg, setPanelConfig, removeDevice, clearDevices, touchDevice } from './panel.mjs?v=20261026a'
-import { listLocalVoices, localTtsReady, normalizeTtsProvider, pickDefaultLocalVoice, synthesizeHttp, synthesizeLocal } from './tts/providers.mjs?v=20261026a'
-import { connectPublic, disconnectPublic, publicState, setPublicConfig, stopPublic } from './public.mjs?v=20261026a'
-import { startLan, lanState, stopLan } from './lan.mjs?v=20261026a'
+import { getPanelConfig, normalizeTransport, panelState, qrSvg, setPanelConfig, removeDevice, clearDevices, touchDevice } from './panel.mjs?v=20261027a'
+import { listLocalVoices, localTtsReady, normalizeTtsProvider, pickDefaultLocalVoice, synthesizeHttp, synthesizeLocal } from './tts/providers.mjs?v=20261027a'
+import { connectPublic, disconnectPublic, publicState, setPublicConfig, stopPublic } from './public.mjs?v=20261027a'
+import { startLan, lanState, stopLan } from './lan.mjs?v=20261027a'
 
 /** 插件名，必须等于 bundle patch 里的插入 id。 */
 export const name = 'dsh-pet-voice'
@@ -116,6 +117,13 @@ const TRANSCRIPT_READ_LIMIT = 32 * 1024 * 1024
 const BASE = '/pet-voice'
 const API = `${BASE}/api`
 const ASSET = `${BASE}/assets`
+
+/**
+ * 宿主端口每次启动都可能变（54013 → 59534 → …），外部脚本没法写死。
+ * 挂载路由时把这次的 origin 落成一个固定文件，脚本（bench / stress / tts-bench /
+ * pv-base.sh）先读它、读不到再挨个端口探。只写端口与 origin，不含 token。
+ */
+const PORT_FILE = process.env.DSH_PET_PORT_FILE || join(HOME_DIR, 'host-port.json')
 
 const TTS_DIR = join(HERE, 'tts')
 const TTS_SCRIPT = join(TTS_DIR, 'stream.py')
@@ -1255,6 +1263,53 @@ function warmAsrInBackground() {
     .then(() => asrEnsure(ASR_COLD_START_MS))
     .then((r) => { if (!r?.ok) LOG('ASR 预热没起来：', r?.error ?? '') })
     .catch((e) => LOG('ASR 预热失败：', e?.message ?? e))
+}
+
+/**
+ * 后台预热语音：edge 走的是常驻 WS 守护进程，第一个请求要先把守护进程 spawn 起来
+ * （冷启动实测 ~1.2 s），之后每个请求只要 ~210 ms。页面一打开就先烫一遍，
+ * 用户听到的第一句不用吃这段冷启动。
+ *
+ * 故意不写缓存、不进回声过滤（rememberTtsText）：它只是一次「把 daemon 叫醒」的合成，
+ * 顺手产出的音频直接丢掉。
+ */
+let ttsWarmAt = 0
+/**
+ * 预热 edge-tts 守护进程。
+ *
+ * 只起守护进程（--serve），不合成任何一句话：冷启动的大头是建池 700 ms，
+ * 合成「嗯」既白烧 CPU 又进不了真请求的缓存。守护进程自己有独占锁，这里
+ * 再先探一次 socket，已经活着就什么都不做。
+ */
+function warmTtsInBackground() {
+  const cfg = getPanelConfig()
+  if (normalizeTtsProvider(cfg.ttsProvider) !== 'edge') return
+  if (!ttsReady('edge')) return
+  const now = Date.now()
+  if (ttsWarmAt && now - ttsWarmAt < 20_000) return
+  ttsWarmAt = now
+  const home = process.env.PET_TTS_HOME || join(homedir(), '.dsh', 'pet-voice', 'tts')
+  const sock = join(home, process.env.PET_TTS_SOCK || 'daemon.sock')
+  const startDaemon = () => {
+    let child
+    try {
+      child = spawn(TTS_PYTHON, [join(TTS_DIR, 'tts-daemon.py'), '--serve'], {
+        detached: true,
+        stdio: ['ignore', 'ignore', 'ignore'],
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+      })
+    } catch (error) {
+      LOG('语音预热失败：', error?.message ?? error)
+      return
+    }
+    child.on('error', () => { /* 预热失败不影响真的请求 */ })
+    child.unref()
+  }
+  const probe = createConnection({ path: sock })
+  probe.setTimeout(400)
+  probe.on('connect', () => probe.destroy())
+  probe.on('error', () => { probe.destroy(); startDaemon() })
+  probe.on('timeout', () => { probe.destroy(); startDaemon() })
 }
 
 /**
@@ -4603,7 +4658,8 @@ export function apply(ctx, config) {
       return
     }
     if (!authed(req)) {
-      sendHtml(res, 401, gatePage())
+      // 带了 k 却不匹配：多半是链接被截断/手打少了字符，或者电脑上换过新链接。
+      sendHtml(res, 401, gatePage({ stale: Boolean(queryToken) }))
       return
     }
     sendFile(res, 'index.html', { 'cache-control': 'no-store' })
@@ -5275,11 +5331,51 @@ export function apply(ctx, config) {
   }
 
   const PANEL = `${BASE}/panel`
+  // 把这次宿主的真实 origin 落盘：端口每次启动都可能变，外部脚本靠它找，
+  // 以前全靠写死一个端口，宿主一换端口所有基准数字就静默指向死端口。
+  // getOrigin() 在部分宿主版本上不存在，所以再用真实请求的 Host 头兜底——
+  // 有请求进来就说明这个端口一定是通的，比任何推断都硬。
+  let portRecorded = false
+  const recordPort = (req) => {
+    if (portRecorded) return
+    let port = ''
+    let origin = ''
+    try {
+      const u = new URL(ctx.webServer.getOrigin?.() ?? '')
+      if (u.port) {
+        port = u.port
+        origin = u.origin
+      }
+    } catch {
+      /* 没有 getOrigin：走 Host 头 */
+    }
+    if (!port) {
+      const host = String(req?.headers?.host ?? '')
+      const m = /^(.*):([0-9]{2,5})$/.exec(host)
+      if (m) {
+        port = m[2]
+        origin = `http://${host}`
+      }
+    }
+    if (!port) return
+    try {
+      writeFileSync(
+        PORT_FILE,
+        `${JSON.stringify({ port, origin, at: new Date().toISOString() }, null, 2)}\n`,
+        { mode: 0o600 },
+      )
+      portRecorded = true
+    } catch {
+      /* 写不了就每轮再试一次：脚本那边有挨个端口探的兜底 */
+    }
+  }
+
   const apiHandler = async (req, res) => {
     // url/route/method 必须先算：小爱那条路由要跳过 cookie 鉴权
     const url = new URL(req.url ?? '/', 'http://localhost')
     const route = url.pathname.slice(API.length + 1).replace(/\/+$/, '')
     const method = String(req.method ?? 'GET').toUpperCase()
+    recordPort(req)
 
     // 小爱同学：请求方是小米的服务器，既没有我们的 cookie，也不会带自定义 header。
     // 它的门禁在 xiaoai.mjs 里（?k= + MIAI-HmacSHA256-V1 签名），所以这里放行。
@@ -5308,7 +5404,9 @@ export function apply(ctx, config) {
 
     // 任何一次带令牌的请求（App 打开页面就会拉 state）都顺手把识别 worker 叫醒，
     // 这样用户第一句不用吃冷启动。内部有 60 s 节流，不额外增加负担。
+    // 语音守护进程同样烫一下：第一句不用等 daemon spawn（~1.2 s）。
     warmAsrInBackground()
+    warmTtsInBackground()
 
     try {
       // 手机端回传诊断（安装失败原因、启动自检）。这条也要 cookie，公网上不留匿名写入口。
@@ -6022,6 +6120,7 @@ export function apply(ctx, config) {
       ctx.webServer.register({ kind: 'prefix', path: API, handler: safeHandler(apiHandler) }),
       ctx.webServer.register({ kind: 'prefix', path: `${API}/`, handler: safeHandler(apiHandler) }),
     ]
+    // 宿主端口由 apiHandler 的 recordPort() 在第一个真实请求时落盘（getOrigin 不一定有）。
     // 配过就自己接上，省得每次重开都要点一次。
     try {
       const cfg = publicState()
@@ -6216,7 +6315,10 @@ async function selfcheck(ctx, url, state) {
 /* 兜底页：手机第一次打开但没有 token 时用                              */
 /* ------------------------------------------------------------------ */
 
-function gatePage() {
+function gatePage({ stale = false } = {}) {
+  const hint = stale
+    ? '<p>链接不完整，或者电脑上换过新链接：回面板重新「复制链接」，或直接扫码。</p>'
+    : '<p>把电脑上 <code>~/.dsh/pet-voice/token</code> 里的那一串贴进来；或者在电脑上门打开带 <code>?k=</code> 的链接。</p>'
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
@@ -6237,7 +6339,7 @@ function gatePage() {
 </style></head>
 <body><main>
   <h1>鲸灵需要配对</h1>
-  <p>把电脑上 <code>~/.dsh/pet-voice/token</code> 里的那一串贴进来；或者在电脑上门打开带 <code>?k=</code> 的链接。</p>
+  ${hint}
   <form method="get" action="${BASE}/">
     <input name="k" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="粘贴访问 token" />
     <button type="submit">进入</button>

@@ -21,9 +21,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import subprocess
 import os
+import socket
+import struct
 import tempfile
 import sys
 import time
@@ -34,7 +37,7 @@ def _fail(code: int, message: str) -> int:
     return code
 
 
-async def _run(voice: str, text: str, rate: str, pitch: str) -> int:
+async def _run_direct(voice: str, text: str, rate: str, pitch: str) -> int:
     try:
         import edge_tts
     except ImportError:
@@ -45,6 +48,8 @@ async def _run(voice: str, text: str, rate: str, pitch: str) -> int:
     chunks = 0
     total = 0
     parts: list[bytes] = []
+    # 边收边写：调用方支持「边下边播」时才开（宿主用 PET_TTS_RAW=1 传进来）。
+    raw_mode = os.environ.get("PET_TTS_RAW") == "1"
     try:
         communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
         async for chunk in communicate.stream():
@@ -57,24 +62,166 @@ async def _run(voice: str, text: str, rate: str, pitch: str) -> int:
                 first_at = time.monotonic() - started
             chunks += 1
             total += len(data)
-            parts.append(data)
+            if raw_mode:
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+            else:
+                parts.append(data)
     except Exception as error:  # noqa: BLE001 - 子进程边界，任何异常都要翻译成中文
         return _fail(4, f"合成失败：{type(error).__name__}: {error}")
 
     if not total:
         return _fail(5, "合成失败：没有拿到音频数据（音色 id 或网络可能不对）")
 
-    raw = b"".join(parts)
-    # 掐头去尾：edge-tts 每句结尾固定挂着 0.5s 左右静音（实测 3.26s 的句子尾部 0.56s），
-    # App 是一句一句排队播的，这段静音就是听感上的「大喘气」。这里统一裁到 40ms。
-    trimmed = _trim_silence(raw)
-    sys.stdout.buffer.write(trimmed)
-    sys.stdout.buffer.flush()
+    if raw_mode:
+        written = total  # 循环里已经逐块写出去了
+    else:
+        raw = b"".join(parts)
+        # 掐头去尾：edge-tts 每句结尾固定挂着 0.5s 左右静音（实测 3.26s 的句子尾部 0.56s），
+        # App 是一句一句排队播的，这段静音就是听感上的「大喘气」。这里统一裁到 40ms。
+        trimmed = _trim_silence(raw)
+        written = len(trimmed)
+        sys.stdout.buffer.write(trimmed)
+        sys.stdout.buffer.flush()
 
     elapsed = time.monotonic() - started
     print(
-        f"[tts] voice={voice} rate={rate} pitch={pitch} chunks={chunks} bytes={len(trimmed)} "
-        f"raw={total} vendor_first_chunk_ms={int((first_at or 0) * 1000)} total_ms={int(elapsed * 1000)}",
+        f"[tts] voice={voice} rate={rate} pitch={pitch} chunks={chunks} bytes={written} "
+        f"raw={total} mode={'raw' if raw_mode else 'sentence'} "
+        f"vendor_first_chunk_ms={int((first_at or 0) * 1000)} total_ms={int(elapsed * 1000)}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return 0
+
+
+def _daemon_file() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "tts-daemon.py")
+
+
+def _daemon_home() -> str:
+    return os.path.expanduser(os.environ.get("PET_TTS_HOME", "~/.dsh/pet-voice/tts"))
+
+
+def _sock_path() -> str:
+    return os.path.join(_daemon_home(), os.environ.get("PET_TTS_SOCK", "daemon.sock"))
+
+
+def _frame(kind: bytes, payload: bytes = b"") -> bytes:
+    return kind + struct.pack(">I", len(payload)) + payload
+
+
+def _recv_exact(sock: socket.socket, size: int) -> bytes:
+    buf = b""
+    while len(buf) < size:
+        part = sock.recv(size - len(buf))
+        if not part:
+            raise ConnectionError("守护进程关闭了连接")
+        buf += part
+    return buf
+
+
+def _read_frame(sock: socket.socket) -> tuple[bytes, bytes]:
+    head = _recv_exact(sock, 5)
+    return head[:1], _recv_exact(sock, struct.unpack(">I", head[1:])[0])
+
+
+def _connect_daemon(timeout: float) -> socket.socket | None:
+    path = _sock_path()
+    deadline = time.monotonic() + timeout
+    spawned = False
+    while True:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(25)
+        try:
+            sock.connect(path)
+            return sock
+        except OSError:
+            sock.close()
+        if not spawned:
+            spawned = True
+            home = _daemon_home()
+            try:
+                os.makedirs(home, exist_ok=True)
+                log = open(os.path.join(home, "daemon.log"), "ab")
+            except OSError:
+                log = subprocess.DEVNULL
+            try:
+                subprocess.Popen(
+                    [sys.executable, _daemon_file(), "--serve"],
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                    start_new_session=True, close_fds=True,
+                )
+            except Exception:  # noqa: BLE001 - 拉不起守护进程就走直连
+                return None
+        if time.monotonic() > deadline:
+            return None
+        time.sleep(0.05)
+
+
+def _run_daemon(voice: str, text: str, rate: str, pitch: str) -> int | None:
+    """走常驻连接；拿不到连接返回 None，由调用方退回直连。"""
+    raw_mode = os.environ.get("PET_TTS_RAW") == "1"
+    sock = _connect_daemon(3.0)
+    if sock is None:
+        return None
+    started = time.monotonic()
+    stats: dict = {}
+    parts: list[bytes] = []
+    total = 0
+    first_at = None
+    try:
+        body = json.dumps({"voice": voice, "text": text, "rate": rate, "pitch": pitch}).encode()
+        sock.sendall(_frame(b"J", body))
+        while True:
+            kind, payload = _read_frame(sock)
+            if kind == b"A":
+                if first_at is None:
+                    first_at = time.monotonic() - started
+                total += len(payload)
+                if raw_mode:
+                    sys.stdout.buffer.write(payload)
+                    sys.stdout.buffer.flush()
+                else:
+                    parts.append(payload)
+            elif kind == b"J":
+                try:
+                    stats = json.loads(payload)
+                except ValueError:
+                    stats = {}
+                if not stats.get("ok", True):
+                    return _fail(4, str(stats.get("error") or "合成失败"))
+            else:
+                break
+    except Exception as error:  # noqa: BLE001 - 已经出声才算成功，不然交给直连重试
+        if total:
+            return _fail(4, f"合成中断：{type(error).__name__}: {error}")
+        return None
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    if not total:
+        # 守护进程一个音频包都没给（连接被对端悄悄收了之类）：交给直连再试一次，
+        # 别让用户这里直接没声音。
+        return None
+
+    if raw_mode:
+        written = total
+    else:
+        trimmed = _trim_silence(b"".join(parts))
+        written = len(trimmed)
+        sys.stdout.buffer.write(trimmed)
+        sys.stdout.buffer.flush()
+
+    elapsed = time.monotonic() - started
+    print(
+        f"[tts] path=daemon voice={voice} rate={rate} pitch={pitch} bytes={written} raw={total} "
+        f"mode={'raw' if raw_mode else 'sentence'} "
+        f"conn_ms={int(stats.get('conn_ms', 0))} vendor_first_ms={int(stats.get('first_ms', 0))} "
+        f"stdout_first_ms={int((first_at or 0) * 1000)} total_ms={int(elapsed * 1000)}",
         file=sys.stderr,
         flush=True,
     )
@@ -211,7 +358,13 @@ def main() -> int:
         return _fail(2, "缺少 text")
     rate = sys.argv[3].strip() if len(sys.argv) > 3 else ""
     pitch = sys.argv[4].strip() if len(sys.argv) > 4 else ""
-    return asyncio.run(_run(voice, text, rate or "+0%", pitch or "+0Hz"))
+    rate = rate or "+0%"
+    pitch = pitch or "+0Hz"
+    if os.environ.get("PET_TTS_NO_DAEMON") != "1":
+        code = _run_daemon(voice, text, rate, pitch)
+        if code is not None:
+            return code
+    return asyncio.run(_run_direct(voice, text, rate, pitch))
 
 
 if __name__ == "__main__":
