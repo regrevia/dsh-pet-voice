@@ -40,9 +40,24 @@ else
 fi
 
 fail=0
+# 卡片高度只有一个真相：template.html 里 #bubble 的 height。boot.js 的 bubH 必须跟它相等，
+# 否则 --shift/--shrink 会按两个不同的数算，舞台缩放跟着字数抖。这里现读现值，不再写死数字。
+EXPECT_H=$(sed -n '/#bubble[ {]/,/}/p' "$ROOT/android/app/src/main/assets/pet/template.html" \
+  | sed -n 's/.*height: *\([0-9]\{1,3\}\)px.*/\1/p' | head -1)
+BOOT_H=$(sed -n 's/.*const bubH *= *\([0-9]\{1,3\}\).*/\1/p' "$ROOT/android/app/src/main/assets/pet/boot.js" | head -1)
+if [ -z "$EXPECT_H" ] || [ -z "$BOOT_H" ]; then
+  echo "✗ 读不到卡片高度（template.html height / boot.js bubH）" >&2
+  fail=1
+elif [ "$EXPECT_H" != "$BOOT_H" ]; then
+  echo "✗ 两处高度不一致：template.html ${EXPECT_H}px vs boot.js bubH=${BOOT_H}" >&2
+  fail=1
+else
+  echo "· 源码两处高度一致：${EXPECT_H}px"
+fi
+
 if [ -f "$APK" ]; then
   asset=$(unzip -p "$APK" assets/pet/index.html 2>/dev/null)
-  for pat in 'const bubH = 62' 'line-clamp: 3'; do
+  for pat in "const bubH = ${EXPECT_H:-0}" "height: ${EXPECT_H:-0}px" 'line-clamp: 3'; do
     if printf '%s' "$asset" | grep -qF "$pat"; then
       echo "· APK asset 含固定尺寸约束：$pat"
     else
