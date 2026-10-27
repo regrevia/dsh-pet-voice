@@ -1,12 +1,11 @@
 {
-  "versionCode": 134,
-  "versionName": "0.9.64",
-  "size": 30025914,
-  "sha256": "1e9e81facd140b6a5e91376ac2a4d6d35b2c1e9c2612e5e8fe727a35db98b486",
+  "versionCode": 135,
+  "versionName": "0.9.65",
+  "size": 30026826,
+  "sha256": "4a12252b166a96881be9acb73d69578113d547c72f3339cc3380f4472b6a571b",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.64/app-release.apk",
-  "notes": "连点只弹一次提示；按住说话不再被连点打断文案刷屏",
-  "publishedAt": "2026-10-27T12:46:42.349Z",
-  "promotedAt": "2026-10-27T12:46:44.201Z",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.64/app-release.apk"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.65/app-release.apk",
+  "notes": "面板里的下载链接改指 CNB 公开 release（国内直连快），下不动时自动换 GitHub 备份源；配对令牌失效时不再没反应，会提示重新扫码",
+  "publishedAt": "2026-10-27T13:24:21.806Z",
+  "promotedAt": "2026-10-27T13:24:23.443Z"
 }
