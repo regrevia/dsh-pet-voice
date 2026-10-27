@@ -42,3 +42,9 @@
 - `logcat --pid=<pid>` 里连点 3 下只有一句 `提示收口：… 只回执`（不走新的一轮）；
 - 气泡出现期间悬浮窗顶部有一段约 70px 的暗色横带，气泡隐藏后同一批行回到壁纸色；
 - `/pet-voice/api/update` 的 `versionCode` / `versionName` / `sha256` 跟刚装的包一致。
+
+## 实测记录（0.9.68 / versionCode 138）
+
+- `font_scale` 1.0 与 1.15 下，气泡区域 `(2700,1310)-(3190,1500)` 两张真机截图逐像素相同（diff 0），`textZoom=100` 生效。
+- 气泡出现时悬浮窗顶部暗色横带高约 70px（68 卡片 + 2 边框），隐藏后该区域回到壁纸色，卡片不随字数变高。
+- 0.9.68 已推广：`/pet-voice/api/update`、`/pet-voice/panel/state` 都指向 CNB `v0.9.68`。
