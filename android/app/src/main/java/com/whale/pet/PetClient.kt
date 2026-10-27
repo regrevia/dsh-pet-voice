@@ -364,6 +364,7 @@ class PetClient(private val config: () -> PetConfig) {
                 TurnLatency.TAG,
                 "asr ${(System.nanoTime() - t0) / 1_000_000}ms wav=${wav.size}B http=$code",
             )
+            noteAuth(code)
             return Result(code, text, text.toJsonOrNull())
         } finally {
             conn.disconnect()
@@ -387,6 +388,7 @@ class PetClient(private val config: () -> PetConfig) {
             val text = stream?.use { it.readBytes().toString(Charsets.UTF_8) }.orEmpty()
             val ms = (System.nanoTime() - t0) / 1_000_000
             NetLog.record("POST /api/upload", code, ms, "${bytes.size / 1024}KB $mime")
+            noteAuth(code)
             return Result(code, text, text.toJsonOrNull())
         } finally {
             conn.disconnect()
@@ -429,6 +431,7 @@ class PetClient(private val config: () -> PetConfig) {
             val text = stream?.use { it.readBytes().toString(Charsets.UTF_8) }.orEmpty()
             val ms = (System.nanoTime() - t0) / 1_000_000
             NetLog.record("POST /api/upload", code, ms, "${total / 1024}KB $mime")
+            noteAuth(code)
             return Result(code, text, text.toJsonOrNull())
         } finally {
             conn.disconnect()
@@ -483,6 +486,11 @@ class PetClient(private val config: () -> PetConfig) {
         }
     }
 
+    /** 401 只有一个含义：令牌对不上。统一在这里冒泡，别每条路径各写一遍。 */
+    private fun noteAuth(code: Int) {
+        if (code == 401) AuthWatch.fire()
+    }
+
     private fun request(
         path: String,
         query: Map<String, String>,
@@ -515,7 +523,7 @@ class PetClient(private val config: () -> PetConfig) {
                     )
                     // 401 = 这台手机的令牌和宿主对不上了（宿主那边换过 token / 重装过）。
                     // 以前只打一行日志，用户看到的是「点一下没反应」，必须说出来。
-                    if (code == 401) AuthWatch.fire()
+                    noteAuth(code)
                     return Result(code, text, text.toJsonOrNull())
                 } finally {
                     conn.disconnect()
