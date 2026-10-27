@@ -661,6 +661,8 @@ class FloatingPetService : Service() {
         w.settings.javaScriptEnabled = true
         w.settings.domStorageEnabled = false
         w.settings.mediaPlaybackRequiresUserGesture = false
+        // 系统字号调大不该把气泡撑出卡片：布局像素固定成 100%，跟随系统会让三行变四行再被裁。
+        w.settings.textZoom = 100
         w.settings.cacheMode = android.webkit.WebSettings.LOAD_NO_CACHE
         w.settings.setSupportZoom(false)
         w.settings.builtInZoomControls = false

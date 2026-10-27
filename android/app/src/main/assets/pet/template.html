@@ -44,8 +44,10 @@
     /* 说话气泡：固定贴在窗口顶部，高度上限只做兜底（实际高度由 JS 量） */
     #bubble {
       position: fixed; left: 6px; right: 6px; top: 2px;
-      /* 固定卡片：任何长度的回复都占同一块 62px，窗口与舞台缩放都不跟着文字变 */
-      height: 62px;
+      /* 固定卡片：任何长度的回复都占同一块 68px，窗口与舞台缩放都不跟着文字变。
+         68 = 3 行 × 17.4 + 上下 padding 12 + 边框 2，再多 1.8 余量：89 字截断后的三行放得下，
+         之前 62 只有 48 可用，第三行底部被 overflow:hidden 切掉 4px。 */
+      height: 68px;
       max-height: none;
       box-sizing: border-box;
       padding: 6px 9px;

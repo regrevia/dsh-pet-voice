@@ -242,10 +242,11 @@ window.PetBridge = {
     // 视觉缝隙 = 让位量 + 视频帧顶部自带的透明留白（角色内容只占帧高的 40/465 ≈ 8.6%），
     // 所以固定写 18dp 会得到「18 + 0.086×舞台高」的缝：168dp 档 31dp、200dp 档 34dp，太松。
     // 这里按目标 16dp 反解让位量，三档实测 16.0 / 17.1 / 20.0dp。
-    // 卡片高度固定 62px（与 #bubble 的 height 一致）：量出来的高度不再随字数变，
+    // 卡片高度固定 68px（与 #bubble 的 height 一致）：量出来的高度不再随字数变，
     // --shift / --shrink 只跟窗口大小有关，连点不会让小人忽大忽小。
+    // 68 是 3 行文字 + padding + 边框的下限，改成别的值时两处必须一起改。
     const stageH = window.innerHeight
-    const bubH = 62
+    const bubH = 68
     const pad = 0.086 * (stageH - bubH)
     const margin = Math.max(2, Math.round((16 - pad) / 0.914))
     const shiftPx = Math.min(Math.ceil(bubH) + margin, Math.round(stageH * 0.6))
