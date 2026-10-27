@@ -71,12 +71,46 @@ Compositor 3.7%；app 进程 main 18.5% / VizWebView 7.4% / Chrome_IOThread 7.4%
 
 灭屏自动停帧，没有息屏偷跑电的问题。量法与完整日志见 `local/evidence/round-summary.md` 第 7 轮。
 
+## 宿主 → 气泡：say 通道（0.9.69 真机实测）
+
+宿主侧 `POST /pet-voice/api/say`（Bearer，body `{text, voice?, id?}`）：`stripForSpeech` 后空的直接 400，
+超 `SAY_MAX_CHARS` 截断，`voice` 不在白名单就退回默认音色，`saySeq += 1` 入队（队列超 `SAY_MAX` 丢最旧），
+同 `id` 再发返回 `{ok, saySeq, queued, deduped:true}` 且不再上屏。
+
+手机侧只有一个方向：`GET /pet-voice/api/say?since=<cursor>`。
+
+| 参数 | 值 | 作用 |
+| --- | --- | --- |
+| `SAY_POLL_MS` | 1500 ms | 轮询间隔（页面没就绪时退到 3000 ms） |
+| `SAY_MAX_PER_POLL` | 3 条 | 单轮最多搬几句子，避免一次刷满 |
+| `since` 初值 | -1 | **只对齐游标、不回放历史**：进程起来不会把旧句子倒给你 |
+
+实测（真机 15ca9736 / 0.9.69）：POST → `PetSay: 气泡上屏 1 条 cursor=N` 两条样本 **0.8 s、1.4 s**，
+上限就是轮询间隔 + 一次 RTT；重复 `id` 后没有第二条 `PetSay`。熄屏 `stopSayPoll()`、亮屏 `startSayPoll()` 自动接上，
+`onDestroy` 停；`pageReady` 之前不发请求。
+
+成本：亮屏待机 `4492/5349` 5 秒 237 / 221 拍 ≈ **0.92 个核**，与 0.9.68 的 0.94 核在噪声内
+⇒ 1.5 s 一次的小 GET 没有可测开销，别为它再加“省电”开关。
+
+气泡几何没动：`#bubble` 定高 68 px、`-webkit-line-clamp:3`。**release 包没有 WebView CDP**，
+机器可查的证据是 `logcat -d | grep PetSay` 那几行（截图只做人眼确认）。
+
 ## 量法
 
 ```bash
 node scripts/pet-bench.mjs --n 8          # 2/3/4/5 段（会抢 local/pet-load.lock，抢不到 exit 3）
 scripts/tts-bench.sh                      # TTS 首字节、连接建立、合成分开记
 scripts/pet-size-check.sh                 # 顺带确认窗口尺寸没被延迟优化带歪
+```
+
+say 通道自检（发一句 → 手机上应有 `PetSay` 行；token 从文件读，不要打印）：
+
+```bash
+T=$(cat ~/.dsh/pet-voice/token)
+curl -s -X POST http://127.0.0.1:54279/pet-voice/api/say \
+  -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+  -d '{"text":"气泡自检","id":"manual-1"}'
+adb shell "logcat -d | grep PetSay | tail -3"
 ```
 
 公网那一段单量：

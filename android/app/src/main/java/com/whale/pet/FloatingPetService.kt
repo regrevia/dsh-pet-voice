@@ -131,6 +131,10 @@ class FloatingPetService : Service() {
     /** 同一句提示的最小间隔：够用户看完一轮，又不至于连点两下就憋着不说。 */
     private val HINT_MIN_GAP = 2000L
 
+    /** 宿主播报队列的拉取间隔；一次最多上屏几条（多了会把气泡挤成走马灯）。 */
+    private val SAY_POLL_MS = 1500L
+    private val SAY_MAX_PER_POLL = 3
+
     /** 本次按下只给回执（连点第二下起）：UP 时不要走 finishPtt。 */
     private var receiptOnly = false
 
@@ -138,6 +142,11 @@ class FloatingPetService : Service() {
     private var hostWakeName = ""
     private var hostStateAt = 0L
     private var hostTick: Runnable? = null
+
+    /** 宿主 `POST /api/say` 的播报队列：游标 = 已经上过气泡的最大 seq，-1 = 先对齐不回放。 */
+    private var sayCursor = -1L
+    private var sayPollOn = false
+    private var sayPollBusy = false
 
     /** 点一下说话：手机只负责录音，识别交给宿主 whisper（真机常没有系统识别器）。 */
     private val recorder by lazy { VoiceRecorder() }
@@ -200,12 +209,14 @@ class FloatingPetService : Service() {
             when (intent.action) {
                 Intent.ACTION_SCREEN_OFF -> {
                     pauseRendering()
+                    stopSayPoll() // 熄屏不拉播报：省无线电唤醒
                     wake.stop() // 熄屏不常听：麦克风不能长期被占
                     stopContinuous("熄屏")
                 }
 
                 Intent.ACTION_SCREEN_ON -> {
                     resumeRendering()
+                    startSayPoll()
                     main.postDelayed({ maybeStartWake() }, 1200)
                 }
             }
@@ -367,6 +378,7 @@ class FloatingPetService : Service() {
         alive = false
         if (AppForeground.onChange != null) AppForeground.onChange = null
         stopContinuous("服务结束")
+        stopSayPoll()
         stopTicker()
         try {
             recorder.stop()
@@ -560,6 +572,63 @@ class FloatingPetService : Service() {
     }
 
     /**
+     * 气泡说一句：宿主 `POST /api/say` 只把句子放进队列，不往手机推流，所以这里每
+     * [SAY_POLL_MS] 拉一次 `GET /api/say?since=`，把游标推到返回值里的 cursor。
+     * 首次用 -1 只对齐（不回放历史），同一条不会重复上屏；熄屏/服务结束都停。
+     */
+    private fun startSayPoll() {
+        if (sayPollOn) return
+        sayPollOn = true
+        main.postDelayed(sayPoll, SAY_POLL_MS)
+    }
+
+    private fun stopSayPoll() {
+        sayPollOn = false
+        sayPollBusy = false
+        main.removeCallbacks(sayPoll)
+    }
+
+    private val sayPoll = object : Runnable {
+        override fun run() {
+            if (!sayPollOn || destroyed) return
+            if (!sayPollBusy && pageReady && cfg.ready) pollSay()
+            main.postDelayed(this, if (pageReady) SAY_POLL_MS else 3000L)
+        }
+    }
+
+    private fun pollSay() {
+        val snapshot = cfg
+        sayPollBusy = true
+        Thread({
+            val r = try {
+                PetClient { snapshot }.say(sayCursor)
+            } catch (e: Exception) {
+                Log.i("PetSay", "取播报异常 ${e.javaClass.simpleName}: ${e.message?.take(90)}")
+                null
+            }
+            main.post {
+                sayPollBusy = false
+                if (destroyed) return@post
+                val json = r?.json ?: return@post
+                val items = json.optJSONArray("items")
+                var shown = 0
+                if (items != null) {
+                    for (i in 0 until items.length()) {
+                        if (shown >= SAY_MAX_PER_POLL) break
+                        val text = items.optJSONObject(i)?.optString("text").orEmpty().trim()
+                        if (text.isEmpty()) continue
+                        say(text)
+                        shown += 1
+                    }
+                }
+                val cursor = json.optLong("cursor", sayCursor)
+                if (cursor > sayCursor) sayCursor = cursor
+                if (shown > 0) Log.i("PetSay", "气泡上屏 $shown 条 cursor=$sayCursor")
+            }
+        }, "pet-say").apply { isDaemon = true }.start()
+    }
+
+    /**
      * 面板上改称呼后不该等用户点一下才生效：常驻时每分钟读一次 state
      * （syncHostState 自带宽 30s 闸），失败下一分钟自然重试。
      */
@@ -682,6 +751,7 @@ class FloatingPetService : Service() {
                 pageReady = true
                 applyPetState()
                 startTicker()
+                startSayPoll()
             }
         }
         w.webChromeClient = object : WebChromeClient() {

@@ -63,6 +63,9 @@ class PetClient(private val config: () -> PetConfig) {
 
     fun state(): Result = get("state")
 
+    /** 宿主播报队列（`POST /api/say` 入队的句子）：`since` < 0 只对齐光标，不回放历史。 */
+    fun say(since: Long): Result = get("say", mapOf("since" to since.toString()))
+
     /** 换绑前先把旧宿主上的这台设备解绑，别让旧电脑挂着一条假「已连接」。 */
     fun unbind(): Result = postJson("unbind", JSONObject().put("id", deviceId()))
 
