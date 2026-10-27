@@ -1,12 +1,12 @@
 {
-  "versionCode": 143,
-  "versionName": "0.9.73",
-  "size": 30028162,
-  "sha256": "249f65adfbaf0a33e2f93eae6c42cbcabb351702a51077c29dc75aebd04433bc",
+  "versionCode": 144,
+  "versionName": "0.9.74",
+  "size": 30028958,
+  "sha256": "d3c0305db6ed73126a2449ebcc56baad5a58a6dead53ccc85600181e44f679ca",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.73/app-release.apk",
-  "notes": "App 内文字回复也会落到大肥鱼的气泡；App 在前台时先挂起，回桌面立刻补上，不再「问了看不见」。",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.73/app-release.apk",
-  "publishedAt": "2026-10-27T21:25:43.197Z",
-  "promotedAt": "2026-10-27T21:25:45.242Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.74/app-release.apk",
+  "notes": "0.9.74：连发多句时一句一句上屏（每句各自占满停留时间，不再 3 句挤一帧只看得到最后一句）；本地队列满时游标不前推，留给下一轮再取；补上取播报的开始/停止日志",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.74/app-release.apk",
+  "publishedAt": "2026-10-27T22:41:26.228Z",
+  "promotedAt": "2026-10-27T22:41:28.162Z"
 }
