@@ -69,6 +69,11 @@ class FloatingPetService : Service() {
     private var appFg = false
     private var pendingSay: String? = null
 
+    /** 本地气泡队列 + 当前这句还要停留多久（跟 JS 的 dwell 公式对齐）。 */
+    private val sayQueue = ArrayDeque<String>()
+    private var sayBusyUntil = 0L
+    private var sayPump: Runnable? = null
+
     /* ---------------- 显示方式：只在桌面 / 一直显示 ---------------- */
     /** home 模式下正在轮询前台应用（每 1200ms 一次）。 */
     private var homeWatchOn = false
@@ -139,6 +144,12 @@ class FloatingPetService : Service() {
     /** 宿主播报队列的拉取间隔；一次最多上屏几条（多了会把气泡挤成走马灯）。 */
     private val SAY_POLL_MS = 1500L
     private val SAY_MAX_PER_POLL = 3
+
+    /**
+     * 本地待上屏的句子。连发时别把 3 句塞进同一帧互相覆盖——一句给足气泡停留时间，
+     * 说完再上下一句；队列满了就不动游标，让宿主那边留着下轮再取。
+     */
+    private val SAY_QUEUE_MAX = 6
 
     /** 本次按下只给回执（连点第二下起）：UP 时不要走 finishPtt。 */
     private var receiptOnly = false
@@ -586,13 +597,16 @@ class FloatingPetService : Service() {
     private fun startSayPoll() {
         if (sayPollOn) return
         sayPollOn = true
+        Log.i("PetSay", "开始取播报 cursor=$sayCursor")
         main.postDelayed(sayPoll, SAY_POLL_MS)
     }
 
     private fun stopSayPoll() {
+        if (!sayPollOn) return
         sayPollOn = false
         sayPollBusy = false
         main.removeCallbacks(sayPoll)
+        Log.i("PetSay", "停止取播报（排队 ${sayQueue.size} 句）")
     }
 
     private val sayPoll = object : Runnable {
@@ -618,15 +632,16 @@ class FloatingPetService : Service() {
                 if (destroyed) return@post
                 val json = r?.json ?: return@post
                 val items = json.optJSONArray("items")
-                var shown = 0
+                var accepted = 0
                 var consumed = -1L
                 if (items != null) {
                     for (i in 0 until items.length()) {
-                        if (shown >= SAY_MAX_PER_POLL) break
+                        if (accepted >= SAY_MAX_PER_POLL) break
                         val o = items.optJSONObject(i) ?: continue
                         val text = o.optString("text").orEmpty().trim()
                         if (text.isNotEmpty()) {
-                            if (offerSay(text)) shown += 1
+                            if (!offerSay(text) && !appFg) break   // 本地队列满：这句留在宿主那边下轮再取
+                            if (!appFg) accepted += 1
                         }
                         val seq = o.optLong("seq", -1L)
                         if (seq > consumed) consumed = seq
@@ -640,7 +655,7 @@ class FloatingPetService : Service() {
                     val cursor = json.optLong("cursor", sayCursor)
                     if (cursor > sayCursor) sayCursor = cursor
                 }
-                if (shown > 0) Log.i("PetSay", "气泡上屏 $shown 条 cursor=$sayCursor")
+                if (accepted > 0) Log.i("PetSay", "气泡收下 $accepted 条 cursor=$sayCursor")
             }
         }, "pet-say").apply { isDaemon = true }.start()
     }
@@ -739,12 +754,18 @@ class FloatingPetService : Service() {
             pendingSay = null
             Log.i("PetSay", "回桌面补上屏 ${text.length} 字")
             main.postDelayed({ offerSay(text) }, 250L)
+        } else if (sayQueue.isNotEmpty()) {
+            // 切到前台气泡就看不见了，排队的句子不用再补；最新的回答走 pendingSay 那条路。
+            Log.i("PetSay", "切到前台，丢掉排队 ${sayQueue.size} 句")
+            sayQueue.clear()
+            sayPump?.let { main.removeCallbacks(it) }
+            sayPump = null
         }
     }
 
     /**
      * 气泡统一入口：前台时先挂起，回来再上屏，避免「问了看不见」或「回来看不到」。
-     * 返回 true 表示已经上屏，false 表示挂起或丢弃（日志里别把挂起算成上屏）。
+     * 返回 true 表示收下并且会真的上屏（可能还排在当前这句后面），false 表示挂起/丢弃/队列满。
      */
     private fun offerSay(text: String): Boolean {
         val body = text.trim()
@@ -754,8 +775,43 @@ class FloatingPetService : Service() {
             Log.i("PetSay", "气泡挂起 ${body.length} 字（App 在前台，回桌面再上屏）")
             return false
         }
-        say(body)
+        if (sayQueue.size >= SAY_QUEUE_MAX) {
+            // 队列满就让它留在宿主队列里：游标不前推，下一轮还能取到这句。
+            Log.i("PetSay", "气球队列满 ${SAY_QUEUE_MAX} 句，这句留到下一轮")
+            return false
+        }
+        sayQueue.addLast(body)
+        pumpSay()
         return true
+    }
+
+    /** 跟 `boot.js` 里的停留公式一致：短句 3.2 s 起，越长越久，封顶 9 s。 */
+    private fun bubbleDwell(len: Int): Long = minOf(9000L, 3200L + len * 90L)
+
+    /**
+     * 一句一句上屏：上一句还没到该走的时候，就等它走完再上下一句。
+     * 连发多句时这样每句都看得见，而不是 3 句挤在同一帧里只留最后一句。
+     */
+    private fun pumpSay() {
+        if (destroyed || appFg) return
+        val now = SystemClock.elapsedRealtime()
+        if (now < sayBusyUntil) {
+            if (sayPump == null) {
+                val r = Runnable { sayPump = null; pumpSay() }
+                sayPump = r
+                main.postDelayed(r, sayBusyUntil - now + 120L)
+            }
+            return
+        }
+        val text = sayQueue.removeFirstOrNull() ?: return
+        sayBusyUntil = now + bubbleDwell(text.length)
+        Log.i("PetSay", "气泡上屏 ${text.length} 字（还剩 ${sayQueue.size} 句）")
+        say(text)
+        if (sayQueue.isNotEmpty()) {
+            val r = Runnable { sayPump = null; pumpSay() }
+            sayPump = r
+            main.postDelayed(r, sayBusyUntil - SystemClock.elapsedRealtime() + 120L)
+        }
     }
 
     private fun setupWeb() {
