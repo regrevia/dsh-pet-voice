@@ -22,6 +22,7 @@
  * @module dsh-pet-voice
  */
 
+import { createTokenStore } from './token.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import {
@@ -483,60 +484,11 @@ const ASSET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
  * 用户/助手在终端里 `rm ~/.dsh/pet-voice/token` 之后下一个请求就会重建并立即生效，
  * 不需要重启 App。
  */
-let tokenCache = { value: '', mtimeMs: -1 }
-function currentToken() {
-  let stat
-  try {
-    stat = statSync(TOKEN_PATH)
-  } catch {
-    /* 文件没了：重建 */
-    tokenCache = { value: ensureToken(), mtimeMs: -1 }
-    return tokenCache.value
-  }
-  if (tokenCache.value && tokenCache.mtimeMs === stat.mtimeMs) return tokenCache.value
-  const value = readFileSync(TOKEN_PATH, 'utf8').trim()
-  if (value.length < 16) {
-    tokenCache = { value: ensureToken(), mtimeMs: -1 }
-  } else {
-    tokenCache = { value, mtimeMs: stat.mtimeMs }
-    LOG(`token 已重新加载：${TOKEN_PATH}`)
-  }
-  return tokenCache.value
-}
-
-function ensureToken() {
-  try {
-    const existing = readFileSync(TOKEN_PATH, 'utf8').trim()
-    if (existing.length >= 16) return existing
-  } catch {
-    /* 不存在就创建 */
-  }
-  mkdirSync(HOME_DIR, { recursive: true, mode: 0o700 })
-  const token = randomBytes(24).toString('hex')
-  writeFileSync(TOKEN_PATH, `${token}\n`, { mode: 0o600 })
-  try {
-    chmodSync(TOKEN_PATH, 0o600)
-  } catch {
-    /* Windows 上 chmod 不可用，忽略 */
-  }
-  LOG(`已生成访问 token：${TOKEN_PATH}`)
-  return token
-}
-
-/** 换新令牌：写进同一个文件，旧 cookie 与旧配对链接立刻作废，手机要重新扫码。 */
-function rotateToken() {
-  mkdirSync(HOME_DIR, { recursive: true, mode: 0o700 })
-  const token = randomBytes(24).toString('hex')
-  writeFileSync(TOKEN_PATH, `${token}\n`, { mode: 0o600 })
-  try {
-    chmodSync(TOKEN_PATH, 0o600)
-  } catch {
-    /* Windows 上 chmod 不可用，忽略 */
-  }
-  tokenCache = { value: token, mtimeMs: -1 }
-  LOG(`已换新访问 token：${TOKEN_PATH}`)
-  return token
-}
+/** token 存取逻辑在 token.mjs（可在临时 HOME 下单测）；这里只做绑定。 */
+const tokenStore = createTokenStore({ homeDir: HOME_DIR, log: LOG })
+const ensureToken = () => tokenStore.ensure()
+const currentToken = () => tokenStore.current()
+const rotateToken = () => tokenStore.rotate()
 
 /** 读状态：记住「哪个项目上次用的是哪个会话」+ 选过的人设。 */
 function loadState() {
