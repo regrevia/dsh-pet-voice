@@ -41,6 +41,8 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
         val notes: String,
         /** 这版 App 要求的最低插件版本；空 = 不挑插件。 */
         val requiredPlugin: String = "",
+        /** 主源下不动时换这个地址再试一次（国内 CNB ↔ GitHub 互为备份）；空 = 没有备份。 */
+        val fallbackPath: String = "",
     )
 
     companion object {
@@ -163,6 +165,7 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
             size = j.optLong("size", 0),
             notes = j.optString("notes"),
             requiredPlugin = j.optString("minPlugin"),
+            fallbackPath = j.optString("fallbackUrl"),
         )
     }
 
@@ -192,6 +195,7 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
             sha256 = j.optString("sha256"),
             size = j.optLong("size", 0),
             notes = j.optString("notes"),
+            fallbackPath = j.optString("fallbackUrl"),
         ).also { lastCheck = "ok" }
     }
 
@@ -213,10 +217,10 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
         // 只留正在装的那一个包，旧版本下过的都是垃圾
         dir.listFiles()?.forEach { if (it.name != dest.name) it.delete() }
         if (dest.exists() && info.sha256.isNotBlank() && sha256(dest) == info.sha256) return dest
-        val written = if (info.path.startsWith("http")) {
-            downloadUrl(info.path, dest, onProgress)
-        } else {
-            client.downloadTo(info.path, dest, onProgress)
+        var written = fetch(info.path, info, dest, onProgress)
+        if (written <= 0 && info.fallbackPath.isNotBlank() && info.fallbackPath != info.path) {
+            Log.i(TAG, "主源下不动，换备份源：${hostOf(info.fallbackPath)}")
+            written = fetch(info.fallbackPath, info, dest, onProgress)
         }
         if (written <= 0) return null
         if (info.sha256.isNotBlank()) {
@@ -228,6 +232,17 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
             }
         }
         return dest
+    }
+
+    /** 一个来源下一次：绝对地址走直链，相对路径走宿主（带令牌）。 */
+    private fun fetch(path: String, info: Info, dest: File, onProgress: ((Int) -> Unit)?): Long =
+        if (path.startsWith("http")) downloadUrl(path, dest, onProgress) else client.downloadTo(path, dest, onProgress)
+
+    /** 日志里只说主机名，别把带 token 的完整地址写进 logcat。 */
+    private fun hostOf(url: String): String = try {
+        java.net.URI(url).host ?: "?"
+    } catch (e: Exception) {
+        "?"
     }
 
     /** 公开源直链下载（GitHub Releases 的 APK）。sha256 仍由调用方校验。 */

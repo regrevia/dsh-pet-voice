@@ -475,8 +475,10 @@ async function promote({ apkPath, fileName, size, sha256, versionCode, versionNa
   await cnbUploadAsset(token, releaseId, 'latest.json', Buffer.from(`${JSON.stringify(cnbMeta, null, 2)}\n`))
   await cnbPointLatest(token, cnbMeta)
   if (github) {
-    const ghMeta = { ...cnbMeta, url: `${GITHUB_BASE}/download/${tag}/${fileName}` }
-    writePromotionRecord(ghMeta, versionName)
+    // 本机这份兜底 meta 是 App 走宿主 /pet-voice/api/update 时读的，它里面的 url 就是
+    // 用户真正下载的地址。国内直连 GitHub Release 经常几十 KB/s，所以这里跟公开通道
+    // 一样指 CNB（公开 release，免登录）。GitHub 只当存档，不再写进 url。
+    writePromotionRecord(cnbMeta, versionName)
   }
   console.log(`✓ 用户现在能看到 ${versionName} → ${cnbMeta.url}`)
 }
@@ -496,7 +498,7 @@ async function rollback(versionName) {
   const old = JSON.parse(await res.text())
   const cnbMeta = { ...old, url: `${CNB_WEB}/download/${tag}/${old.file}` }
   await cnbPointLatest(token, cnbMeta)
-  writePromotionRecord({ ...cnbMeta, url: `${GITHUB_BASE}/download/${tag}/${old.file}` }, versionName)
+  writePromotionRecord(cnbMeta, versionName)
   console.log(`✓ 用户可见版本退回 ${versionName}（versionCode ${old.versionCode}）`)
 }
 

@@ -4,8 +4,9 @@
   "size": 30025914,
   "sha256": "1e9e81facd140b6a5e91376ac2a4d6d35b2c1e9c2612e5e8fe727a35db98b486",
   "file": "app-release.apk",
-  "url": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.64/app-release.apk",
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.64/app-release.apk",
   "notes": "连点只弹一次提示；按住说话不再被连点打断文案刷屏",
   "publishedAt": "2026-10-27T12:46:42.349Z",
-  "promotedAt": "2026-10-27T12:46:44.201Z"
+  "promotedAt": "2026-10-27T12:46:44.201Z",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.64/app-release.apk"
 }
