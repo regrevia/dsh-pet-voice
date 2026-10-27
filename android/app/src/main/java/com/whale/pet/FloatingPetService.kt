@@ -125,6 +125,12 @@ class FloatingPetService : Service() {
     /** 上一次「连点打断」的时刻：900ms 内的后续点按只回执，不打断也不新建一轮。 */
     private var lastPreemptAt = 0L
 
+    /** 上一次弹「按住说话」提示的时刻：连点十下不该念十遍。 */
+    private var lastHintAt = 0L
+
+    /** 同一句提示的最小间隔：够用户看完一轮，又不至于连点两下就憋着不说。 */
+    private val HINT_MIN_GAP = 2000L
+
     /** 本次按下只给回执（连点第二下起）：UP 时不要走 finishPtt。 */
     private var receiptOnly = false
 
@@ -963,6 +969,22 @@ class FloatingPetService : Service() {
         eval("window.PetBridge&&PetBridge.say(${JSONObject.quote(text)})")
     }
 
+    /**
+     * 误触提示的收口版：同一句话 [HINT_MIN_GAP] 内只弹一次。
+     *
+     * 连点/快速反复操作时每次短按都会走到「按住说话，松手发送」，不节流就会
+     * 一直被同一句提示糊脸；这里只保留第一下，后续只写日志（仍算回执，不静默）。
+     */
+    private fun hintOnce(text: String) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastHintAt < HINT_MIN_GAP) {
+            Log.i("PetTap", "提示收口：${now - lastHintAt}ms 内只回执「$text」")
+            return
+        }
+        lastHintAt = now
+        say(text)
+    }
+
     private fun applyPetState() {
         if (!pageReady) return
         eval("window.PetBridge&&PetBridge.setWho(${JSONObject.quote(who())})")
@@ -1010,14 +1032,14 @@ class FloatingPetService : Service() {
             Log.i("PetTap", "松手：没在录 turn=$turnActive tts=${tts.busy} speaking=$speaking")
             // 录音还没起来就松手了（抢麦失败 / 上一轮还在收尾）：给一句提示就回待机
             if (!turnActive && !tts.busy && !speaking) {
-                say("按住说话，松手发送")
+                hintOnce("按住说话，松手发送")
                 updateNotification(getString(R.string.notif_text))
             }
             return
         }
         if (heldMs < HOLD_MIN_MS) {
             cancelPtt()
-            say("按住说话，松手发送")
+            hintOnce("按住说话，松手发送")
             return
         }
         finishRecording(HOLD_MIN_MS.toInt())
@@ -1155,7 +1177,7 @@ class FloatingPetService : Service() {
             updateNotification(fault ?: "没听到声音 · 点我再说")
             // 按住说话没录到人声：直接教怎么用，别只留在通知栏里
             if (fault == VoiceRecorder.MSG_TOO_SHORT || fault == VoiceRecorder.MSG_NO_SPEECH) {
-                say("按住说话，松手发送")
+                hintOnce("按住说话，松手发送")
             }
             // 点一下就抬手：不算一轮，直接回待机，别自动重听（重听会让用户以为卡住了）。
             if (fault == VoiceRecorder.MSG_TOO_SHORT || fault == VoiceRecorder.MSG_NO_SIGNAL ||
