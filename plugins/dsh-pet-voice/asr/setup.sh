@@ -44,13 +44,62 @@ else
   fi
 fi
 
-say "· 预下载模型：$MODEL（第一次要在网上拉，之后离线可用）"
-if ! "$VENV/bin/python" - "$MODEL" <<'PY'
+# Apple Silicon + Python ≥3.10 才能装 mlx-whisper（Metal 实现）：同模型热路径约 0.5 s，CPU whisper 约 1.3 s，
+# 冷启动也短一截（3.9 s vs 6.6 s）。装不上就照旧用 CPU whisper，不影响使用。
+MLX_OK=0
+if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+  if "$VENV/bin/python" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+    if "$VENV/bin/python" -c 'import mlx_whisper' >/dev/null 2>&1; then
+      MLX_OK=1
+      say "· mlx-whisper 已在，跳过安装"
+    else
+      say "· 安装 mlx-whisper（Metal，同样的模型快 2~2.5 倍）"
+      if HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}" \
+         "$VENV/bin/python" -m pip install -q --disable-pip-version-check mlx-whisper >/tmp/pet-asr-mlx-install.log 2>&1; then
+        MLX_OK=1
+      else
+        say "（mlx-whisper 装失败，退回 CPU whisper；日志 /tmp/pet-asr-mlx-install.log）"
+      fi
+    fi
+  else
+    say "· 这个 venv 是 $("$VENV/bin/python" -V 2>&1)，mlx-whisper 要 3.10+，跳过（继续用 CPU whisper）"
+    say "  想提速：用 3.12 重建，PYTHON=/path/to/python3.12 bash $0"
+  fi
+fi
+
+say "· 预下载模型：${MODEL}（第一次要在网上拉，之后离线可用）"
+PRELOAD_FAIL=0
+if [ "$MLX_OK" = 1 ]; then
+  # 模型仓库名要和 asr-worker.py 里的 MLX_REPOS 一致（turbo 没有 -mlx 后缀）
+  if ! HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}" \
+       "$VENV/bin/python" - "$MODEL" <<'PY'
+import sys
+import numpy as np
+import mlx_whisper
+
+REPOS = {
+    "tiny": "mlx-community/whisper-tiny-mlx",
+    "base": "mlx-community/whisper-base-mlx",
+    "small": "mlx-community/whisper-small-mlx",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+}
+mlx_whisper.transcribe(np.zeros(16000, dtype=np.float32),
+                       path_or_hf_repo=REPOS.get(sys.argv[1], sys.argv[1]), language="zh")
+PY
+  then
+    PRELOAD_FAIL=1
+  fi
+elif ! "$VENV/bin/python" - "$MODEL" <<'PY'
 import sys
 import whisper
 whisper.load_model(sys.argv[1])
 PY
 then
+  PRELOAD_FAIL=1
+fi
+if [ "$PRELOAD_FAIL" = 1 ]; then
   say "✗ 模型下载失败：检查网络 / 代理；装好了也能用，只是第一次识别会现拉"
   exit 1
 fi
@@ -63,6 +112,8 @@ except Exception:
     print("unknown")
 PY
 )"
-say "✓ 本机识别已装好：openai-whisper $VER · 模型 $MODEL"
+BACKEND="openai-whisper（CPU）"
+if [ "$MLX_OK" = 1 ]; then BACKEND="mlx-whisper（Metal）"; fi
+say "✓ 本机识别已装好：$BACKEND · 模型 $MODEL"
 say "  python: $VENV/bin/python"
 say "  验证：面板「更多 → 自检」，或直接跟精灵说一句话"

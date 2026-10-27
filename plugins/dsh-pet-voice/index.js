@@ -56,10 +56,10 @@ try {
 } catch {
   zstdDecompressSync = null
 }
-import { getPanelConfig, normalizeTransport, panelState, qrSvg, setPanelConfig, removeDevice, clearDevices, touchDevice } from './panel.mjs'
-import { listLocalVoices, localTtsReady, normalizeTtsProvider, pickDefaultLocalVoice, synthesizeHttp, synthesizeLocal } from './tts/providers.mjs'
-import { connectPublic, disconnectPublic, publicState, setPublicConfig, stopPublic } from './public.mjs'
-import { startLan, lanState, stopLan } from './lan.mjs'
+import { getPanelConfig, normalizeTransport, panelState, qrSvg, setPanelConfig, removeDevice, clearDevices, touchDevice } from './panel.mjs?v=20261026a'
+import { listLocalVoices, localTtsReady, normalizeTtsProvider, pickDefaultLocalVoice, synthesizeHttp, synthesizeLocal } from './tts/providers.mjs?v=20261026a'
+import { connectPublic, disconnectPublic, publicState, setPublicConfig, stopPublic } from './public.mjs?v=20261026a'
+import { startLan, lanState, stopLan } from './lan.mjs?v=20261026a'
 
 /** 插件名，必须等于 bundle patch 里的插入 id。 */
 export const name = 'dsh-pet-voice'
@@ -155,6 +155,19 @@ const TTS_PRESETS = [
   { id: 'dongbei', label: '东北俏皮 · 自带喜感', voice: 'zh-CN-liaoning-XiaobeiNeural', rate: '+10%', pitch: '+10Hz' },
 ]
 const TTS_DEFAULT_PRESET = 'whale'
+
+/**
+ * edge 音色取值顺序：请求里点名 > 档位自带 > 面板存的默认 > 常量默认。
+ *
+ * 面板「音色」以前只是落盘回显（假开关）：这里让它当默认值，没点名没选档位时真的用它
+ * 去合成。面板存的值不在白名单里（旧 id、手填错）就退回常量默认，不让合成 400。
+ */
+function pickEdgeVoice({ queryVoice, presetVoice, panelVoice } = {}) {
+  const picked = String(queryVoice ?? '').trim() || String(presetVoice ?? '').trim()
+  if (picked) return picked
+  const stored = String(panelVoice ?? '').trim()
+  return TTS_VOICES.some((item) => item.id === stored) ? stored : TTS_DEFAULT_VOICE
+}
 const TTS_MAX_CHARS = 600
 
 /* ------------------------------------------------------------------ */
@@ -191,11 +204,14 @@ const ASR_PID_PATH = join(ASR_DIR, 'worker.pid')
 const ASR_MAX_BYTES = 4 * 1024 * 1024
 
 /**
- * 图片上传（手机拍照/相册直接发原图给电脑，模型再用 read 工具看）。
- * 类型白名单只有四种，扩展名**只由 content-type 决定**：用户传的 ?name= 只当
- * 人类可读前缀，绝不能让 `..%2f` 之类的东西决定落盘路径。
+ * 附件上传（手机拍照/相册/录像直接发原文件给电脑，模型再用 read 工具看）。
+ * 类型白名单：四种图片 + 三种视频。扩展名**只由 content-type 决定**，并且落盘前
+ * 再核一次文件头：用户传的 ?name= 只当人类可读前缀，绝不能让 `..%2f` 或
+ * 「声明成 mp4、其实是别的东西」决定落盘路径与后续读取行为。
  */
 const UPLOAD_MAX_BYTES = 12 * 1024 * 1024
+/** 视频按原样搬，200 MB 够一段两分钟的 4K。 */
+const UPLOAD_MAX_VIDEO_BYTES = 200 * 1024 * 1024
 const UPLOAD_MAX_ATTACHMENTS = 6
 const UPLOAD_DIR_NAME = '.pet-uploads'
 const UPLOAD_EXTS = {
@@ -203,8 +219,18 @@ const UPLOAD_EXTS = {
   'image/png': 'png',
   'image/webp': 'webp',
   'image/gif': 'gif',
+  'video/mp4': 'mp4',
+  'video/quicktime': 'mov',
+  'video/x-m4v': 'm4v',
+  'video/m4v': 'm4v',
 }
-const UPLOAD_EXT_LIST = 'JPG / PNG / WebP / GIF'
+/** 视频扩展名集合：附件标记、大小上限、Range 支持都按它分档。 */
+const UPLOAD_VIDEO_EXTS = new Set(['mp4', 'mov', 'm4v'])
+const UPLOAD_EXT_LIST = 'JPG / PNG / WebP / GIF / MP4 / MOV / M4V'
+const UPLOAD_IMAGE_EXT_LIST = 'JPG / PNG / WebP / GIF'
+const UPLOAD_VIDEO_EXT_LIST = 'MP4 / MOV / M4V'
+/** 认不出类型时的统一说法（手机端要看得懂，不要吐 MIME）。 */
+const UPLOAD_TYPE_ERROR = `只支持图片（${UPLOAD_IMAGE_EXT_LIST}）和视频（${UPLOAD_VIDEO_EXT_LIST}）`
 /** 冷启动预算：base 实测 2.4 s（含 torch import）；large-v3-turbo 光载权重就要 5.1 s。 */
 /**
  * 冷启动总预算。large-v3-turbo 首次载入实测 187 s（缓存命中约 6 s），
@@ -1417,6 +1443,52 @@ function bareSessionId(id) {
   return String(id ?? '').replace(/^session-/, '')
 }
 
+/**
+ * `liveTurns` 的条目只有 turn/end 才会删。反过来：热重载、被掐断、宿主自己
+ * 收尾的轮次都可能没有 turn/end，条目就永远留着——会话列表一直显示「正在执行」，
+ * 派发也把空闲会话当成「电脑那轮还在跑」，手机先弹一句「已排队」，主人看着莫名其妙。
+ * 所以只认「最近还有帧在动」的条目；空闲超过十分钟就当时幽灵删掉。
+ */
+const TURN_GHOST_MS = 120_000
+function liveTurnRunning(liveTurns, id) {
+  if (!liveTurns?.get) return false
+  let running = false
+  for (const key of [String(id ?? ''), bareSessionId(id)]) {
+    if (!key) continue
+    const since = Number(liveTurns.get(key) ?? 0)
+    if (!since) continue
+    if (Date.now() - since <= TURN_GHOST_MS) running = true
+    else liveTurns.delete(key)
+  }
+  return running
+}
+
+/**
+ * `/api/state.turns` 的对外投影。
+ *
+ * 内部 `liveTurns` 故意同时存 `session-<uuid>` 和 `<uuid>` 两种写法（宿主各处 id 形态
+ * 不一致，只认一种就掐不掉上一轮），但那是**实现细节**：原样丢给 App 就是同一只会话
+ * 出现两条「正在跑」，App 的忙碌判断、「已排队」提示都会跟着翻倍。
+ *
+ * 这里按裸 id 归一（取更早的 `since` = 这一轮真正开始的时刻），顺手把超过
+ * TURN_GHOST_MS 的幽灵条目删掉——只有 turn/end 会销账，热重载/被掐断的轮次永远等不到。
+ */
+function publicTurns(liveTurns, nowMs = Date.now()) {
+  const out = {}
+  if (!liveTurns?.entries) return out
+  for (const [id, raw] of liveTurns) {
+    const since = Number(raw ?? 0)
+    if (!Number.isFinite(since) || since <= 0 || nowMs - since > TURN_GHOST_MS) {
+      try { liveTurns.delete(id) } catch { /* 只读替身 */ }
+      continue
+    }
+    const key = bareSessionId(id) || String(id)
+    const prev = out[key]
+    if (!prev || since < prev.since) out[key] = { since }
+  }
+  return out
+}
+
 /** 投影缓存文件路径：两种 id 写法都试一遍，找不到返回空串。 */
 function projectCachePath(id) {
   for (const name of new Set([String(id ?? ''), bareSessionId(id)])) {
@@ -1683,17 +1755,59 @@ function projectIdOfPath(byPath, cwd) {
 }
 
 let sessionRowsCache = { at: 0, rows: [] }
+let sessionRowsPending = null
 const SESSION_ROWS_TTL = 3000
 
 /**
  * `sessionController.list()` 一次 0.5–1 s（会话多时更慢），而 App 翻页、下拉刷新会连着打：
  * 短 TTL 缓存住全量列表（只缓存宿主事实，running 每请求现算），翻页就只剩补标题的成本。
+ *
+ * 同一时刻只允许一次在飞（single-flight）：宿主那边 list() 是串行处理的，8 个并发
+ * `/api/state` 各自去打就是排 8 次队、最后一个要等 4 s。合并成一次后，并发再高也只是
+ * 「一起等同一个结果」。
  */
-async function sessionRowsCached(ctx) {
-  if (Date.now() - sessionRowsCache.at < SESSION_ROWS_TTL) return sessionRowsCache.rows
-  const rows = await sessionRows(ctx)
-  if (rows.length) sessionRowsCache = { at: Date.now(), rows }
-  return rows
+async function sessionRowsCached(ctx, ttlMs = SESSION_ROWS_TTL) {
+  if (sessionRowsCache.rows.length && Date.now() - sessionRowsCache.at < ttlMs) return sessionRowsCache.rows
+  if (sessionRowsPending) return sessionRowsPending
+  sessionRowsPending = (async () => {
+    const rows = await sessionRows(ctx)
+    if (rows.length) sessionRowsCache = { at: Date.now(), rows }
+    return rows
+  })().finally(() => {
+    sessionRowsPending = null
+  })
+  return sessionRowsPending
+}
+
+/**
+ * `/api/state` 专用：手里有旧列表就**立刻**回，过期只在后台刷新。
+ * App 打开、回前台、面板刷新、小爱自检都会打这条，让它干等 `list()`（实测 ~0.5 s）
+ * 纯属白等：这个列表本来就允许几秒级滞后，真要用会话的地方（派发）自己会校验存在性。
+ */
+function sessionRowsSoft(ctx) {
+  if (sessionRowsCache.rows.length) {
+    if (Date.now() - sessionRowsCache.at >= SESSION_ROWS_TTL) void sessionRowsCached(ctx).catch(() => {})
+    return Promise.resolve(sessionRowsCache.rows)
+  }
+  return sessionRowsCached(ctx)
+}
+
+let presetRowsCache = { at: 0, rows: [] }
+let presetRowsPending = null
+const PRESET_ROWS_TTL = 5000
+
+/** 同上：预设列表也走宿主，同样只在飞一次；它变得慢，TTL 给长一点。 */
+async function presetRowsCached(ctx, ttlMs = PRESET_ROWS_TTL) {
+  if (presetRowsCache.rows.length && Date.now() - presetRowsCache.at < ttlMs) return presetRowsCache.rows
+  if (presetRowsPending) return presetRowsPending
+  presetRowsPending = (async () => {
+    const rows = await presetRows(ctx)
+    if (rows.length) presetRowsCache = { at: Date.now(), rows }
+    return rows
+  })().finally(() => {
+    presetRowsPending = null
+  })
+  return presetRowsPending
 }
 
 /**
@@ -1707,7 +1821,7 @@ async function browseSessions(ctx, query, liveTurns) {
   const limit = clampLimit(query?.limit)
   const before = toMs(query?.before)
   const byPath = projectIdByPath(workspaceRows(ctx))
-  const isRunning = (id) => Boolean(liveTurns?.has?.(id) || liveTurns?.has?.(bareSessionId(id)))
+  const isRunning = (id) => liveTurnRunning(liveTurns, id)
   const rows = await sessionRowsCached(ctx)
 
   if (rows.length) {
@@ -1921,6 +2035,7 @@ export const __browseInternals = {
 
 /** 派发落点相关（单测用，见 plugins/dsh-pet-voice/test/dispatch-target.test.mjs）。 */
 export const __dispatchInternals = {
+  publicTurns,
   targetSessionId,
   petTargetSession,
   sessionKnownToHost,
@@ -1931,13 +2046,30 @@ export const __dispatchInternals = {
   newSessionRoute,
 }
 
+/** 宿主列表缓存的单测入口（见 test/state-rows-cache.test.mjs）。 */
+export const __rowsInternals = {
+  sessionRowsCached,
+  presetRowsCached,
+  resetRowsCache() {
+    sessionRowsCache = { at: 0, rows: [] }
+    sessionRowsPending = null
+    presetRowsCache = { at: 0, rows: [] }
+    presetRowsPending = null
+  },
+}
+
 /** 图片上传 / 派发附图（单测用，见 plugins/dsh-pet-voice/test/upload.test.mjs）。 */
 /** 读图路由的单测入口（见 test/file.test.mjs）。 */
 export const __fileInternals = {
   imageContentType,
+  fileTypeFor,
   readImageFile,
+  checkMediaPath,
+  parseRange,
+  readFileSlice,
   handleFile,
   MAX_IMAGE_BYTES: UPLOAD_MAX_BYTES,
+  MAX_VIDEO_BYTES: UPLOAD_MAX_VIDEO_BYTES,
 }
 
 /** 旁听（问进展只读看一眼同项目另一只）的单测入口（见 test/peek.test.mjs）。 */
@@ -1956,13 +2088,27 @@ export const __peekInternals = {
   peekInfoOf,
 }
 
+export const __ttsInternals = {
+  pickEdgeVoice,
+  DEFAULT_VOICE: TTS_DEFAULT_VOICE,
+  VOICES: TTS_VOICES,
+}
+
 export const __uploadInternals = {
   extFor,
+  kindForExt,
+  kindForType,
+  sniffUploadKind,
+  uploadLimitFor,
   uploadDir,
   saveUpload,
+  handleUpload,
+  attachmentMark,
   composeDispatchText,
   normalizeAttachments,
   MAX_UPLOAD_BYTES: UPLOAD_MAX_BYTES,
+  MAX_VIDEO_BYTES: UPLOAD_MAX_VIDEO_BYTES,
+  MAX_ATTACHMENTS: UPLOAD_MAX_ATTACHMENTS,
 }
 
 /** 写响应安全网（单测用，见 plugins/dsh-pet-voice/test/response-safety.test.mjs）。 */
@@ -1982,7 +2128,7 @@ export const __netInternals = {
 }
 
 
-/* ---------- 图片上传 + 派发附图 ---------- */
+/* ---------- 附件上传（图片 / 视频）+ 派发附图 ---------- */
 
 /**
  * content-type → 扩展名。只认白名单；带 charset 之类的参数先剥掉。
@@ -1991,6 +2137,48 @@ export const __netInternals = {
 function extFor(contentType) {
   const type = String(contentType ?? '').split(';')[0].trim().toLowerCase()
   return UPLOAD_EXTS[type] ?? ''
+}
+
+/** 扩展名是哪一类：'video' / 'image'。附件标记、大小上限、Range 都按它分档。 */
+function kindForExt(ext) {
+  return UPLOAD_VIDEO_EXTS.has(String(ext ?? '').toLowerCase()) ? 'video' : 'image'
+}
+
+function kindForType(contentType) {
+  const ext = extFor(contentType)
+  return ext ? kindForExt(ext) : ''
+}
+
+/** 这类附件的大小上限：视频 200 MB，图片 12 MB。 */
+function uploadLimitFor(kind) {
+  return kind === 'video' ? UPLOAD_MAX_VIDEO_BYTES : UPLOAD_MAX_BYTES
+}
+
+function tooBigMessage(kind) {
+  return `${kind === 'video' ? '视频' : '图片'}太大（上限 ${kind === 'video' ? '200 MB' : '12 MB'}）`
+}
+
+/**
+ * 文件头嗅探：回 'image' / 'video' / ''。
+ *
+ * 为什么不能只看 content-type：手机相册选中的 `.mov` 有时被 App 标成
+ * `application/octet-stream`，而「声明 video/mp4、实际是一段 JSON」在
+ * `/api/file` 那一头会变成 Range 切片乱发。落盘前按魔数核一次最省事。
+ */
+function sniffUploadKind(bytes) {
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes ?? [])
+  if (buf.length < 12) return ''
+  const ascii = (from, to) => buf.toString('latin1', from, to)
+  // 图片
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image' // JPEG
+  if (ascii(0, 8) === '\x89PNG\r\n\x1a\n') return 'image' // PNG
+  if (ascii(0, 4) === 'GIF8') return 'image' // GIF87a / GIF89a
+  if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') return 'image'
+  // 视频：ISO BMFF（mp4 / mov / m4v）第一层 box 可以是 ftyp/moov/mdat/free/wide/skip。
+  // ftyp 里的品牌（isom / mp42 / qt  / M4V …）不参与判定：容器家族一致就够了，
+  // 逐品牌维护白名单只会让「用户新拍的 mov 传不上去」。
+  if (['ftyp', 'moov', 'mdat', 'free', 'wide', 'skip', 'pnot'].includes(ascii(4, 8))) return 'video'
+  return ''
 }
 
 /** 落盘目录：<项目 cwd>/.pet-uploads（base 显式传入，单测好造临时目录）。 */
@@ -2061,20 +2249,30 @@ function ensureUploadIgnored(base) {
 }
 
 /**
- * 保存一张图片（Buffer）。返回 {ok:true, path, name, bytes} 或 {ok:false, status, error}。
- * 纯 IO，不碰 req/res：HTTP 层和单测共用同一份逻辑。
+ * 保存一个附件（Buffer）：四种图片 + 三种视频。返回 {ok:true, path, name, bytes, kind}
+ * 或 {ok:false, status, error}。纯 IO，不碰 req/res：HTTP 层和单测共用同一份逻辑。
+ *
+ * 两道校验：content-type 决定扩展名，文件头决定「是不是真的这一类」。
  */
 function saveUpload(base, contentType, bytes, opts = {}) {
   const ext = extFor(contentType)
-  if (!ext) return { ok: false, status: 415, error: `只支持 ${UPLOAD_EXT_LIST} 图片` }
+  if (!ext) return { ok: false, status: 415, error: UPLOAD_TYPE_ERROR }
+  const kind = kindForExt(ext)
   const data = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes ?? [])
-  if (data.length > UPLOAD_MAX_BYTES) return { ok: false, status: 413, error: '图片太大（上限 12 MB）' }
-  if (!data.length) return { ok: false, status: 400, error: '图片是空的' }
+  if (data.length > uploadLimitFor(kind)) {
+    return { ok: false, status: 413, error: tooBigMessage(kind) }
+  }
+  if (!data.length) return { ok: false, status: 400, error: '文件是空的' }
+  const sniffed = sniffUploadKind(data)
+  if (!sniffed) return { ok: false, status: 415, error: `认不出这个文件的格式（${UPLOAD_TYPE_ERROR.slice(4)}）` }
+  if (sniffed !== kind) {
+    return { ok: false, status: 415, error: `文件内容和类型对不上（声明为${kind === 'video' ? '视频' : '图片'}）` }
+  }
   const hint = uploadNameHint(opts.name)
   const now = opts.now instanceof Date ? opts.now : new Date()
   const name = `${hint ? `${hint}-` : ''}${uploadStamp(now)}-${randomBytes(3).toString('hex')}.${ext}`
   // 优先落在项目目录；项目根不可写（只读挂载 / 权限）时退到插件自己的目录，
-  // 否则手机端会看到「图片没存下来」，而模型其实只是少看了一张图。
+  // 否则手机端会看到「附件没存下来」，而模型其实只是少看了一个附件。
   const dirs = [uploadDir(base)]
   const fallback = String(opts.fallbackDir ?? '').trim()
   if (fallback && fallback !== dirs[0]) dirs.push(fallback)
@@ -2086,25 +2284,32 @@ function saveUpload(base, contentType, bytes, opts = {}) {
       // 落在项目里的那份：顺手让 git 本地忽略这个目录，别污染用户的 git status。
       if (first && base) ensureUploadIgnored(base)
       writeFileSync(join(dir, name), data)
-      return { ok: true, path: join(dir, name), name, bytes: data.length }
+      return { ok: true, path: join(dir, name), name, bytes: data.length, kind }
     } catch (error) {
       lastError = error
     }
     first = false
   }
-  LOG('图片落盘失败：', lastError?.message ?? lastError)
-  return { ok: false, status: 500, error: '图片没存下来' }
+  LOG('附件落盘失败：', lastError?.message ?? lastError)
+  return { ok: false, status: 500, error: '附件没存下来' }
+}
+
+/** 附件行标记：视频按扩展名区分，其余一律当图片（App 只会传这两类）。 */
+function attachmentMark(path) {
+  return kindForExt(extname(String(path ?? '')).slice(1)) === 'video' ? '[视频]' : '[图片]'
 }
 
 /**
- * 派发文本拼装：正文 + 空行 + 每张图一行 `[图片] <绝对路径>`。
+ * 派发文本拼装：正文 + 空行 + 每个附件一行 `[图片|视频] <绝对路径>`。
+ * 视频的 `[视频]` 标记很关键：模型拿到的是一行路径，不给标记它会当图片去 read，
+ * 200 MB 的 mp4 读进去就是一次爆上下文。
  * 没有附件时**原样返回**（老调用方行为不变）。
  */
 function composeDispatchText(text, paths = []) {
   const body = String(text ?? '')
   const list = Array.isArray(paths) ? paths.filter(Boolean).map(String) : []
   if (!list.length) return body
-  const tail = list.map((path) => `[图片] ${path}`).join('\n')
+  const tail = list.map((path) => `${attachmentMark(path)} ${path}`).join('\n')
   return body.trim() ? `${body}\n\n${tail}` : tail
 }
 
@@ -2116,15 +2321,15 @@ function normalizeAttachments(raw) {
   if (raw === undefined || raw === null) return { ok: true, paths: [] }
   if (!Array.isArray(raw)) return { ok: false, error: 'attachments 必须是数组' }
   if (raw.length > UPLOAD_MAX_ATTACHMENTS) {
-    return { ok: false, error: `最多带 ${UPLOAD_MAX_ATTACHMENTS} 张图片` }
+    return { ok: false, error: `最多带 ${UPLOAD_MAX_ATTACHMENTS} 个附件` }
   }
   const paths = []
   for (const item of raw) {
     const value = typeof item === 'string' ? item : String(item?.path ?? '')
     const path = value.trim()
-    if (!path) return { ok: false, error: '图片路径为空' }
-    if (!isAbsolute(path)) return { ok: false, error: `图片路径必须是绝对路径：${path}` }
-    if (!existsSync(path)) return { ok: false, error: `图片不存在：${path}` }
+    if (!path) return { ok: false, error: '附件路径为空' }
+    if (!isAbsolute(path)) return { ok: false, error: `附件路径必须是绝对路径：${path}` }
+    if (!existsSync(path)) return { ok: false, error: `附件不存在：${path}` }
     paths.push(path)
   }
   return { ok: true, paths }
@@ -2149,25 +2354,25 @@ function petUploadBase(ctx) {
 /**
  * POST /pet-voice/api/upload?name=<文件名>
  *
- * body = 原始图片字节（不是 multipart）。content-type 必须是四种图片之一。
- * 超 12 MiB → 413，类型不对 → 415，其余失败一律中文一句话。
+ * body = 原始附件字节（不是 multipart）。content-type 必须是图片或视频之一。
+ * 图片超 12 MiB / 视频超 200 MiB → 413，类型不对 → 415，其余失败一律中文一句话。
  */
 async function handleUpload(ctx, req, res, url) {
+  const kind = kindForType(req.headers?.['content-type'])
+  if (!kind) return sendJson(res, 415, { ok: false, error: UPLOAD_TYPE_ERROR })
+  const limit = uploadLimitFor(kind)
   const declared = Number(req.headers?.['content-length'] ?? NaN)
-  if (Number.isFinite(declared) && declared > UPLOAD_MAX_BYTES) {
-    return sendJson(res, 413, { ok: false, error: '图片太大（上限 12 MB）' })
-  }
-  if (!extFor(req.headers?.['content-type'])) {
-    return sendJson(res, 415, { ok: false, error: `只支持 ${UPLOAD_EXT_LIST} 图片` })
+  if (Number.isFinite(declared) && declared > limit) {
+    return sendJson(res, 413, { ok: false, error: tooBigMessage(kind) })
   }
   let body
   try {
-    body = await readBody(req, UPLOAD_MAX_BYTES)
+    body = await readBody(req, limit)
   } catch (error) {
     const tooBig = error?.status === 413
     return sendJson(res, tooBig ? 413 : 400, {
       ok: false,
-      error: tooBig ? '图片太大（上限 12 MB）' : '读不到请求体',
+      error: tooBig ? tooBigMessage(kind) : '读不到请求体',
     })
   }
   const saved = saveUpload(petUploadBase(ctx), req.headers?.['content-type'], body, {
@@ -2175,87 +2380,240 @@ async function handleUpload(ctx, req, res, url) {
     fallbackDir: join(HOME_DIR, 'uploads'),
   })
   if (!saved.ok) return sendJson(res, saved.status, { ok: false, error: saved.error })
-  netLog('upload', { bytes: saved.bytes, path: saved.path })
-  return sendJson(res, 200, { ok: true, path: saved.path, name: saved.name, bytes: saved.bytes })
+  netLog('upload', { bytes: saved.bytes, kind: saved.kind, path: saved.path })
+  return sendJson(res, 200, {
+    ok: true,
+    path: saved.path,
+    name: saved.name,
+    bytes: saved.bytes,
+    kind: saved.kind,
+  })
 }
 
 /**
  * GET/HEAD /pet-voice/api/file?path=<绝对路径>
  *
- * 手机聊天里要直接看到电脑上的图：把字节按原样发回去，只认四种图片扩展名。
- * 纯 IO 与 HTTP 分两层：readImageFile 单测直接用，handleFile 只做响应头/HEAD。
+ * 手机聊天里要直接看到电脑上的图、要能拖动播放电脑上的视频：把字节按原样发回去。
+ * 只认图片四种 + 视频三种扩展名，**必须支持 Range**（206 + Content-Range），
+ * 否则手机端没法做缩略图定位、拖进度条、边下边播。
+ * 纯 IO 与 HTTP 分两层：readImageFile / statMediaFile 单测直接用，handleFile 只做响应头。
  */
-const IMAGE_FILE_TYPES = {
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.png': 'image/png',
-  '.webp': 'image/webp',
-  '.gif': 'image/gif',
+const FILE_TYPES = {
+  '.jpg': { type: 'image/jpeg', kind: 'image' },
+  '.jpeg': { type: 'image/jpeg', kind: 'image' },
+  '.png': { type: 'image/png', kind: 'image' },
+  '.webp': { type: 'image/webp', kind: 'image' },
+  '.gif': { type: 'image/gif', kind: 'image' },
+  '.mp4': { type: 'video/mp4', kind: 'video' },
+  '.mov': { type: 'video/quicktime', kind: 'video' },
+  '.m4v': { type: 'video/x-m4v', kind: 'video' },
 }
 
-/** 扩展名 → content-type；不在白名单返回空串（调用方据此回 415）。 */
+/** 扩展名 → {type, kind}；不在白名单返回 null（调用方据此回 415）。 */
+function fileTypeFor(filePath) {
+  return FILE_TYPES[extname(String(filePath ?? '')).toLowerCase()] ?? null
+}
+
+/** 扩展名 → content-type（只回图片；老单测和图片路径还在用这个）。 */
 function imageContentType(filePath) {
-  return IMAGE_FILE_TYPES[extname(String(filePath ?? '')).toLowerCase()] ?? ''
+  const row = fileTypeFor(filePath)
+  return row && row.kind === 'image' ? row.type : ''
 }
 
-/**
- * 读一张图片。返回 {ok:true, body, type, bytes} 或 {ok:false, status, error}。
- * 路径必须是绝对路径、不含 `..`；文件必须存在且是普通文件、≤ 12 MB。
- */
-function readImageFile(rawPath) {
+/** 绝对路径 + 不含 `..` + 存在且是普通文件：file 与 upload 共用的路径校验。 */
+function checkMediaPath(rawPath) {
   const path = String(rawPath ?? '').trim()
   if (!path) return { ok: false, status: 400, error: 'path 为空' }
   if (!isAbsolute(path)) return { ok: false, status: 400, error: 'path 必须是绝对路径' }
   // 不做目录穿越拼接：直接读用户给的路径，但带 `..` 段的一律拒。
   if (path.split(/[\\/]/).includes('..')) return { ok: false, status: 400, error: 'path 不能包含 ..' }
-  const type = imageContentType(path)
-  if (!type) return { ok: false, status: 415, error: `只支持 ${UPLOAD_EXT_LIST} 图片` }
+  const row = fileTypeFor(path)
+  if (!row) return { ok: false, status: 415, error: `只支持图片（${UPLOAD_IMAGE_EXT_LIST}）和视频（${UPLOAD_VIDEO_EXT_LIST}）` }
   let st
   try {
     st = statSync(path)
   } catch {
-    return { ok: false, status: 404, error: '图片不存在' }
+    return { ok: false, status: 404, error: '文件不存在' }
   }
   if (!st.isFile()) return { ok: false, status: 404, error: '不是普通文件' }
-  if (st.size > UPLOAD_MAX_BYTES) return { ok: false, status: 413, error: '图片太大（上限 12 MB）' }
-  let body
-  try {
-    body = readFileSync(path)
-  } catch {
-    return { ok: false, status: 404, error: '图片读不到' }
-  }
-  if (body.length > UPLOAD_MAX_BYTES) return { ok: false, status: 413, error: '图片太大（上限 12 MB）' }
-  return { ok: true, body, type, bytes: body.length }
+  if (st.size > uploadLimitFor(row.kind)) return { ok: false, status: 413, error: tooBigMessage(row.kind) }
+  return { ok: true, path, type: row.type, kind: row.kind, size: st.size }
 }
 
-/** HTTP 层：鉴权已在 apiHandler 里做过；这里只落响应。HEAD 不回 body。 */
+/**
+ * 读一张图片（≤ 12 MB，整块进内存）。返回 {ok:true, body, type, bytes} 或 {ok:false,...}。
+ */
+function readImageFile(rawPath) {
+  const head = checkMediaPath(rawPath)
+  if (!head.ok) return head
+  if (head.kind !== 'image') return { ok: false, status: 415, error: `只支持图片（${UPLOAD_IMAGE_EXT_LIST}）` }
+  if (head.size > UPLOAD_MAX_BYTES) return { ok: false, status: 413, error: tooBigMessage('image') }
+  let body
+  try {
+    body = readFileSync(head.path)
+  } catch {
+    return { ok: false, status: 404, error: '文件读不到' }
+  }
+  return { ok: true, body, type: head.type, bytes: body.length }
+}
+
+/** 同步读一个切片（Range 用；图片和短视频都在这个量级）。 */
+function readFileSlice(path, start, end) {
+  const length = end - start + 1
+  const buf = Buffer.allocUnsafe(length)
+  const fd = openSync(path, 'r')
+  try {
+    let offset = 0
+    while (offset < length) {
+      const n = readSync(fd, buf, offset, length - offset, start + offset)
+      if (n <= 0) break
+      offset += n
+    }
+    return offset === length ? buf : buf.subarray(0, offset)
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** HTTP 层：鉴权已在 apiHandler 里做过；这里只落响应。HEAD 不回 body，但头要全。 */
 function handleFile(req, res, url) {
-  const out = readImageFile(url.searchParams.get('path') ?? '')
-  if (!out.ok) return sendJson(res, out.status, { ok: false, error: out.error })
-  const headers = {
-    'content-type': out.type,
-    'content-length': out.bytes,
-    // 图片内容按绝对路径缓存 10 分钟：同一句话反复上屏时别再抓一遍。
+  const head = checkMediaPath(url.searchParams.get('path') ?? '')
+  if (!head.ok) return sendJson(res, head.status, { ok: false, error: head.error })
+  const isHead = String(req.method ?? '').toUpperCase() === 'HEAD'
+  const rangeHeader = req.headers?.range
+  const range = parseRange(rangeHeader, head.size)
+  const isRange = Boolean(range && range !== 'invalid')
+
+  const base = {
+    'content-type': head.type,
+    'accept-ranges': 'bytes',
+    // 同一张图/同一段视频反复上屏时别再抓一遍。
     'cache-control': 'private, max-age=600',
     'x-content-type-options': 'nosniff',
   }
-  if (!writeHead(res, 200, headers)) return false
-  if (String(req.method ?? '').toUpperCase() === 'HEAD') {
+
+  if (range === 'invalid') {
+    // 416 必须带 `bytes */size`，否则播放器不知道文件到底多大。
+    return sendJson(res, 416, { ok: false, error: 'Range 超出文件大小' }, {
+      'content-range': `bytes */${head.size}`,
+      'accept-ranges': 'bytes',
+    })
+  }
+
+  if (!isRange) {
+    if (!writeHead(res, 200, { ...base, 'content-length': head.size })) return false
+    if (isHead) {
+      try {
+        res.end()
+        return true
+      } catch (error) {
+        LOG('写文件 HEAD 失败：', error?.message ?? error)
+        return false
+      }
+    }
+    // 视频不整块读进内存：200 MB 的 mov 直接 readFileSync 会把宿主内存顶上去。
+    if (head.kind === 'video') {
+      const stream = createReadStream(head.path)
+      stream.on('error', (error) => {
+        LOG('写视频失败：', error?.message ?? error)
+        try {
+          res.destroy()
+        } catch {
+          /* 已断 */
+        }
+      })
+      stream.pipe(res)
+      return true
+    }
+    const out = readImageFile(head.path)
+    if (!out.ok) return sendJson(res, out.status, { ok: false, error: out.error })
+    try {
+      res.end(out.body)
+      return true
+    } catch (error) {
+      LOG('写文件失败：', error?.message ?? error)
+      return false
+    }
+  }
+
+  const length = range.end - range.start + 1
+  if (
+    !writeHead(res, 206, {
+      ...base,
+      'content-length': length,
+      'content-range': `bytes ${range.start}-${range.end}/${head.size}`,
+    })
+  ) {
+    return false
+  }
+  if (isHead) {
     try {
       res.end()
       return true
     } catch (error) {
-      LOG('写图片 HEAD 失败：', error?.message ?? error)
+      LOG('写文件 HEAD(Range) 失败：', error?.message ?? error)
       return false
     }
   }
   try {
-    res.end(out.body)
+    if (length > 4 * 1024 * 1024) {
+      const stream = createReadStream(head.path, { start: range.start, end: range.end })
+      stream.on('error', (error) => LOG('写 Range 失败：', error?.message ?? error))
+      stream.pipe(res)
+      return true
+    }
+    res.end(readFileSlice(head.path, range.start, range.end))
     return true
   } catch (error) {
-    LOG('写图片失败：', error?.message ?? error)
+    LOG('写 Range 失败：', error?.message ?? error)
     return false
   }
+}
+
+/** 面板里能选的推理档位；空 = 跟随桌面端。 */
+const REASONING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high']
+
+/**
+ * 给「App 刚新建的这只会话」装一档推理强度。
+ *
+ * selectModel 把选择写进会话事件 model/selection：续接、切回 App 都还是这一档。
+ * 它同时会把默认选择存盘（桌面端选择器读的就是那份），所以调完把默认值原样写回
+ * 去——面板里这个开关只管 App 新建的会话，不能反过来改桌面端正用的档位。
+ * 任何一步没成都不影响建会话，只是这一只按桌面端默认跑。
+ */
+async function applyNewSessionReasoning(ctx, sessionId) {
+  const want = String(getPanelConfig().newReasoning ?? '').trim()
+  if (!sessionId || !REASONING_LEVELS.includes(want)) return ''
+  const controller = ctx.get?.('sessionController')
+  if (typeof controller?.selectModel !== 'function') return ''
+  const defaults = ctx.get?.('agentDefaultModel')
+  let base = null
+  try {
+    base = defaults?.currentSelection?.() ?? null
+  } catch {
+    base = null
+  }
+  if (!base?.provider || !base?.model) return ''
+  try {
+    await withTimeout(
+      controller.selectModel({ sessionId, provider: base.provider, model: base.model, reasoningEffort: want }),
+      CREATE_TIMEOUT_MS,
+      '设置新会话推理强度超时',
+    )
+  } catch (error) {
+    LOG(`新会话推理强度没设上（${want}）：`, error?.message ?? error)
+    return ''
+  }
+  try {
+    await defaults?.saveSelection?.(
+      base.reasoningEffort === undefined
+        ? { provider: base.provider, model: base.model }
+        : { provider: base.provider, model: base.model, reasoningEffort: base.reasoningEffort },
+    )
+  } catch (error) {
+    LOG('恢复桌面端默认模型选择失败：', error?.message ?? error)
+  }
+  return want
 }
 
 /** 项目里的上一只会话；找不到就新建一个。 */
@@ -2624,6 +2982,8 @@ async function newSessionRoute(ctx, state, body, res) {
     if (!sessionId) {
       return { status: 502, body: { ok: false, error: `create() 没有返回 sessionId：${JSON.stringify(created).slice(0, 200)}` } }
     }
+    // 面板里选过「App 新建会话的推理强度」就现在落到这只会话上；设不上就不设
+    await applyNewSessionReasoning(ctx, sessionId)
     // 不动项目记忆：它记的是「专属会话」，被新对话覆盖会让后续 switch 指错人
     return { status: 200, body: { ok: true, sessionId, reused: false, title: created?.title ?? created?.session?.header?.title ?? '' } }
   } catch (error) {
@@ -2959,7 +3319,9 @@ async function dispatchToSession(ctx, state, body, req, deps) {
     flowLog(
       TURN_LOG_PATH,
       `dispatch status=${outcome?.status ?? 'throw'} rid=${rid || '-'} chars=${text.length} ` +
-        `${outcome?.body?.deduped ? 'deduped ' : ''}${Date.now() - startedAt}ms text=${text.slice(0, 60)}`,
+        // 落点是排查「发出去没进那只会话」的唯一现场：带上的（body）和宿主实际用的（used）都记。
+        `want=${bareSessionId(String(body?.sessionId ?? '')) || '-'} used=${bareSessionId(String(outcome?.body?.usedSessionId ?? outcome?.body?.sessionId ?? '')) || '-'} ` +
+        `${outcome?.body?.queued ? 'queued ' : ''}${outcome?.body?.deduped ? 'deduped ' : ''}${Date.now() - startedAt}ms text=${text.slice(0, 60)}`,
     )
   }
 }
@@ -2998,7 +3360,7 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
 
   // 切网重发：同一个 requestId 只落一轮，避免电脑端出现两条相同提问。
   const rid = String(body?.requestId ?? '').trim()
-  netLog('dispatch', { sessionId, chars: text.length, attachments: attachmentPaths.length, rid: rid.slice(0, 12) })
+  netLog('dispatch', { sessionId, sid: bareSessionId(sessionId).slice(0, 8), chars: text.length, attachments: attachmentPaths.length, rid: rid.slice(0, 12) })
   if (rid) {
     const hit = DISPATCH_SEEN.get(rid)
     if (hit && Date.now() - hit.at < 120_000) {
@@ -3018,16 +3380,42 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
   // 只认一种写法的话状态对不上，掐不掉。
   const liveTurns = deps.liveTurns
   const liveAbort = deps.liveAbort
+  const awaitPetTurn = deps.awaitPetTurn
+  const turnOrigin = deps.turnOrigin
   const turnKeys = [...new Set([sessionId, bareSessionId(sessionId)].filter(Boolean))]
+  /** 掐掉一轮之后立刻销账：活记号清掉 + 收尾兜底压到 2s，别让手机干等满 90s/5min。 */
+  const dropLiveTurn = (id) => {
+    for (const key of turnKeys) {
+      try { liveTurns.delete(key) } catch { /* 老宿主没有这个 Map */ }
+    }
+    try { deps.armEndFallback?.(id, 'interrupted', 2_000) } catch { /* 兜底缺席不影响派发 */ }
+  }
+  /**
+   * 派发没落地（prompt 拒了）：撤回「下一轮 turn/start 是手机这轮」的认领记号。
+   * 不撤的话，这台会话下一轮电脑端的 turn/start 会被当成 pet 派发（origin=pet），
+   * App 一侧把电脑的回复当成「别人的帧」吞掉，主人只看到一句没头没尾的占位。
+   */
+  const forgetClaim = () => {
+    for (const key of turnKeys) {
+      try { awaitPetTurn?.delete?.(key) } catch { /* 老宿主没有这个 Map */ }
+      try { turnOrigin?.delete?.(key) } catch { /* 同上 */ }
+    }
+  }
   const prevAbort = turnKeys.map((key) => liveAbort.get(key)).find(Boolean)
-  const prevRunning = turnKeys.some((key) => liveTurns.has(key))
+  const prevRunning = liveTurnRunning(liveTurns, sessionId)
+  const prevOrigin = turnKeys.map((key) => turnOrigin?.get(key)).find(Boolean) ?? ''
+  // 这一句是不是排在电脑那轮后面：回执里直接带出去，别指望 App 一定收到刚才那帧 queued
+  let queuedBehindDesktop = false
   if (prevRunning) {
     if (prevAbort) {
+      // 上一句也是手机派的：掐掉，主人再开口就是要新的那句
       netLog('dispatch-interrupt', { sessionId })
       try { prevAbort.abort() } catch { /* 已经结束 */ }
-    } else {
-      // 上一轮不是我们派的（用户在电脑上直接发的）：没有我们自己的 abort，就请
-      // 宿主取消这条会话的当前轮，否则手机会一直排在后面等。
+      // 被我们掐掉的那一轮不会再发 turn/end，liveTurns 里这只就会一直「活着」：
+      // 收尾兜底看着它不敢发 end（held 90s→180s→270s→5min），手机就卡在「处理中」。
+      // 我们自己动的手，自己销账：清掉活记号，并把收尾窗口压到 2s。
+      dropLiveTurn(sessionId)
+    } else if (prevOrigin === 'pet') {
       netLog('dispatch-cancel', { sessionId })
       try {
         const cancelled = controller.cancel?.({ sessionId }, AbortSignal.timeout(4000))
@@ -3035,10 +3423,24 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
       } catch (error) {
         LOG('上一轮取消失败：', error?.message ?? error)
       }
+      dropLiveTurn(sessionId)
+    } else {
+      // 电脑上那一轮还在跑：**不掐它**。主人在电脑上正干的活不能因为手机插一句就没了
+      // （以前这里是 cancel，表现就是「明明电脑端在排队，手机这句却没进队列，还把
+      // 电脑那轮掐死，两边都不出结果」）。这句交给宿主排队，前面那轮一结束就轮到它。
+      queuedBehindDesktop = true
+      netLog('dispatch-queued', { sessionId, prevOrigin: prevOrigin || 'unknown' })
+      // 帧里不能带 origin：origin 是「这帧属于哪一轮」的标记，App 见到非 pet 就整帧丢掉，
+      // 排队的回执会当场消失（表现就是明明排在电脑那轮后面，界面却显示「处理中」）。
+      // 「前面是谁」只放在 ahead 里。
+      try { deps.emit(sessionId, 'queued', { ahead: 'desktop' }) } catch { /* 推送失败不影响排队 */ }
     }
   }
+  // 认领记号：该会话下一次 turn/start 就是这一句的轮次
+  if (awaitPetTurn) for (const key of turnKeys) awaitPetTurn.set(key, Date.now())
   const ac = new AbortController()
-  const acTimer = setTimeout(() => { try { ac.abort() } catch { /* ignore */ } }, 120_000)
+  // 排队时前面那轮可能还要跑好几分钟：时长给足，别把还在队里的这句 abort 成「没回复」
+  const acTimer = setTimeout(() => { try { ac.abort() } catch { /* ignore */ } }, 300_000)
   for (const key of turnKeys) liveAbort.set(key, ac)
   // 人设/长度档/旁听材料挂进这条会话的 system prompt：只有模型看得见，不进对话记录。
   await syncHiddenPrompt(ctx, sessionId, config)
@@ -3066,6 +3468,7 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
   if (first.failed) {
     // 失败就别留去重记录，否则用户重发同一句会被当成「已收到」而永远落不了地。
     if (rid) DISPATCH_SEEN.delete(rid)
+    forgetClaim()
     if (isMissingSessionError(first.error)) {
       // 只有 prompt 明说「不存在」才 404：App 见 404 会清掉本地钉的会话，不能乱报。
       return { status: 404, body: { ok: false, error: `会话不存在：${sessionId}` } }
@@ -3075,11 +3478,16 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
   if (first.settled === false) {
     prompt.catch((error) => {
       LOG('prompt 异步失败：', error?.message ?? error)
+      // 1.2s 内就把 202 发出去了，这轮可能压根没起来（还没 turn/start 就炸）：
+      // 只撤回还没被认领的记号；已经被 turn/start 认领的 origin=pet 是对的，留着。
+      for (const key of turnKeys) {
+        try { awaitPetTurn?.delete?.(key) } catch { /* ignore */ }
+      }
       deps.emit(sessionId, 'error', { message: String(error?.message ?? error) })
     })
-    return { status: 202, body: { ok: true, accepted: true, sessionId, usedSessionId: sessionId, attachments: attachmentPaths.length } }
+    return { status: 202, body: { ok: true, accepted: true, sessionId, usedSessionId: sessionId, attachments: attachmentPaths.length, queued: queuedBehindDesktop } }
   }
-  return { status: 200, body: { ok: true, accepted: true, sessionId, usedSessionId: sessionId, value: first.value ?? null, attachments: attachmentPaths.length } }
+  return { status: 200, body: { ok: true, accepted: true, sessionId, usedSessionId: sessionId, value: first.value ?? null, attachments: attachmentPaths.length, queued: queuedBehindDesktop } }
 }
 
 /* ------------------------------------------------------------------ */
@@ -3580,6 +3988,20 @@ export function apply(ctx, config) {
   /** sessionId -> AbortController：新一句派发时掐掉上一轮，别让手机排在队尾干等。 */
   const liveAbort = new Map()
   /**
+   * 手机派出去、还没看到 turn/start 的那一轮：下次 turn/start 就归它。
+   *
+   * 宿主不告诉我们「这一轮是谁派发的」，只能靠时序认领：派发受理时挂一个记号，
+   * 该会话下一次 turn/start 认作手机这轮；其余（开机就在跑的、用户在电脑上敲的）
+   * 一律当电脑那轮。没有来源标记，手机就会把电脑上正在干活的 start/delta/end
+   * 当成自己那一轮 —— 「切到电脑正在跑的会话，界面显示电脑端操作、被别人的 end
+   * 提前收尾、一直卡在处理中」就是这么来的。
+   */
+  const awaitPetTurn = new Map()
+  /** sessionId -> 'pet' | 'desktop'：这一轮是谁派发的。 */
+  const turnOrigin = new Map()
+  /** 两种 id 写法都认：宿主有的地方带 session- 前缀、有的不带。 */
+  const originOf = (sessionId) => turnOrigin.get(sessionId) ?? turnOrigin.get(bareSessionId(sessionId)) ?? ''
+  /**
    * sessionId -> { stamp, reason, timer }：**等 final 发完再补 end**。
    *
    * `assistant-stream` 的 finish 比 `session/event` 的 assistant/message 早到，早先
@@ -3618,7 +4040,7 @@ export function apply(ctx, config) {
    * 晚上手机只剩一个「看」，就是这个形状）。所以只要 liveTurns 里还有它，就再等一轮
    * 宽限，直到 HARD_GRACE_MS 才认定它真的卡死。
    */
-  function armEndFallback(sessionId, reason) {
+  function armEndFallback(sessionId, reason, graceMs = END_GRACE_MS) {
     const prev = pendingEnd.get(sessionId)
     if (prev?.timer) clearTimeout(prev.timer)
     const stamp = prev ? prev.stamp + 1 : 1
@@ -3627,7 +4049,12 @@ export function apply(ctx, config) {
       const timer = setTimeout(() => {
         const now = pendingEnd.get(sessionId)
         if (!now || now.stamp !== stamp) return
-        const live = liveTurns.get(sessionId) ?? liveTurns.get(bareSessionId(sessionId))
+        // 用带过期判断的读法：被掐断/宿主流失的那一轮不会再发 turn/end，
+        // 直接读 Map 会看到一条永不过期的「还活着」，于是 end 被一路推迟到 5 分钟硬上限。
+        const liveAt = liveTurnRunning(liveTurns, sessionId)
+          ? (liveTurns.get(sessionId) ?? liveTurns.get(bareSessionId(sessionId)))
+          : 0
+        const live = liveAt || null
         const held = Date.now() - now.since
         if (live && held < HARD_GRACE_MS) {
           flowLog(TURN_LOG_PATH, `end-hold sid=${bareSessionId(sessionId)} held=${held}ms live=${Date.now() - live}ms`)
@@ -3635,8 +4062,8 @@ export function apply(ctx, config) {
           return
         }
         pendingEnd.delete(sessionId)
-        emit(sessionId, 'end', { reason: now.reason })
-      }, END_GRACE_MS)
+        emit(sessionId, 'end', { reason: now.reason, origin: originOf(sessionId) })
+      }, graceMs)
       if (typeof timer?.unref === 'function') timer.unref()
       pendingEnd.set(sessionId, { stamp, reason, timer, since })
     }
@@ -3681,6 +4108,11 @@ export function apply(ctx, config) {
 
   /** 把一个增量帧记进缓冲，并推给该会话的所有 SSE 订阅者。 */
   function emit(sessionId, event, payload) {
+    // 有帧在动就说明这一轮真的活着：顺手把 liveTurns 的时间戳续上，
+    // 空闲十分钟后自动当幽灵清掉（见 liveTurnRunning）
+    for (const key of new Set([sessionId, bareSessionId(sessionId)])) {
+      if (key && liveTurns.has(key)) liveTurns.set(key, Date.now())
+    }
     const buf = bufferOf(sessionId)
     buf.seq += 1
     // 每条帧都带上 sessionId：SSE 是广播的，客户端靠它把别的会话的帧滤掉
@@ -3758,7 +4190,8 @@ export function apply(ctx, config) {
       const chunk = frame.chunk
       if (!chunk) return
       if (chunk.type === 'text-delta' && chunk.text) {
-        emit(sessionId, 'delta', { text: chunk.text })
+        emit(sessionId, 'delta', { text: chunk.text, origin: originOf(sessionId) })
+        // 增量原样转发，不做攒块：上游每来一块就发一帧（实测 21 块/1.4s 全部落到手机）。
         return
       }
       if (chunk.type === 'finish') {
@@ -3767,7 +4200,7 @@ export function apply(ctx, config) {
         return
       }
       if (chunk.type === 'tool-call-delta' && chunk.name) {
-        emit(sessionId, 'tool', { name: chunk.name })
+        emit(sessionId, 'tool', { name: chunk.name, origin: originOf(sessionId) })
       }
     }),
   )
@@ -3782,13 +4215,20 @@ export function apply(ctx, config) {
       // waitFinal 的 started 判断饿死 → 小爱每次干等成占位语；重复帧的根因是同一条
       // SSE 连接被逐键写两遍，已在 emit 里修掉。end 交给 assistant-stream 的 finish。
       if (event?.type === 'turn/start') {
-        for (const key of new Set([sessionId, bareSessionId(sessionId)].filter(Boolean))) {
-          liveTurns.set(key, Date.now())
+        const keys = new Set([sessionId, bareSessionId(sessionId)].filter(Boolean))
+        for (const key of keys) liveTurns.set(key, Date.now())
+        // 谁派发的：派发时挂过记号就算手机这轮，否则是电脑那轮（开机在跑的、电脑上敲的）
+        const claimed = [...keys].some((key) => awaitPetTurn?.has(key))
+        const origin = claimed ? 'pet' : 'desktop'
+        for (const key of keys) {
+          awaitPetTurn?.delete(key)
+          turnOrigin?.set(key, origin)
         }
+        netLog('turn-start', { sessionId, origin, turn: event.data?.turn ?? event.turn ?? null })
         turnText.delete(sessionId)
         // 官方事件的 turn 在 `data.turn` 里，旧代码读 `event.turn` 永远是 null：
         // App 拿不到轮次号，就没法把「这一轮的 end」和上一轮的迟到帧区分开。
-        emit(sessionId, 'start', { turn: event.data?.turn ?? event.turn ?? null, step: event.data?.step ?? event.step ?? null })
+        emit(sessionId, 'start', { turn: event.data?.turn ?? event.turn ?? null, step: event.data?.step ?? event.step ?? null, origin })
         return
       }
       if (event?.type === 'turn/end') {
@@ -3796,6 +4236,7 @@ export function apply(ctx, config) {
           liveTurns.delete(key)
         }
         const turn = event.data?.turn ?? event.turn ?? null
+        const origin = originOf(sessionId)
         const pend = pendingEnd.get(sessionId)
         if (pend?.timer) clearTimeout(pend.timer)
         pendingEnd.delete(sessionId)
@@ -3803,8 +4244,9 @@ export function apply(ctx, config) {
         turnText.delete(sessionId)
         // `turn/end` 是一轮**唯一**的终止信号：先把这一轮最后一条正文当 final 发，
         // 再发 end。工具任务因此不会在「我查一下」那一句就被判结束。
-        if (last?.text) emit(sessionId, 'final', { text: last.text, turn: last.turn ?? turn })
-        emit(sessionId, 'end', { reason: pend?.reason ?? 'stop', turn })
+        if (last?.text) emit(sessionId, 'final', { text: last.text, turn: last.turn ?? turn, origin })
+        emit(sessionId, 'end', { reason: pend?.reason ?? 'stop', turn, origin })
+        for (const key of new Set([sessionId, bareSessionId(sessionId)].filter(Boolean))) turnOrigin?.delete(key)
         return
       }
       if (event?.type !== 'assistant/message') return
@@ -3813,7 +4255,7 @@ export function apply(ctx, config) {
       const turn = event.data?.turn ?? event.turn ?? null
       turnText.set(sessionId, { text, turn })
       // 中间消息发 `message`：可以展示，但**不是**终止。只有 `end` 才是。
-      emit(sessionId, 'message', { text, turn })
+      emit(sessionId, 'message', { text, turn, origin: originOf(sessionId) })
     }),
   )
 
@@ -4149,6 +4591,29 @@ export function apply(ctx, config) {
 
   /* ---------- 神经语音（edge-tts 子进程，mp3 直通） ---------- */
 
+  /** 小句最长切到这么多个字就断一刀：太长的整句一口气念完没有停顿。 */
+  const WARM_MAX_CLAUSE = 40
+  const CLAUSE_END = new Set([
+    '。', '！', '？', '；', '…', '，', '、', '：', '!', '?', ';', ',', ':', '\n',
+  ])
+
+  /**
+   * 切小句。必须是**纯函数**：缓存按小句存、请求时按同一把刀切，键才对得上
+   * （对不上只是退回整句合成，不会串音）。这里只负责切，不发起任何合成。
+   */
+  function speechClauses(text) {
+    const clauses = []
+    let cur = ''
+    for (const ch of String(text ?? '')) {
+      cur += ch
+      if (CLAUSE_END.has(ch) || cur.length >= WARM_MAX_CLAUSE) {
+        clauses.push(cur)
+        cur = ''
+      }
+    }
+    return { clauses, rest: cur }
+  }
+
   /**
    * 合成结果缓存（进程内 LRU，键 = 音色|语速|音调|文本）。
    *
@@ -4217,7 +4682,11 @@ export function apply(ctx, config) {
     } else if (provider === 'http') {
       voice = String(cfg.ttsVoice || url.searchParams.get('voice') || '').trim()
     } else {
-      voice = String(url.searchParams.get('voice') ?? '').trim() || preset?.voice || TTS_DEFAULT_VOICE
+      voice = pickEdgeVoice({
+        queryVoice: url.searchParams.get('voice'),
+        presetVoice: preset?.voice,
+        panelVoice: cfg.voice,
+      })
     }
     // 记下「马上要塞进用户耳朵的话」：手机麦克风可能把它录回来（见 echoOfRecentTts）。
     rememberTtsText(text)
@@ -4240,6 +4709,9 @@ export function apply(ctx, config) {
     }
 
     const cacheKey = ttsCacheKey(provider, voice, text, rate, pitch)
+    // ?stream=1：调用方要「边下边播」，让 stream.py 边收边写（首字节 2.1s → 1.0s），
+    // 代价是没法再做整句的掐头去尾 —— 只有客户端边播才值得。
+    const streamRequest = url.searchParams.get('stream') === '1'
     const cached = ttsCacheGet(cacheKey)
     if (cached) {
       LOG(`神经语音：${voice} ${text.length} 字 → 缓存命中 ${cached.length} B`)
@@ -4255,6 +4727,35 @@ export function apply(ctx, config) {
         /* 断开 */
       }
       return
+    }
+
+    // 小句拼装：这一句的每个小句都已在缓存里时（手机按 。！？ 切句、缓存按逗号切小句，
+    // 「A，B。」这种最常见），直接按顺序拼起来，毫秒级返回，不再起子进程。
+    // 只走「全命中」：缺任何一块都交给下面整句合成——实测并发补合成会抢带宽，反而更慢
+    // （4 小句并发 3.7s vs 整句一次 2.2s）。
+    if (provider === 'edge') {
+      const { clauses, rest } = speechClauses(text)
+      const pieces = clauses.map((item) => item.trim()).filter(Boolean)
+      if (pieces.length > 1 && !rest.trim()) {
+        const parts = pieces.map((piece) => ttsCacheGet(ttsCacheKey(provider, voice, piece, rate, pitch)))
+        if (parts.every(Boolean)) {
+          const audio = Buffer.concat(parts)
+          ttsCachePut(cacheKey, audio)
+          LOG(`神经语音：${voice} ${text.length} 字 → ${pieces.length} 小句拼装 ${audio.length} B`)
+          try {
+            writeHead(res, 200, {
+              'content-type': 'audio/mpeg',
+              'content-length': String(audio.length),
+              'cache-control': 'private, max-age=86400',
+              'x-tts-cache': 'clause',
+            })
+            res.end(audio)
+          } catch {
+            /* 断开 */
+          }
+          return
+        }
+      }
     }
 
     // 本机 / 自己的接口：一次拿整段再回，音频统一成 mp3（手机和缓存都按 audio/mpeg 认）。
@@ -4289,7 +4790,12 @@ export function apply(ctx, config) {
     try {
       child = spawn(TTS_PYTHON, [TTS_SCRIPT, voice, text, rate, pitch], {
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+        env: {
+          ...process.env,
+          PYTHONIOENCODING: 'utf-8',
+          PYTHONUNBUFFERED: '1',
+          ...(streamRequest ? { PET_TTS_RAW: '1' } : {}),
+        },
       })
     } catch (error) {
       return sendJson(res, 503, {
@@ -4362,7 +4868,9 @@ export function apply(ctx, config) {
         })
         return
       }
-      if (code === 0 && bytes > 0 && buffered.length) {
+      // raw 模式吐的是没掐头去尾的原始流（句尾还留着厂商静音），不能进缓存：
+      // 否则之后别的设备用普通请求要同一句，会拿到这段更长的未修剪音频。
+      if (code === 0 && bytes > 0 && buffered.length && !streamRequest) {
         ttsCachePut(cacheKey, Buffer.concat(buffered, bytes))
       }
       LOG(`神经语音：${voice} ${text.length} 字 → ${bytes} B（退出码 ${code}，缓存 ${ttsCache.size} 条）`)
@@ -4804,7 +5312,9 @@ export function apply(ctx, config) {
       }
 
       if (route === 'state' && method === 'GET') {
-        const [sessions, presets] = await Promise.all([sessionRows(ctx), presetRows(ctx)])
+        // 缓一缓存 + 并发合并：App 打开/回前台、面板刷新、小爱自检都会同时打这一条，
+        // 每条都去宿主 list() 一次的话就是排队等宿主（实测 8 并发要 4 s）。
+        const [sessions, presets] = await Promise.all([sessionRowsCached(ctx), presetRowsCached(ctx)])
         // 小爱专属会话不参与「界面当前会话」的推算：宿主 list() 按活跃度排序，我们自己
         // 往专属会话 prompt 一次就会把它顶到第一位。若直接把 sessions[0] 当 current，
         // 用户会看到界面上的当前会话被小爱「抢方向盘」。所以这里跳过专属会话那只。
@@ -4846,9 +5356,14 @@ export function apply(ctx, config) {
               return null
             }
           })(),
-          pet: { name: petName, wakeWords: WAKE_WORDS },
+          pet: {
+            name: petName,
+            // 面板里填的唤醒词：App 读它当自己的默认（唤醒匹配在 App 里做）
+            wakeName: String(getPanelConfig().wakeName ?? '').trim(),
+            wakeWords: WAKE_WORDS,
+          },
           // 只有「正在跑」的会话会出现在这里；空对象表示全空闲
-          turns: Object.fromEntries([...liveTurns].map(([id, since]) => [id, { since }])),
+          turns: publicTurns(liveTurns),
           // 插件页面里配的人设/长度档/气泡开关：App 读这里当默认值
           settings: (() => {
             const config = getPanelConfig()
@@ -4856,6 +5371,8 @@ export function apply(ctx, config) {
               maxWords: normalizeMaxWords(config.maxWords),
               bubble: config.bubble !== false,
               transport: normalizeTransport(config.transport),
+              // 面板「音色」：App 没自己选音色时按它发 voice，宿主用它当默认
+              voice: String(config.voice ?? '').trim() || TTS_DEFAULT_VOICE,
               hasPersona: Boolean(String(config.persona ?? '').trim()),
             }
           })(),
@@ -4933,7 +5450,7 @@ export function apply(ctx, config) {
       if (route === 'dispatch' && method === 'POST') {
         const body = await readJson(req)
         // 派发细节（存在性判定、去重、prompt）都在 dispatchToSession 里，单测直接调它。
-        const result = await dispatchToSession(ctx, state, body, req, { emit, liveTurns, liveAbort })
+        const result = await dispatchToSession(ctx, state, body, req, { emit, liveTurns, liveAbort, awaitPetTurn, turnOrigin, armEndFallback })
         netLog('dispatch-result', { status: result.status, usedSessionId: result.body?.usedSessionId ?? '' })
         return sendJson(res, result.status, result.body)
       }
@@ -5417,6 +5934,10 @@ export function apply(ctx, config) {
           running: Boolean(health?.ok),
           model: health?.model ?? ASR_MODEL,
           pid: health?.pid ?? null,
+          // 后端要报出来：mlx 没装成会静默退回 CPU whisper（慢一倍），只报 ready 看不出区别。
+          backend: health?.backend ?? null,
+          device: health?.device ?? null,
+          ...(health?.backend === 'openai-whisper' ? { slow: true } : {}),
           ...(ready ? {} : { hint: `可选：bash plugins/dsh-pet-voice/asr/setup.sh` }),
         })
       }

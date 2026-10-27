@@ -44,7 +44,18 @@ port_up() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 pid_alive() { [ -f "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null; }
 
 proxy_running() { pid_alive "$PROXY_PID" && port_up 8443; }
-tunnel_running() { pid_alive "$TUNNEL_PID"; }
+# 只看 pid 文件会骗人：ssh -R 可能活着但 pid 文件丢了（上次手工起的、或进程重启后没回写），
+# 那 status 就说「没跑」、keepalive 再起一个，结果 remote 8443 被占住、新连接立刻失败。
+# 所以 pid 文件失效时按命令行找活的 ssh -R，找到就把 pid 写回去（自愈），别重复起。
+tunnel_running() {
+  local p
+  p=$(cat "$TUNNEL_PID" 2>/dev/null)
+  if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then return 0; fi
+  p=$(pgrep -f "R 0.0.0.0:${PV_REMOTE_PORT}:127.0.0.1:8443" 2>/dev/null | head -1)
+  [ -n "$p" ] || return 1
+  mkdir -p "$RUN_DIR" && printf '%s\n' "$p" >"$TUNNEL_PID"
+  return 0
+}
 
 wait_for() { # wait_for <秒> <命令...>
   local n=$(( $1 * 5 )); shift
