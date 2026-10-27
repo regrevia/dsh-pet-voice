@@ -1,12 +1,12 @@
 {
-  "versionCode": 137,
-  "versionName": "0.9.67",
-  "size": 30026826,
-  "sha256": "9a6f2e01870c0eeb7b9290556463730d19ade021d079b8308b2f4c2a8e79e3df",
+  "versionCode": 138,
+  "versionName": "0.9.68",
+  "size": 30027270,
+  "sha256": "276e280bd6c60632aef834d30e0293976946d733d9edcde0f462200ea1a2573c",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.67/app-release.apk",
-  "notes": "连点两下只回一句话，不再叠一轮；按太短直接当误触",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.67/app-release.apk",
-  "publishedAt": "2026-10-27T14:15:32.658Z",
-  "promotedAt": "2026-10-27T14:15:34.346Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.68/app-release.apk",
+  "notes": "气泡卡片定高 68px，三行回复不再被裁；系统字号调大也不撑破卡片。",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.68/app-release.apk",
+  "publishedAt": "2026-10-27T15:13:24.337Z",
+  "promotedAt": "2026-10-27T15:13:26.089Z"
 }
