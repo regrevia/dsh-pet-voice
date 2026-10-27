@@ -125,3 +125,15 @@ for i in $(seq 1 30); do curl -sk -o /dev/null -H 'Connection: close' \
 
 - 两条负载脚本（bench / stress）**不能同时跑**，否则会往同一个安全会话排队，`delta` 会假涨到 20 s 级。锁文件 `local/pet-load.lock`，后到的直接 exit 3。
 - 量延迟期间不要有别的 agent 在同一个宿主上跑重活，宿主进程是共享的，会污染 `state` / `sessions` 那几项。
+
+## 气泡补记：0.9.70 游标修正 + 0.9.71–73 前台挂起（真机 15ca9736）
+
+- **游标只推进到自己搬过的那条**（0.9.70）：宿主 `cursor` 是整批尾巴，连发 >3 句时直接用它会让中间几句永久跳过。
+  5 连发实测：`气泡上屏 3 条 cursor=16` → 下一轮 `气泡上屏 2 条 cursor=18`，seq 全到。
+- **App 在前台时先挂起**（0.9.71+）：悬浮窗在 App 前台是 `GONE`，此时上屏看不见，`offerSay` 记 `pendingSay`
+  并只留最新一句；回桌面 250 ms 后 `回桌面补上屏`。真机：`05:20:48.999 气泡挂起 30 字` → `05:20:52.921 回桌面补上屏 30 字`。
+- **App 内文字回复也走气泡**（0.9.72+）：`HistoryActivity.onAssistant(isFinal)` 调
+  `FloatingPetService.sayToBubble(fullText)`，与宿主 say 共用 `offerSay`，不新增状态通道。
+- 日志口径（0.9.73）：`气泡上屏 N 条` 只统计真正上屏的；挂起单独一行，别再把挂起当成功证据。
+- 气泡视觉证据（release 包没有 WebView CDP，只能像素）：卡片带均值 45.4 vs 壁纸 157.2，
+  亮像素文字行集中在 y=1358–1385；卡片几何仍是 68 px 定高。

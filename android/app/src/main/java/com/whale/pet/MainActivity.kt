@@ -821,6 +821,7 @@ class MainActivity : Activity() {
 
             override fun onAssistant(fullText: String, isFinal: Boolean) {
                 runOnUiThread { replyView?.text = "我：$typed\n大肥鱼：$fullText" }
+                if (isFinal) FloatingPetService.sayToBubble(fullText)
             }
 
             override fun onSentence(sentence: String) {

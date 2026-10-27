@@ -840,3 +840,39 @@ adb logcat -d | grep "PetSprite: sprite" | tail -3
 在真机上至少要手工过一遍：装 APK → 授权麦克风/通知/悬浮窗 → 锁屏 30 分钟后再点悬浮窗 → 杀进程后重开 →
 重启手机后重开 → 切到其他 App 后说话还能不能被唤醒。任何一条失败，都属于「该机型未通过」，
 不要只贴模拟器截图当兼容性证明。
+
+## 23. 气泡：宿主 say 轮询、App 内文字回复、前台挂起（0.9.70 – 0.9.73 真机）
+
+悬浮窗里的气泡（`assets/pet/template.html` 的 `#bubble`）现在有两个来源，都汇总到
+`FloatingPetService.offerSay(text)` 这一个入口：
+
+| 来源 | 触发 | 说明 |
+|---|---|---|
+| 宿主 say 队列 | `GET /pet-voice/api/say?since=<cursor>`，1.5 s 一次（`SAY_POLL_MS`） | 主机/脚本说的话一句句落到气泡 |
+| App 内文字回复 | `HistoryActivity.onAssistant(isFinal)` / `MainActivity.onAssistant` → `FloatingPetService.sayToBubble(fullText)` | 在聊天页问完，回到桌面能看到完整回答 |
+
+`offerSay` 的两条分支：
+
+- **桌宠在跑、App 不在前台** → 直接 `say()` 上屏。
+- **App 自己在前台** → 悬浮窗此刻是 `View.GONE`（`applyAppForeground`），上屏等于白扔，所以只记 `pendingSay`
+  （只保留最新一句，旧的覆盖），日志 `PetSay: 气泡挂起 N 字（App 在前台，回桌面再上屏）`；
+  回到桌面（`on=false`）后 250 ms 补上屏，日志 `PetSay: 回桌面补上屏 N 字`。
+
+say 游标语义（0.9.70 修）：宿主 `GET say` 返回的 `cursor` 是**整批的尾巴**，手机一轮最多搬
+`SAY_MAX_PER_POLL = 3` 句；早期直接用宿主 cursor 会把没搬的中间几句永久跳过（实测 5 连发丢 seq 9、10）。
+现在只把游标推到自己真正取到的那条，连发 5 句实测 `气泡上屏 3 条 cursor=16` + `气泡上屏 2 条 cursor=18`。
+
+日志口径（0.9.73 修）：`气泡上屏 N 条` 不再把「挂起」算进去——挂起只留自己那行，避免把没上屏的样本当成功。
+
+真机验收（15ca9736 / 0.9.73，pid 20360）：
+
+```
+05:20:48.999 I PetSay : 气泡挂起 30 字（App 在前台，回桌面再上屏）   # POST seq=24
+05:20:52.921 I PetSay : 回桌面补上屏 30 字                          # input keyevent HOME 后 250ms 补
+```
+
+回桌面后 2.3 s 的整屏截图里，气泡卡片带（`(2730,1326)-(3164,1410)`）均值从壁纸的 157.2 掉到 45.4，
+亮像素文字行 21 行集中在 y=1358–1385 ⇒ 卡片在、字在，不是只有日志。
+
+气泡几何仍是定高：`#bubble` `height:68px`、`-webkit-line-clamp:3`、`bubH = 68`；
+`scripts/pet-size-check.sh` 12/12 次窗口 `594x462` 一致。

@@ -779,6 +779,7 @@ class HistoryActivity : Activity() {
                     adapter.live = fullText
                     adapter.notifyDataSetChanged()
                     scrollToBottom()
+                    if (isFinal) FloatingPetService.sayToBubble(fullText)
                 }
 
                 override fun onSentence(sentence: String) {

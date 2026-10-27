@@ -64,6 +64,11 @@ class FloatingPetService : Service() {
     private var web: WebView? = null
     private var params: WindowManager.LayoutParams? = null
 
+    /** App 自己在前台时悬浮窗是 GONE，这时候来的气泡先存着，等回到桌面再上屏。 */
+    @Volatile
+    private var appFg = false
+    private var pendingSay: String? = null
+
     /* ---------------- 显示方式：只在桌面 / 一直显示 ---------------- */
     /** home 模式下正在轮询前台应用（每 1200ms 一次）。 */
     private var homeWatchOn = false
@@ -226,6 +231,7 @@ class FloatingPetService : Service() {
     override fun onCreate() {
         super.onCreate()
         alive = true
+        inst = this
         cfg = PetSettings.load(this)
         client = PetClient { cfg }
         asr = NativeAsr(this)
@@ -376,6 +382,7 @@ class FloatingPetService : Service() {
     override fun onDestroy() {
         destroyed = true
         alive = false
+        if (inst === this) inst = null
         if (AppForeground.onChange != null) AppForeground.onChange = null
         stopContinuous("服务结束")
         stopSayPoll()
@@ -619,8 +626,7 @@ class FloatingPetService : Service() {
                         val o = items.optJSONObject(i) ?: continue
                         val text = o.optString("text").orEmpty().trim()
                         if (text.isNotEmpty()) {
-                            say(text)
-                            shown += 1
+                            if (offerSay(text)) shown += 1
                         }
                         val seq = o.optLong("seq", -1L)
                         if (seq > consumed) consumed = seq
@@ -719,6 +725,7 @@ class FloatingPetService : Service() {
     /** 自己的界面在前台时把悬浮窗收起，免得盖住对话页的字；同时设成不可触摸，别偷偷吃掉点击。 */
     private fun applyAppForeground(on: Boolean) {
         val v = root ?: return
+        appFg = on
         v.visibility = if (on) android.view.View.GONE else android.view.View.VISIBLE
         val p = params ?: return
         p.flags = if (on) {
@@ -727,6 +734,28 @@ class FloatingPetService : Service() {
             p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
         }
         runCatching { wm.updateViewLayout(v, p) }
+        // 在 App 里打字问的那句，回答落到桌面上再讲：等窗口真的重新可见再上屏。
+        if (!on) pendingSay?.let { text ->
+            pendingSay = null
+            Log.i("PetSay", "回桌面补上屏 ${text.length} 字")
+            main.postDelayed({ offerSay(text) }, 250L)
+        }
+    }
+
+    /**
+     * 气泡统一入口：前台时先挂起，回来再上屏，避免「问了看不见」或「回来看不到」。
+     * 返回 true 表示已经上屏，false 表示挂起或丢弃（日志里别把挂起算成上屏）。
+     */
+    private fun offerSay(text: String): Boolean {
+        val body = text.trim()
+        if (body.isEmpty() || destroyed) return false
+        if (appFg) {
+            pendingSay = body
+            Log.i("PetSay", "气泡挂起 ${body.length} 字（App 在前台，回桌面再上屏）")
+            return false
+        }
+        say(body)
+        return true
     }
 
     private fun setupWeb() {
@@ -2105,6 +2134,18 @@ class FloatingPetService : Service() {
     /** 本应用自己的页面在前台时把小人收起来；服务（含唤醒）继续活着。 */
     @Volatile
     var alive = false
+
+    /** 服务实例：App 里的文字轮次也让回复落到气泡上，和宿主 say 共用同一个入口。 */
+    @Volatile
+    private var inst: FloatingPetService? = null
+
+    /** 桌宠没在跑就什么都不做；在跑就按正常气泡时长上屏（App 在前台则挂起，回桌面再讲）。 */
+    fun sayToBubble(text: String) {
+        val s = inst ?: return
+        val body = text.trim()
+        if (body.isEmpty()) return
+        s.main.post { s.offerSay(body) }
+    }
 
         /** 开机/升级后只恢复悬浮窗 + 通知，不申请麦克风（Android 14+ 后台禁麦克风前台服务）。 */
         const val ACTION_RESTORE = "com.whale.pet.action.RESTORE"
