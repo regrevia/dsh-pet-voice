@@ -28,6 +28,7 @@ import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { makeClient, now, PET_HOME } from './lib/pet-http.mjs'
 import { acquireLoadLock } from './lib/pet-load-lock.mjs'
+import { resolveOrigin } from './lib/pv-base.mjs'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DOC_PATH = join(REPO_ROOT, 'docs', 'pet-stress.md')
@@ -41,7 +42,12 @@ const argOf = (name, fallback) => {
 }
 const hasFlag = (name) => args.includes(`--${name}`)
 
-const BASE = String(argOf('base', process.env.PET_BASE || 'http://127.0.0.1:50802')).replace(/\/$/, '')
+// 宿主端口每次启动都可能变，别写死：$PET_BASE → $PV_BASE → host-port.json → 挨个探。
+// 探不到就直说，别静默打到死端口上把「测不到」当成「很快」。
+// resolveOrigin 已经是「不带 /pet-voice」的宿主根：makeClient / 下面的 API 都会自己拼 /pet-voice，
+// 以前这里用 resolvePetBase（带 /pet-voice），拼出来是 /pet-voice/pet-voice/api → 404，
+// 又因为兜底逻辑把它报成「目标会话不在 /api/sessions 里」，看着像会话没了，其实是路径错。
+const BASE = String(argOf('base', process.env.PET_BASE || (await resolveOrigin()))).replace(/\/$/, '').replace(/\/pet-voice$/, '')
 const SESSION = argOf('session', 'session-9918aec4-df16-4fb7-93cb-5608db272a04')
 const N = Math.max(2, Number(argOf('n', '8')) || 8)
 const ONLY = String(argOf('only', 'all'))

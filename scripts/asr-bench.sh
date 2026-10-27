@@ -19,7 +19,13 @@ PY=${PY:-/Users/apple/.dsh/pet-voice/asr-venv/bin/python}   # 兼容旧用法：
 ASR_PY=${ASR_PY:-$PY}       # cold 模式拉起 worker 用的解释器（换 mlx 就指到装了 mlx 的 venv）
 BENCH_PY=${BENCH_PY:-$PY}   # 跑本基准自身的解释器（要 psutil；缺了杀不掉 worker、量不到 RSS）
 WORKER_URL=${WORKER_URL:-http://127.0.0.1:52399}
-HOST_URL=${HOST_URL:-http://127.0.0.1:50802/pet-voice/api/asr}
+# 宿主端口每次启动都可能变：优先 $HOST_URL，否则用 pv_base 现探（别写死 50802）。
+. "$(dirname "$0")/lib/pv-base.sh"
+if [ -z "${HOST_URL:-}" ]; then
+  base=$(pv_base) || { echo "找不到在跑的宿主 /pet-voice（先确认 DSH 开着、插件已启用）" >&2; exit 2; }
+  HOST_URL="$base/api/asr"
+fi
+export HOST_URL
 TOKEN_FILE=${TOKEN_FILE:-$HOME/.dsh/pet-voice/token}
 OUT=${OUT:-/tmp/asr-bench-$(date +%H%M%S).json}
 
@@ -35,7 +41,7 @@ from pathlib import Path
 VENV_PY = os.environ.get("ASR_PY") or os.environ.get(
     "PY", "/Users/apple/.dsh/pet-voice/asr-venv/bin/python")
 WORKER_URL = os.environ.get("WORKER_URL", "http://127.0.0.1:52399")
-HOST_URL = os.environ.get("HOST_URL", "http://127.0.0.1:50802/pet-voice/api/asr")
+HOST_URL = os.environ["HOST_URL"]  # 外层 pv_base 现探后导出，这里不再写死端口
 TOKEN_FILE = os.environ.get("TOKEN_FILE", os.path.expanduser("~/.dsh/pet-voice/token"))
 INSTALLED = os.path.expanduser("~/.dsh/plugins/dsh-pet-voice/asr/asr-worker.py")
 # cold 模式默认起「装好的那份」；换后端/换解释器只影响这一次测量。

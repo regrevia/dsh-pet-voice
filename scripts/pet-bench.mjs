@@ -25,6 +25,7 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { acquireLoadLock } from './lib/pet-load-lock.mjs'
+import { resolveOrigin } from './lib/pv-base.mjs'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const PET_HOME = join(homedir(), '.dsh', 'pet-voice')
@@ -41,10 +42,17 @@ const argOf = (name, fallback) => {
 }
 const hasFlag = (name) => args.includes(`--${name}`)
 
-const BASE = String(argOf('base', process.env.PET_BASE || 'http://127.0.0.1:50802')).replace(/\/$/, '')
+// 宿主端口每次启动都可能变，别写死：$PET_BASE → $PV_BASE → host-port.json → 挨个探。
+// 探不到就直说，别静默打到死端口上把「测不到」当成「很快」。
+// resolveOrigin 已经是「不带 /pet-voice」的宿主根：makeClient / 下面的 API 都会自己拼 /pet-voice，
+// 以前这里用 resolvePetBase（带 /pet-voice），拼出来是 /pet-voice/pet-voice/api → 404，
+// 又因为兜底逻辑把它报成「目标会话不在 /api/sessions 里」，看着像会话没了，其实是路径错。
+const BASE = String(argOf('base', process.env.PET_BASE || (await resolveOrigin()))).replace(/\/$/, '').replace(/\/pet-voice$/, '')
 const API = `${BASE}/pet-voice/api`
 const N = Math.max(1, Number(argOf('n', '10')) || 10)
 const SESSION = argOf('session', 'session-9918aec4-df16-4fb7-93cb-5608db272a04')
+/** 会话 id 归一：宿主两种写法（session-<uuid> / <uuid>）都当同一个。 */
+const bare = (id) => String(id ?? '').replace(/^session-/, '')
 const SAMPLE = argOf('asr-sample', ASR_SAMPLE)
 const TEXT = argOf('text', '用五个字回我：基准测试通过。')
 const WRITE = hasFlag('write')
@@ -270,10 +278,16 @@ async function benchDispatch() {
         body: JSON.stringify({ text: TEXT, sessionId: SESSION, requestId: rid }),
       }, 20_000)
       const tAck = now()
-      const start = await sse.waitFrame((f) => f.event === 'start' && (f.data?.origin ?? '') !== 'desktop', 90_000)
-      const delta = start ? await sse.waitFrame((f) => f.event === 'delta', 90_000) : null
-      const final = await sse.waitFrame((f) => f.event === 'final', 120_000)
-      const end = final ? await sse.waitFrame((f) => f.event === 'end', 120_000) : null
+      // SSE 会同时收到别的会话的事件（`*` 广播，桌面端在别的会话里聊天就会串进来），
+      // 所以每类帧都必须按 sessionId 认领自己那一轮，只看 event 名会把别人的 delta 算成自己的。
+      const mine = (event) => (f) =>
+        f.event === event &&
+        bare(f.data?.sessionId) === bare(SESSION) &&
+        (f.data?.origin ?? '') !== 'desktop'
+      const start = await sse.waitFrame(mine('start'), 90_000)
+      const delta = start ? await sse.waitFrame(mine('delta'), 90_000) : null
+      const final = await sse.waitFrame(mine('final'), 120_000)
+      const end = final ? await sse.waitFrame(mine('end'), 120_000) : null
       rows.push({
         status: r.status,
         queued: Boolean(r.body?.queued),

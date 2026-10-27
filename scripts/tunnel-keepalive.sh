@@ -23,15 +23,20 @@ say() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >>"$LOG_FILE"; }
 # （pid 文件归 pv-public.sh 管，这里不再自己记一份，免得两边对不上。）
 relay_status() { bash "$ROOT/scripts/pv-public.sh" status 2>/dev/null || true; }
 
-relay_alive() {
-  local out; out="$(relay_status)"
-  printf '%s' "$out" | grep -q '8443 反代 在跑' && printf '%s' "$out" | grep -q 'ssh -R 在跑'
-}
-
+# 判据走 pv-public.sh 的机器可读出口（code / proxy），别 grep 人话。
+# 之前这里 sed 的是「公网 HTTP N」，可健康时那行文案是「公网 … 通（401 = 鉴权生效，正常）」，
+# 永远匹配不上 → healthy 恒假 → 看门狗每 20s 就「拉起」一次隧道，白折腾还伤链路。
 healthy() {
   local code
-  code=$(relay_status | sed -n 's/.*公网 HTTP \([0-9]*\).*/\1/p' | tail -1)
-  [ "$code" = "401" ] || [ "$code" = "200" ]
+  # pv-public.sh code：任何 HTTP 状态码都说明链路通（401 = 鉴权生效）；000 = 真不通。
+  # 用 || true 兜住 set -e：这里返回非 0 是正常分支，不是脚本错误。
+  code=$(bash "$ROOT/scripts/pv-public.sh" code 2>/dev/null) || true
+  [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+relay_alive() {
+  [ "$(bash "$ROOT/scripts/pv-public.sh" proxy 2>/dev/null)" = "ok" ] &&
+    bash "$ROOT/scripts/pv-public.sh" status 2>/dev/null | grep -q 'ssh -R 在跑'
 }
 
 ensure() {
