@@ -1,8 +1,7 @@
 {
   "name": "dsh-pet-voice",
   "version": "0.1.13",
-  "private": true,
-  "description": "手机端语音宠物：像素鲸鱼娘 + 唤醒词 + 语音对话 + 项目切换，直接驱动本机 DSH 会话（复用其 agent preset 人设）。",
+  "description": "手机端语音宠物：像素鲸鱼娘 + 唤醒词 + 语音对话 + 项目切换，直接驱动本机 DSH 会话。",
   "type": "module",
   "engines": {
     "node": ">=22.15.0"
@@ -31,7 +30,36 @@
     "client.js",
     "cordis.patch.yml",
     "index.js",
+    "panel.mjs",
+    "lan.mjs",
+    "public.mjs",
+    "guardPath.mjs",
+    "selftest.mjs",
     "public/",
-    "selftest.mjs"
+    "tts/",
+    "asr/"
+  ],
+  "author": {
+    "name": "regrevia",
+    "url": "https://github.com/regrevia"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/regrevia/dsh-pet-voice.git",
+    "directory": "plugins/dsh-pet-voice"
+  },
+  "homepage": "https://github.com/regrevia/dsh-pet-voice#readme",
+  "bugs": {
+    "url": "https://github.com/regrevia/dsh-pet-voice/issues"
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "pet",
+    "voice",
+    "asr",
+    "tts",
+    "android"
   ]
 }
