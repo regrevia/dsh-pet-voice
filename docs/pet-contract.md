@@ -1,4 +1,4 @@
-# 手机端 ↔ `dsh-pet-voice` 接口契约（v1.6，2026-10-26；v1.6 工具行改成桌面那种「标签 · 详情」一行（协议不变）；v1.5 对话页去掉分割线；v1.4 旁听材料改走隐藏提示词、`/api/session` 加 `peek`、转录不再给注入上下文；v1.3 加 dispatch 旁听材料，协议不变；v1.2 加 `/api/render`、朗读剥离、人设/长度/气泡配置）
+# 手机端 ↔ `dsh-pet-voice` 接口契约（v1.8，2026-10-26；v1.8 面板「音色」接成默认音色（不再只存不用）、`/api/state` 下发 `pet.wakeName` 与 `settings.voice`、`/api/tts` 的 voice 优先级按实现改正；v1.7 加 `/api/upload`、`/api/file`（视频 + Range）、`/api/diag`、dispatch `attachments`/`requestId`/`queued`/`origin`、错误码总表、面板配置生效时机；v1.6 工具行改成桌面那种「标签 · 详情」一行（协议不变）；v1.5 对话页去掉分割线；v1.4 旁听材料改走隐藏提示词、`/api/session` 加 `peek`；v1.3 加 dispatch 旁听材料；v1.2 加 `/api/render`、朗读剥离、人设/长度/气泡配置）
 
 这份文档是**唯一**的跨端约定。背景：`dsh-pet-voice` 要作为独立插件脱离出来，插件与手机 App
 各自演进——所以只允许按本文档约定的 HTTP 接口互相说话，**App 不得依赖插件内部实现**
@@ -45,6 +45,18 @@
 
 `GET /api/pair`（见下）**故意不回 token**：它只回答「手机上该敲哪个地址」，配对仍靠扫码或手输。
 
+### 设备上限与 429（v1.7 补）
+
+每条 `/api/*` 请求都会把调用方记成一台活跃设备（按 token 指纹）。超过面板「设备上限」时
+**比任何路由都早**返回：
+
+```json
+{"ok":false,"code":"device-limit","maxDevices":2,"error":"这台电脑最多连 2 台设备，先在面板里移出一台"}
+```
+
+- `maxDevices` 是当下生效的上限，随时可从面板改（下一次请求就按新值判）。
+- App 收到 429 `device-limit` 应提示「去面板移出一台」，**不要退避重试**：重试只会继续 429。
+
 ### 不许进文档/日志的东西
 
 `~/.dsh/pet-voice/xiaoai.json` 的 `urlSecret`、`keyId`、小爱签名密钥，以及任何 `?k=` 里的值。
@@ -52,9 +64,9 @@
 
 ---
 
-## 2. core 端点（15 个，v1.2 加 `/api/render`）
+## 2. core 端点（v1.7 加 `/api/upload`、`/api/file`；v1.2 加 `/api/render`）
 
-手机端只依赖下面 14 个端点（第 4 节另有 core/experimental 分级）。`/api/workspaces`、`/api/switch`、`/api/command` 是 v1.1 新增，App 从 v1.1 起依赖它们。
+手机端只依赖下面这些端点（第 4 节另有 core/experimental 分级）；v1.7 起附件走 `POST /api/upload` 落盘 + `GET|HEAD /api/file` 取字节，两节都属 core。`/api/workspaces`、`/api/switch`、`/api/command` 是 v1.1 新增，App 从 v1.1 起依赖它们。
 每个端点都给出：鉴权、请求、响应、错误。
 
 ### GET /api/state
@@ -70,6 +82,7 @@
 ```jsonc
 {
   "ok": true,
+  "pluginVersion": "1.7.0",       // App 用它判断插件够不够新
   "tokenHint": "a1b2c3d4",        // string，token 前 8 位，不含完整 token
   "linkHint": "在电脑上执行 cat ... 可查看完整配对链接里的 token", // string，给用户看的提示
   "projects": [                   // Workspace[]，可能为空数组
@@ -90,8 +103,14 @@
   "current": null,                // Session|null，仅用于界面展示（用户最近在用的那只，已排除宠物专属会话）
   "dispatchTarget": "string|null",// 派发默认落点（宠物专属会话 id），恒等于 ~/.dsh/pet-voice/pet-session.json 里那只
   "remembered": { "<workspaceId 或 path>": "<sessionId>" }, // object，project→session 记忆
+  "peek": { "title": "…" },       // object|null，5 分钟内旁听过别的会话时给个标题，过期 null
+  "turns": { "<sessionId>": { "since": 1690000000000 } }, // 只有「正在跑」的会话在里面，空对象 = 全空闲
   "petSession": { /* object|null，pet-session.json 原文，实验性 */ },
-  "pet": { "name": "鲸灵", "wakeWords": ["鲸灵", "小鲸", "嗨鲸灵", "hey whale", "hello whale"] },
+  "pet": {
+    "name": "鲸灵",              // string，插件 config.petName
+    "wakeName": "大肥鱼",        // string，面板填的唤醒词（默认「大肥鱼」），App 可当自己的默认唤醒词
+    "wakeWords": ["鲸灵", "小鲸", "嗨鲸灵", "hey whale", "hello whale"] // string[]，宿主侧常量，不含 wakeName
+  },
   "xiaoai": {                     // 实验性（只用于发现，不要依赖）
     "endpoint": "/pet-voice/api/xiaoai",
     "selftest": "/pet-voice/api/xiaoai/selftest",
@@ -105,6 +124,8 @@
 
 > 约定：`current` **不参与派发**，App 不要把 `current.id` 当成派发落点；要看落点用
 > `dispatchTarget`，派发时也可以显式传 `sessionId`。
+>
+> `POST /api/state` 也存在（写面板配置后回同一份快照），但那是面板用的；**手机侧只读 GET**。
 
 ### GET /api/pair
 
@@ -153,12 +174,14 @@
 
 ```jsonc
 {
-  "text": "帮我看下 Pet 项目的 git status",  // string，必填，trim 后不能为空
-  "sessionId": "session-…"                  // string，可选；缺省 = dispatchTarget（宠物专属会话），显式给了就必须存在
+  "text": "帮我看下 Pet 项目的 git status",     // string，trim 后使用；**可以只带附件不带文字**
+  "attachments": ["/abs/a.jpg", "/abs/b.mp4"], // string[]，可选，绝对路径，最多 6 个（见下）
+  "sessionId": "session-…",                   // string，可选；缺省 = dispatchTarget（宠物专属会话），显式给了就必须存在
+  "requestId": "r-8f3c1a"                     // string，可选；截前 12 位，120 s 内同 id 只落一轮
 }
 ```
 
-**实现只认 `text` + `sessionId`**，没有 `project` / `preset` 字段（任务书里问了这三个，答案是没有）：
+**实现只认 `text` / `attachments` / `sessionId` / `requestId`**，没有 `project` / `preset` 字段（任务书里问了这三个，答案是没有）：
 选项目走 `POST /api/new`（`workspaceId` / `projectPath`），选人设用 `POST /api/new` 的 `preset`。
 
 > 另外：`dispatch` 的 body 建议带 `X-Pet-TZ` 请求头会透传成 `clientTimeZone`（可选，不填也行）。
@@ -166,13 +189,24 @@
 响应 200（宿主 ≥1.2 s 内就返回结果时）：
 
 ```jsonc
-{ "ok": true, "accepted": true, "sessionId": "session-…", "value": null }
+{
+  "ok": true, "accepted": true,
+  "sessionId": "session-…",
+  "usedSessionId": "session-…",   // 宿主实际落点，排查「发出去没进那只会话」只看它
+  "value": null,                  // 宿主 prompt 的返回值直传
+  "attachments": 2,               // number，实际带上路的附件个数（不是列表）
+  "queued": false                 // true = 电脑端那轮还在跑，这句排在它后面
+}
 ```
 
 响应 202（宿主还在跑，最常见的快路径）：
 
 ```jsonc
-{ "ok": true, "accepted": true, "sessionId": "session-…" }
+{
+  "ok": true, "accepted": true,
+  "sessionId": "session-…", "usedSessionId": "session-…",
+  "attachments": 2, "queued": false
+}
 ```
 
 **本接口不返回 turn id**；要知道这一轮什么时候开始/结束，看 `/api/stream` 的
@@ -180,11 +214,33 @@
 
 错误：
 
-- `400 {"ok":false,"error":"text 为空"}`
-- `404 {"ok":false,"error":"…"}` 显式 `sessionId` 不存在
-- `503 {"ok":false,"error":"宿主缺少 sessionController"}` 宿主服务缺失
-- `503 {"ok":false,"error":"…"}` 取默认会话失败
+- `400 {"ok":false,"error":"text 为空"}` —— 既没文字也没附件
+- `400 {"ok":false,"error":"最多带 6 个附件"}` / `附件路径为空` / `附件路径必须是绝对路径：<path>` / `附件不存在：<path>`
+- `404 {"ok":false,"error":"会话不存在：<sessionId>"}` 显式 `sessionId` 不存在 —— App 见到应清掉本地钉住的指针
+- `502 {"ok":false,"error":"<宿主 prompt 的原始报错>"}` 派发过程中宿主抛错
+- `503 {"ok":false,"error":"宿主缺少 sessionController"}` / `专属会话不可用` —— **绝不回退到「界面当前会话」**
 - `401 {"ok":false,"error":"unauthorized"}`
+
+#### 附件（v1.7：图片 + 视频）
+
+- 上限 **6 个**，超了直接 400，**不截断、不静默丢弃**。
+- 每个路径必须是**绝对路径**且**当次存在**；任一条不合格，整句在受理前就 400（不会「发一半」）。
+- 派发正文 = 用户原话 + 每附件一行，格式固定 `[图片] <绝对路径>` / `[视频] <绝对路径>`；
+  多段之间空行分隔。类型只看扩展名：`mp4` / `mov` / `m4v` → 视频，其余 → 图片。
+- 附件行**只给模型看**，不上屏：手机气泡里仍只有用户原话。
+- 视频不做抽帧、不转码：宿主只把路径写进提示词，模型要看内容自己调工具读。
+
+#### origin、queued 与「掐上一轮」（v1.7 写清）
+
+- `origin` = 「这一帧属于哪一轮」，取值 `pet`（手机派的）或 `desktop`（电脑上跑的），
+  随 `start/delta/tool/message/final/end` 帧下发。**App 见到非 `pet` 的整帧丢弃**，
+  所以 `queued` 帧故意不带 `origin`，只带 `{"ahead":"desktop"}`。
+- 上一轮也是手机派的：**直接掐掉**（主人再开口就是要新的那句），并立刻清活记号 + 把收尾兜底压到 2 s，
+  不让手机干等满 90 s。
+- 上一轮是电脑端的：**不掐**，交给宿主排队，回执 `queued:true`。
+  电脑上正干的活不能因为手机插一句就没了。
+- `200` vs `202` 的唯一区别：宿主在 1.2 s 内有没有返回 `value`。两种都是「已受理」。
+- `turn/end` 是**唯一**终止信号；`final` 只是「这一轮最后一句」，后面可能还有 `tool`/`end`。
 
 #### 旁听：只读看一眼同项目里另一只（v1.4 重做，插件行为，不改协议）
 
@@ -292,13 +348,15 @@ SSE 的请求-响应等价物，公网兜底用。
   "ok": true,
   "sessionId": "session-…",
   "transport": "auto", // auto | poll，跟随插件面板「传输方式」；poll = 别开 SSE，直接轮询
-  "frames": [ { "seq": 12, "event": "delta", "data": { "text": "…" } } ], // 最多 200 帧，按 seq 升序
-  "cursor": 12,       // number，回执用的游标；下轮原样带回来
-  "done": false       // boolean，本批里出现 end/final 时为 true
+  "frames": [ { "seq": 12, "event": "delta", "data": { "text": "…", "origin": "pet" } } ], // 最多 200 帧，按 seq 升序
+  "cursor": 12,       // number，本批**最后一帧**的 seq；积压超 200 帧也不会跳帧
+  "more": false,      // true = 还有没发完的帧，立刻再拉一次，别等到下一轮空转
+  "gap": false,       // true = 400 帧环形缓冲把中间某帧挤掉了，明确告诉客户端「你漏了」
+  "done": false       // 只有本批真的出现 end 帧才为 true；final 不算终止
 }
 ```
 
-`frames[].event` / `data` 与 SSE 事件表完全一致（同一套帧）。
+`frames[].event` / `data` 与 SSE 事件表完全一致（同一套帧），包括 `origin` 与 `queued`。
 
 错误：`503 {"ok":false,"error":"…"}`（取默认会话失败）、`401`
 
@@ -500,18 +558,19 @@ App 侧的固定流程（照这条线走，别自创）：
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `text` | string | 是 | 待合成文本，`trim` 后非空，**≤600 字** |
-| `preset` | string | 否 | 四个档位 key 之一；**给了就优先**，档位自带 voice/rate/pitch |
-| `voice` | string | 否 | `voices[].id` 之一，默认 `zh-CN-XiaoyiNeural`；给了 preset 时 preset 的 voice 覆盖它 |
+| `preset` | string | 否 | 档位 key 之一（见 `/api/tts/voices` 的 `presets`）；给了就带上档位自带的 voice/rate/pitch |
+| `voice` | string | 否 | `voices[].id` 之一。**优先级（v1.8 按实现写）**：`voice` 参数 > `preset` 自带 voice > 面板存的 `voice`（须在白名单）> 常量默认 `zh-CN-XiaoyiNeural` |
 | `rate` | string | 否 | 形如 `+6%` / `-4%` / `0%`，服务端只认 `^[+-]?\d{1,3}%$`，否则回落 |
 | `pitch` | string | 否 | 形如 `+8Hz` / `-12Hz`，只认 `^[+-]?\d{1,3}Hz$`，否则回落 |
 
-响应 200：`content-type: audio/mpeg`，`cache-control: no-store`，`x-accel-buffering: no`，body 是完整 MP3。
+响应 200：`content-type: audio/mpeg`，`cache-control: private, max-age=86400`，`x-accel-buffering: no`，
+`x-tts-cache: hit|miss`（宿主有小句缓存，命中时毫秒级返回），body 是完整 MP3。
 
 错误：
 
 - `400 {"ok":false,"error":"text 为空"}`
 - `400 {"ok":false,"error":"text 过长（N > 600 字）","maxChars":600}`
-- `400 {"ok":false,"error":"未知音色档位：xxx","presets":["whale","genki","gentle","cool"]}`
+- `400 {"ok":false,"error":"未知音色档位：xxx","presets":["whale","genki","gentle","cool","sweet","dongbei"]}`
 - `400 {"ok":false,"error":"未知音色：xxx","voices":["zh-CN-XiaoyiNeural", …]}`
 - `503 {"ok":false,"error":"神经语音还没装好","hint":"在电脑上运行 plugins/dsh-pet-voice/tts/setup.sh…"}`
 - `502 {"ok":false,"error":"神经语音合成失败","hint":"<stderr 尾部>"}`
@@ -533,11 +592,13 @@ App 侧的固定流程（照这条线走，别自创）：
   "ready": true,                 // boolean，venv 与合成脚本都在才算装好
   "default": "zh-CN-XiaoyiNeural",// string
   "defaultPreset": "whale",      // string
-  "presets": [                   // 四档，顺序固定；这是 core 的 key 列表
-    { "id": "whale",  "label": "鲸灵 · 清亮少女（默认）", "voice": "zh-CN-XiaoyiNeural",  "rate": "+6%",  "pitch": "+8Hz"  },
-    { "id": "genki",  "label": "元气 · 语速快、调门高",   "voice": "zh-CN-XiaoyiNeural",  "rate": "+16%", "pitch": "+22Hz" },
-    { "id": "gentle", "label": "温柔 · 慢一点、低一点",   "voice": "zh-CN-XiaoxiaoNeural","rate": "-4%",  "pitch": "-4Hz"  },
-    { "id": "cool",   "label": "清冷 · 更慢、更低",       "voice": "zh-CN-XiaoxiaoNeural","rate": "-10%", "pitch": "-12Hz" }
+  "presets": [                   // 六档，顺序固定；前四个 key 是 core（App 必需），后两个是加档
+    { "id": "whale",   "label": "鲸灵 · 清亮少女（默认）", "voice": "zh-CN-XiaoyiNeural",           "rate": "+6%",  "pitch": "+8Hz"  },
+    { "id": "genki",   "label": "元气 · 语速快、调门高",   "voice": "zh-CN-XiaoyiNeural",           "rate": "+16%", "pitch": "+22Hz" },
+    { "id": "gentle",  "label": "温柔 · 慢一点、低一点",   "voice": "zh-CN-XiaoxiaoNeural",         "rate": "-4%",  "pitch": "-4Hz"  },
+    { "id": "cool",    "label": "清冷 · 更慢、更低",       "voice": "zh-CN-XiaoxiaoNeural",         "rate": "-10%", "pitch": "-12Hz" },
+    { "id": "sweet",   "label": "软糯 · 更高更慢（撒娇）", "voice": "zh-CN-XiaoyiNeural",           "rate": "-6%",  "pitch": "+24Hz" },
+    { "id": "dongbei", "label": "东北俏皮 · 自带喜感",     "voice": "zh-CN-liaoning-XiaobeiNeural", "rate": "+10%", "pitch": "+10Hz" }
   ],
   "voices": [                    // 7 个白名单音色（edge-tts zh-CN）
     { "id": "zh-CN-XiaoyiNeural", "label": "小艺 · 活泼少女（默认）" }, /* … */
@@ -546,7 +607,7 @@ App 侧的固定流程（照这条线走，别自创）：
 }
 ```
 
-四档的差异（就是 `voice` + `rate` + `pitch` 三元组，不是四个不同音色）：
+各档的差异（就是 `voice` + `rate` + `pitch` 三元组，不是六个不同音色）：
 
 | key | voice | rate | pitch | 听感 |
 | --- | --- | --- | --- | --- |
@@ -554,11 +615,14 @@ App 侧的固定流程（照这条线走，别自创）：
 | `genki` | `zh-CN-XiaoyiNeural` | `+16%` | `+22Hz` | 快而高、元气 |
 | `gentle` | `zh-CN-XiaoxiaoNeural` | `-4%` | `-4Hz` | 慢一点、低一点 |
 | `cool` | `zh-CN-XiaoxiaoNeural` | `-10%` | `-12Hz` | 更慢更低、清冷 |
+| `sweet` | `zh-CN-XiaoyiNeural` | `-6%` | `+24Hz` | 软糯撒娇 |
+| `dongbei` | `zh-CN-liaoning-XiaobeiNeural` | `+10%` | `+10Hz` | 东北话、俏皮 |
 
 错误：`401`
 
-> 与 Android `Settings.kt` 的 `PRESETS` 对齐：`whale / genki / gentle / cool` 四个 key 必须
-> 完全一致（`scripts/contract-check.mjs` 会去正则读 `Settings.kt` 并断言）。
+> 与 Android `Settings.kt` 的 `PRESETS` 对齐：前四个 key `whale / genki / gentle / cool` 必须
+> 与服务端 `presets` 的前四项逐位一致（App 只认这四档）；服务端后续可以往后追加档位
+> （现在多了 `sweet` / `dongbei`），`scripts/contract-check.mjs` 按「前四项对齐 + 四档必备 key 都在」断言。
 
 ### GET /api/xiaoai
 
@@ -576,6 +640,116 @@ cookie 也不会带自定义 header，它的门禁是「URL 里的 `?k=` + MIAI-
 错误：签名/`?k=` 不对时由 `xiaoai.mjs` 自己返 4xx（形状见该模块），不影响 App。
 
 ---
+
+### POST /api/upload（v1.7 新增，core：附件）
+
+`POST /pet-voice/api/upload?name=<文件名提示>`，**body 是原始字节，不是 multipart**。
+
+鉴权：Cookie 或 Bearer
+
+#### 类型判定：content-type 定扩展名，文件头定真假
+
+| content-type | 落盘扩展名 | kind |
+| --- | --- | --- |
+| `image/jpeg` / `image/png` / `image/webp` / `image/gif` | `jpg` / `png` / `webp` / `gif` | `image` |
+| `video/mp4` | `mp4` | `video` |
+| `video/quicktime` | `mov` | `video` |
+| `video/x-m4v` / `video/m4v` | `m4v` | `video` |
+
+- 文件头校验：图片认 PNG / GIF / WebP / JPEG magic；视频认 ISO-BMFF 容器族
+  （偏移 4 的 box 类型 ∈ `ftyp|moov|mdat|free|wide|skip|pnot`），**不按 brand 白名单**
+  （新录的 `.mov` 也得过）。小于 12 字节认不出类型 → 415。
+- 声明与实际不一致 → `415 文件内容和类型对不上（声明为视频）` / `（声明为图片）`。
+
+#### 上限与落盘
+
+| kind | 上限 | 超限文案 |
+| --- | --- | --- |
+| `image` | 12 MiB | `图片太大（上限 12 MB）` |
+| `video` | 200 MiB | `视频太大（上限 200 MB）` |
+
+先看 `content-length`，超了直接 413（不收字节）；读的时候再按 kind 限额兜一层。
+落盘优先 `<项目根>/.pet-uploads/`（自动写进 `.git/info/exclude`，不污染 `git status`），
+项目根不可写时退到 `~/.dsh/pet-voice/uploads/`。
+文件名 = `<name 前缀>-<yyyyMMdd-HHmmss>-<6 位随机>.<ext>`；`?name=` 只当前缀，不参与路径。
+
+响应 200：
+
+```jsonc
+{ "ok": true, "path": "/abs/.pet-uploads/x.mp4", "name": "x.mp4", "bytes": 8388608, "kind": "video" }
+```
+
+`path` 直接拿去 `/api/dispatch` 的 `attachments`。
+
+错误：
+
+- `400 文件是空的` / `读不到请求体`
+- `413` 按 kind 的超限文案
+- `415 只支持图片（JPG / PNG / WebP / GIF）和视频（MP4 / MOV / M4V）`
+- `415 认不出这个文件的格式（…）`
+- `415 文件内容和类型对不上（声明为视频|图片）`
+- `500 附件没存下来`（两个目录都写不了）
+
+### GET|HEAD /api/file（v1.7 新增，core：附件）
+
+`GET|HEAD /pet-voice/api/file?path=<绝对路径>`。
+
+鉴权：Cookie 或 Bearer
+
+校验顺序：空 → `400 path 为空`；非绝对 → `400 path 必须是绝对路径`；含 `..` 段 →
+`400 path 不能包含 ..`；扩展名不在媒体白名单 → `415`；不存在 → `404 文件不存在`；
+不是普通文件 → `404 不是普通文件`；超 kind 上限 → `413`。
+
+响应头（200 与 206 都有）：
+
+```
+content-type: <媒体类型>
+accept-ranges: bytes
+cache-control: private, max-age=600
+x-content-type-options: nosniff
+content-length: <本次字节数>
+```
+
+- **HEAD 不回 body，但头要全**（含 `content-length` / `accept-ranges`），App 用它探大小、决定能不能续播。
+- 无 `Range` → `200` 全量。图片整块读；视频走 `createReadStream`，不整块进内存。
+- 单段 `Range` → `206` + `content-range: bytes <s>-<e>/<size>`；支持 `bytes=-N` 后缀写法。
+- 多段 `Range` → 不解析，回 `200` 全量（不实现 multipart/byteranges）。
+- `Range` 超界 → `416`，body `{"ok":false,"error":"Range 超出文件大小"}`，
+  头带 `content-range: bytes */<size>`（播放器靠它知道文件到底多大）。
+- 不支持 `If-Range`：不看日期/ETag，只要 Range 合法就给 206。
+
+### GET /api/diag（v1.7 新增，experimental）
+
+现场诊断，只读，不改状态。
+
+鉴权：Cookie 或 Bearer
+
+```jsonc
+{
+  "ok": true,
+  "streams": ["session-…", "*"],                     // 当前挂着的 SSE 订阅键
+  "events": [ { "at": 1690000000000, "kind": "dispatch", "data": { } } ] // NET_LOG 最后 200 条
+}
+```
+
+`kind` ∈ `dispatch` / `dispatch-interrupt` / `dispatch-cancel` / `dispatch-queued` / `poll` /
+`stream-open` / `stream-close` / `upload` / `peek` / `turn-start` …
+不含 token，正文只截前若干字。
+
+### 错误码总表（v1.7）
+
+| 码 | 含义 | 典型接口 |
+| --- | --- | --- |
+| 400 | 参数/请求体不合法（空文本、附件路径、`path` 非法、空文件） | dispatch / upload / file |
+| 401 | 没通过 cookie/Bearer 鉴权 | 全部 `/api/*` |
+| 404 | 会话不存在 / 文件不存在 / 不是普通文件 / 未知接口 | dispatch / file / 任意 |
+| 413 | 附件或文件超出该 kind 上限 | upload / file |
+| 415 | 类型不支持 / 内容与声明不一致 / 认不出格式 | upload / file |
+| 416 | `Range` 超界，带 `content-range: bytes */<size>` | file |
+| 429 | 设备数超上限（`code:"device-limit"`） | 全部 `/api/*` |
+| 500 | 未捕获异常，body 带 `route` 字段 | 全部 |
+| 502 | 宿主 prompt / 切换项目失败 | dispatch / switch / command |
+| 503 | 宿主缺 `sessionController`、专属会话不可用、TTS 未就绪 | dispatch / poll / tts |
 
 ### POST /api/render（v1.2 新增，core）
 
@@ -625,6 +799,7 @@ App 只读 `/api/state` 里的 `settings`：
     "maxWords": "短",      // 短 | 中 | 长（默认 短）
     "bubble": true,        // App 开口气泡的默认值
     "transport": "auto",   // auto | poll（只在网络挡 SSE 时才需要手动锁轮询）
+    "voice": "zh-CN-XiaoyiNeural", // 面板「音色」：App 没自己选音色时按它发 voice=<这个值>
     "hasPersona": false    // 是否配过自定义人设（App 只做展示/开关用，别读正文）
   }
 }
@@ -637,13 +812,59 @@ App 只读 `/api/state` 里的 `settings`：
 | `persona` | string（≤2000 字，保留换行） | `""` | 自定义人设，挂进该会话的 system prompt（隐藏），不进对话正文、不逐条重复 |
 | `maxWords` | `短` / `中` / `长` | `短` | 派发 prompt 的 `【输出要求】` 行（80 字 / 300 字 / 可展开） |
 | `bubble` | boolean | `true` | App 是否默认显示对话气泡 |
-| `wakeName` | string | `大肥鱼` | 唤醒词 |
+| `wakeName` | string | `大肥鱼` | 面板填的唤醒词，通过 `/api/state.pet.wakeName` 下发；宿主不做唤醒匹配（匹配在 App 里），App 拿它当默认值 |
 | `transport` | `auto` / `poll` | `auto` | `auto` = App 先开长连接、拿不到 hello 再转轮询；`poll` = 直接锁轮询，不开流 |
 | `mode` | `lan` / `domain` / `server` | `lan` | 配对链接用的传输方式；`server` 是作者体验档，开源版默认不用 |
 | `customUrl` | string（http(s)） | `""` | `domain` 档的地址，插件自动补到 `/pet-voice/` |
+| `maxDevices` | number | `2` | 最多同时绑几台设备；超了 `/api/*` 直接 429 |
+| `voice` | string | `zh-CN-XiaoyiNeural` | 面板「音色」（edge 音色 id），**当默认音色用**：`/api/tts` 没收到 `voice` 参数、`preset` 也没带 voice 时就用它合成；同时通过 `/api/state.settings.voice` 下发给 App |
+| `ttsProvider` | `edge` / `local` / `http` | `edge` | 语音来源，每次 `/api/tts` 现读 |
+| `ttsUrl` | string | `""` | `http` 档的接口地址 |
+| `ttsVoice` | string | `""` | `local` / `http` 档的音色 |
+| `peek` | `ask` / `always` / `off` | `ask` | 旁听档位，每次 dispatch 现读 |
+| `newReasoning` | string | `""` | 新建会话用哪档推理；**只影响之后新建的会话** |
 
 POST 任一子集即落盘并回完整快照（同 GET）。非法值 `400`：`输出长度只能选短、中、长`、
 `模式只能选服务器、局域网或自建域名`、`自定义地址要是 http(s) 开头`、`传输方式只能选自动或轮询`。
+
+### 面板改完什么时候生效（v1.7 README 节）
+
+面板「保存」= `POST /pet-voice/panel/state` → 写 `~/.dsh/pet-voice/panel.json`（mode 0600）。
+**宿主没有「启动时快照配置」的缓存：`getPanelConfig()` 每次都重新读文件。**
+所以「要不要重载插件」不是问题；问题是**哪个请求会去读它**，以及 App 什么时候再拉一次。
+
+#### 下一次请求就生效（不用刷新、不用重连、不用重载）
+
+| 面板项 | 生效点 |
+| --- | --- |
+| 人设 `persona` | 每次 `/api/dispatch` 现读并 `syncHiddenPrompt` 重写隐藏提示 → **下一句话**就带上 |
+| 长度档 `maxWords` | 同上，随隐藏提示词一起重写 |
+| 旁听 `peek` | 每次 dispatch 现读 → 下一句话 |
+| 语音来源 `ttsProvider` / 地址 `ttsUrl` / 本机音色 `ttsVoice` | 每次 `/api/tts` 现读 → 下一句合成 |
+| 音色 `voice`（v1.8） | 每次 `/api/tts` 现读，作为「没点名 voice、preset 也没带 voice」时的默认音色 → 下一次不带档位的合成立刻用它；App 只要先读 `/api/state.settings.voice` 再按它发 `voice`，App 侧也立刻生效 |
+| 唤醒词 `wakeName`（v1.8） | 通过 `/api/state.pet.wakeName` 下发 → App 下次拉 state 就能读到；宿主本身不做唤醒匹配 |
+| 设备上限 `maxDevices` | 每次请求 `touchDevice` 执行；改了之后多出来的设备下一次请求就 429 |
+| 传输方式 `transport` | `/api/poll` 每次现读（回给 App 的 `transport` 字段）；`/api/state.settings.transport` 也现读。App 下一次 poll/state 就按新值走 |
+| 气泡 `bubble` | 只通过 `/api/state.settings.bubble` 下发 → App 下次拉 state 生效 |
+| 新会话推理档 `newReasoning` | 只在**新建会话**时用 → 影响之后新建的会话，已在的会话不变 |
+
+#### 需要重新扫码 / 重新配对（不是重载插件）
+
+| 面板项 | 原因 |
+| --- | --- |
+| 连法 `mode`、自建域名 `customUrl` | `panelState()` 每次现算 `modes` 和 `pairingUrl`，所以**新生成的二维码/链接立刻是新地址**；但已配对的那台手机把旧地址存在自己那边，要切到新地址得重新扫一次（或重新配对） |
+
+#### 面板上已无「改了没反应」的字段（v1.8）
+
+v1.7 时 `voice` / `wakeName` 属于只落盘回显的假开关；v1.8 已接上：
+`voice` 进 `/api/tts` 的默认音色，`wakeName` 进 `/api/state.pet.wakeName`。
+面板里其余字段都落在上面两张表（即时生效 / 需重新扫码）里，没有留死控件。
+
+#### 例外：小爱技能配置
+
+`~/.dsh/pet-voice/xiaoai.json` 在插件 `apply()` 时读一次并建 handler（`xiaoaiHandler`），
+**运行期改这个文件必须重载插件才生效**（面板 `xiaoai.configured` 也据此）。
+这是唯一一处「改文件必须重载」的配置。
 
 ### 语音指令流程（v1.2 补齐）
 
@@ -685,6 +906,7 @@ POST 任一子集即落盘并回完整快照（同 GET）。非法值 `400`：`�
 | --- | --- | --- |
 | 鉴权：Cookie 名 `pkv_<前8位>`、Bearer、401 body | core | 401 body 固定 `{"ok":false,"error":"unauthorized"}` |
 | `state.ok` / `state.tokenHint` / `state.pet.name` / `state.pet.wakeWords` | core | |
+| `state.pet.wakeName` / `state.settings.voice`（v1.8） | core | 面板值下发：App 没自己选唤醒词/音色时当默认 |
 | `state.projects[].id/title/path` | core | 数组可能为空 |
 | `state.presets[].id/title` | core | |
 | `state.sessions[].id/title/cwd/workspaceId/updatedAt` | core | `id` 非空；最多 20 条 |
@@ -696,6 +918,16 @@ POST 任一子集即落盘并回完整快照（同 GET）。非法值 `400`：`�
 | `state.xiaoai.*` | experimental | 发现用 |
 | `pair.ok/publicBase/source/tunnelAt/alive/note` | core | `alive`/`note` 只在 `tunnel` 档出现；`note` 文案可能微调，别做等值判断 |
 | `dispatch.ok/accepted/sessionId` | core | 200/202 都可能，两种都要接受 |
+| `dispatch.usedSessionId` | core | 实际落点 |
+| `dispatch.attachments` | core | number，实际带上的附件个数 |
+| `dispatch.queued` | core | true = 排在电脑端那轮之后 |
+| 附件上限（图 12 MB / 视频 200 MB）、`[图片]`/`[视频]` 行格式 | core | 改上限或格式必须升版本号 |
+| `upload.ok/path/name/bytes/kind` | core | `path` 可直接当 `attachments` 用 |
+| `file` 的 `accept-ranges` / `206` / `content-range` / `416` + `bytes */size` | core | 断点续播与视频拖动依赖这三样 |
+| `poll.more` / `poll.gap` / `poll.transport` | core | App 据此决定「立刻再拉」还是「漏帧」 |
+| `state.settings.*` | core | 面板快照，App 当默认值用 |
+| `state.turns` | experimental | 只有「正在跑」的会话会出现 |
+| `diag.streams/events` | experimental | 排障用，字段随意改 |
 | `dispatch.value` | experimental | 宿主返回值直传 |
 | `stream` 事件 `hello/start/delta/final/end/tool/say/error` + 上表 payload | core | 新增事件名必须容忍（忽略未知事件） |
 | `poll.frames[].seq/event/data`、`poll.cursor`、`poll.done` | core | 未知 `event` 忽略 |

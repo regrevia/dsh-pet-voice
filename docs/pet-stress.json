@@ -1,0 +1,196 @@
+{
+  "at": "2026-10-27 01:16:43",
+  "base": "auto（scripts/lib/pv-base.* 现探，DSH 端口每次启动会变）",
+  "n": 8,
+  "checks": 29,
+  "failed": 0,
+  "checksList": [
+    {
+      "name": "serial：每轮 200/202 且 start→final→end 齐全",
+      "ok": true,
+      "detail": "8/8 轮完整"
+    },
+    {
+      "name": "serial：跑完记号清零",
+      "ok": true,
+      "detail": "25 ms 内清空"
+    },
+    {
+      "name": "concurrent：8 条同时点全部被受理（无 500/超时）",
+      "ok": true,
+      "detail": "status=200,200,200,200,200,200,200,200"
+    },
+    {
+      "name": "concurrent：挤掉旧轮之后最后一轮仍能跑完",
+      "ok": true,
+      "detail": "收到 start→end"
+    },
+    {
+      "name": "concurrent：并发后不残留 live 记号",
+      "ok": true,
+      "detail": "6099 ms 内清空"
+    },
+    {
+      "name": "mixed：真会话并发仍被受理",
+      "ok": true,
+      "detail": "status=200,200,200,200"
+    },
+    {
+      "name": "mixed：不存在会话返回 404 且不是 500",
+      "ok": true,
+      "detail": "status=404,404,404,404"
+    },
+    {
+      "name": "mixed：错误路径不把记号挂死",
+      "ok": true,
+      "detail": "1091 ms 内清空"
+    },
+    {
+      "name": "cancel#0：派发后被受理且 cancel 回 200",
+      "ok": true,
+      "detail": "dispatch=200 cancel=200"
+    },
+    {
+      "name": "cancel#1：派发后被受理且 cancel 回 200",
+      "ok": true,
+      "detail": "dispatch=200 cancel=200"
+    },
+    {
+      "name": "cancel#2：派发后被受理且 cancel 回 200",
+      "ok": true,
+      "detail": "dispatch=200 cancel=200"
+    },
+    {
+      "name": "cancel#3：派发后被受理且 cancel 回 200",
+      "ok": true,
+      "detail": "dispatch=200 cancel=200"
+    },
+    {
+      "name": "cancel：取消后仍能完整聊下一轮",
+      "ok": true,
+      "detail": "收到 end"
+    },
+    {
+      "name": "cancel：取消后记号清零",
+      "ok": true,
+      "detail": "3 ms 内清空"
+    },
+    {
+      "name": "interrupt：新轮挤掉旧轮，每次都还能跑完",
+      "ok": true,
+      "detail": "[{\"first\":200,\"second\":200,\"end\":true},{\"first\":200,\"second\":200,\"end\":true},{\"first\":200,\"second\":200,\"end\":true},{\"first\":200,\"second\":200,\"end\":true}]"
+    },
+    {
+      "name": "interrupt：交替打断后不残留",
+      "ok": true,
+      "detail": "5 ms 内清空"
+    },
+    {
+      "name": "poll：40 个并发高频请求全部 200",
+      "ok": true,
+      "detail": "p95=99ms max=99ms（分类 max：`poll-backlog` 97ms、`state` 99ms、`sessions` 99ms、`poll-wait` 99ms）"
+    },
+    {
+      "name": "poll：状态/轮询并发下响应不超过 3s",
+      "ok": true,
+      "detail": "max=99ms"
+    },
+    {
+      "name": "reconnect：连上后能收到 start",
+      "ok": true,
+      "detail": "收到 start"
+    },
+    {
+      "name": "reconnect：断线重连后靠 /poll 能追到 end",
+      "ok": true,
+      "detail": "收到 end"
+    },
+    {
+      "name": "reconnect：断线不留死连接/记号",
+      "ok": true,
+      "detail": "1 ms 内清空"
+    },
+    {
+      "name": "收尾：全部压测结束后目标会话无残留记号",
+      "ok": true,
+      "detail": "1 ms 内清空"
+    },
+    {
+      "name": "收尾：SSE 流表回到压测前的量",
+      "ok": true,
+      "detail": "前 0 → 后 0"
+    },
+    {
+      "name": "收尾：其它会话的 live 记号（桌面端同时在用，仅记录）",
+      "ok": true,
+      "detail": "前 0 → 后 0"
+    },
+    {
+      "name": "HTTP：全程没有 5xx",
+      "ok": true,
+      "detail": "5645 个请求"
+    },
+    {
+      "name": "HTTP：全程没有超时/连不上",
+      "ok": true,
+      "detail": "0 个"
+    },
+    {
+      "name": "日志：压测期间没有 end-hold 阶梯",
+      "ok": true,
+      "detail": "turn.log 新增 38 行，本会话 0 个 end-hold"
+    },
+    {
+      "name": "日志：压测期间没有服务端异常行",
+      "ok": true,
+      "detail": "无"
+    },
+    {
+      "name": "日志：有派发流水（证明压测真的打到了宿主）",
+      "ok": true,
+      "detail": "新增 38 行 / 54s"
+    }
+  ],
+  "phases": [
+    {
+      "name": "serial",
+      "ms": 16391,
+      "rounds": 8,
+      "complete": 8
+    },
+    {
+      "name": "concurrent",
+      "ms": 11465,
+      "statuses": [
+        200,
+        200,
+        200,
+        200,
+        200,
+        200,
+        200,
+        200
+      ]
+    },
+    {
+      "name": "mixed",
+      "ms": 5231
+    },
+    {
+      "name": "cancel",
+      "ms": 5081
+    },
+    {
+      "name": "interrupt",
+      "ms": 11976
+    },
+    {
+      "name": "poll",
+      "ms": 101
+    },
+    {
+      "name": "reconnect",
+      "ms": 4000
+    }
+  ]
+}

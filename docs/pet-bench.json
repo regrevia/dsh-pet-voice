@@ -1,0 +1,16 @@
+{
+  "generator": "scripts/pet-bench.mjs",
+  "at": "2026-10-27 01:17:44",
+  "base": "auto（scripts/lib/pv-base.* 现探，DSH 端口每次启动会变）",
+  "n": 10,
+  "asrWall": 484.7,
+  "asrServer": 481,
+  "ack": 549.6,
+  "signal": 538.3,
+  "start": 538.4,
+  "delta": 1714.3,
+  "final": 1719.1,
+  "end": 1719.1,
+  "ttsSynth": 1256.1,
+  "ttsCache": 0.6
+}
