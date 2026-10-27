@@ -141,8 +141,12 @@ class FloatingPetService : Service() {
     /** 同一句提示的最小间隔：够用户看完一轮，又不至于连点两下就憋着不说。 */
     private val HINT_MIN_GAP = 2000L
 
-    /** 宿主播报队列的拉取间隔；一次最多上屏几条（多了会把气泡挤成走马灯）。 */
-    private val SAY_POLL_MS = 1500L
+    /**
+     * 宿主播报队列的拉取间隔；一次最多上屏几条（多了会把气泡挤成走马灯）。
+     * 这个间隔就是「宿主 POST 之后最多干等多久才上屏」：0.9.74 用 1500ms（实测平均 659ms、
+     * 最差 1247ms），0.9.75 收到 700ms 把干等上限砍掉一半。
+     */
+    private val SAY_POLL_MS = 700L
     private val SAY_MAX_PER_POLL = 3
 
     /**
