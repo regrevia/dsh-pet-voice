@@ -115,7 +115,7 @@ https://xxx-xxx.trycloudflare.com/pet-voice/?k=<token>
 | GET | `selfcheck` | 只读探针；`?prompt=<sessionId>` 时额外跑一次真实 LLM 往返（会计费） |
 | GET | `tts/voices` | `{ok, ready, default, defaultPreset, presets[], voices[], hint?}`；`presets` 是 4 个形象档位（见下）；`ready:false` 时页面回退系统语音 |
 | GET | `tts?text=&preset=` | 按面板「语音来源」出声，直出 `audio/mpeg`：微软在线走 `edge-tts`（需先跑 `tts/setup.sh`），这台电脑走系统 `say`，自己的接口转发到你填的地址；`preset` 解析成 voice+rate+pitch，也可显式传 `&voice=&rate=+16%&pitch=+22Hz` 覆盖；未知档位 → 400；对应来源没备好 → 503 并说清缺什么 |
-| POST | `asr` | 请求体就是 44 字节头 + 16 kHz 单声道 PCM 的 WAV；转发给常驻 worker（`asr/asr-worker.py` → `127.0.0.1:52399`，默认 `large-v3-turbo` + `beam_size=5`）→ `{ok, text, ms}`，响应头带 `X-Asr-Ms`。**识别结果命中最近 5 分钟内播报过的句子时回 `{ok:true,text:"",echo:true}`**（手机外放把自己说的话录回来，不能当成用户发言，见下）。空音频/坏音频 → 400，超过 4 MB → 413；worker 没装 → 503 + `hint`；worker 被杀了下次请求会自动拉起并完成本次识别（冷启动 11 s，预算 25 s） |
+| POST | `asr` | 请求体就是 44 字节头 + 16 kHz 单声道 PCM 的 WAV；转发给常驻 worker（`asr/asr-worker.py` → `127.0.0.1:52399`，默认 `large-v3-turbo` + `temperature=0`/`beam_size=1`）→ `{ok, text, ms}`，响应头带 `X-Asr-Ms`。**识别结果命中最近 5 分钟内播报过的句子时回 `{ok:true,text:"",echo:true}`**（手机外放把自己说的话录回来，不能当成用户发言，见下）。空音频/坏音频 → 400，超过 4 MB → 413；worker 没装 → 503 + `hint`；worker 被杀了下次请求会自动拉起并完成本次识别（冷启动 11 s，预算 25 s） |
 | GET | `asr` | 只读探针：`{ok, ready, running, model, pid?}`。`ready:false` 说明缺 venv 或 worker 脚本，`hint` 里给缺的路径 |
 | GET | `update` | 更新通道（兜底那一档）：读 `~/.dsh/pet-voice/update/latest.json` → `{ok, versionCode, versionName, size, sha256, file, notes, publishedAt, minPlugin?, url}`；还没发布过 → `versionCode:0` + 可读 `hint` |
 | GET / HEAD | `../download/<file>.apk` | 下载已发布的 APK（**同样要 cookie**）；支持 `Range`（206 / 越界 416），`HEAD` 只回头，路径穿越 → 400/404，非 GET/HEAD → 405 |
@@ -123,8 +123,9 @@ https://xxx-xxx.trycloudflare.com/pet-voice/?k=<token>
 ### 语音识别（ASR）细节
 
 `asr/asr-worker.py` 是常驻的 openai-whisper 进程，只监听回环；没跑 `asr/setup.sh` 就不启动，识别在手机上做。默认模型 `large-v3-turbo`（1.5 GB，权重缓存在
-`~/.cache/whisper/`），`beam_size=5`：base 在中文上会稳定错字（「语音识别服务」→「余音时别服务」）并偶尔吐繁体，
-turbo 用同一批句子全对，只多花半秒。
+`~/.cache/whisper/`），`temperature=0` + `beam_size=1`：base 在中文上会稳定错字（「语音识别服务」→「余音时别服务」）并偶尔吐繁体，
+turbo 用同一批句子全对。温度回退阶梯（0→1.0）和 beam 5 已实测拖慢识别（中位 2179→1499 ms，最慢 9497→1829 ms）且更容易幻觉，已去掉。
+装了 mlx-whisper 的机器会自动优先走 mlx，失败回落到 CPU。
 
 两条兜底都在 worker 里做，命中就回空文本（App 侧表现是这一轮没听见，不产生假用户消息、不触发假回复）：
 

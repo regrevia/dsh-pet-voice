@@ -200,6 +200,7 @@ window.__ModuleLoader__.load({
       persona: s.persona ?? '',
       maxWords: s.maxWords ?? '短',
       peek: s.peek ?? 'ask',
+      newReasoning: s.newReasoning ?? '',
       bubble: s.bubble !== false,
     })
 
@@ -243,6 +244,16 @@ window.__ModuleLoader__.load({
       { id: 'ask', label: '问进展时' },
       { id: 'always', label: '每一句' },
       { id: 'off', label: '关' },
+    ]
+
+    /** App 新建会话默认用哪一档推理；'' = 跟随桌面端。 */
+    const REASONING_OPTIONS = [
+      { id: '', label: '跟随桌面端' },
+      { id: 'off', label: '关闭' },
+      { id: 'minimal', label: '最低' },
+      { id: 'low', label: '低' },
+      { id: 'medium', label: '中' },
+      { id: 'high', label: '高' },
     ]
 
     const MAXWORD_OPTIONS = [
@@ -716,6 +727,21 @@ window.__ModuleLoader__.load({
                 },
               },
               PEEK_OPTIONS.map((item) => h('option', { key: item.id, value: item.id }, item.label)),
+            ),
+          ),
+          paramRow(
+            '新会话推理',
+            h(
+              'select',
+              {
+                value: draft.newReasoning,
+                style: { ...S.input, width: 140 },
+                onChange: (e) => {
+                  setDraft((d) => ({ ...d, newReasoning: e.target.value }))
+                  save({ newReasoning: e.target.value })
+                },
+              },
+              REASONING_OPTIONS.map((item) => h('option', { key: item.id, value: item.id }, item.label)),
             ),
           ),
           paramRow(

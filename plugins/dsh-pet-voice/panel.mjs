@@ -48,11 +48,15 @@ const DEFAULT_CONFIG = {
   ttsVoice: '',
   // 旁听：手机上问进展时只读看一眼同项目里另一只的活，默认只在问进展时看
   peek: 'ask',
+  // App 里新建的会话默认用哪一档推理：'' = 跟随桌面端（不干预）
+  newReasoning: '',
 }
 
 const TRANSPORTS = ['auto', 'poll']
 /** 旁听频率：ask = 问进展才看；always = 每句都带上；off = 不看。 */
 const PEEK_MODES = ['ask', 'always', 'off']
+/** 推理强度档位；'' 表示跟随桌面端设置，不写会话级选择。 */
+const REASONING_IDS = ['', 'off', 'minimal', 'low', 'medium', 'high']
 const TTS_PROVIDER_IDS = ['edge', 'local', 'http']
 export function normalizeTransport(value) {
   const v = String(value ?? '').trim()
@@ -304,6 +308,9 @@ function readPanelConfig() {
     peek: PEEK_MODES.includes(String(raw?.peek ?? '').trim())
       ? String(raw.peek).trim()
       : DEFAULT_CONFIG.peek,
+    newReasoning: REASONING_IDS.includes(String(raw?.newReasoning ?? '').trim())
+      ? String(raw.newReasoning).trim()
+      : DEFAULT_CONFIG.newReasoning,
   }
 }
 
@@ -347,6 +354,11 @@ export function setPanelConfig(patch) {
     const mode = String(input.peek ?? '').trim()
     if (!PEEK_MODES.includes(mode)) throw new Error('旁听只能选关、问进展时或每一句')
     next.peek = mode
+  }
+  if (input.newReasoning !== undefined) {
+    const level = String(input.newReasoning ?? '').trim()
+    if (!REASONING_IDS.includes(level)) throw new Error('推理强度只能选关闭、最低、低、中、高或跟随桌面端')
+    next.newReasoning = level
   }
   if (input.bubble !== undefined) next.bubble = input.bubble !== false
   if (input.transport !== undefined) {
@@ -450,6 +462,7 @@ export function panelState({ origin, pairing } = {}) {
     ttsUrl: config.ttsUrl,
     ttsVoice: config.ttsVoice,
     peek: config.peek,
+    newReasoning: config.newReasoning,
   }
 }
 

@@ -1820,16 +1820,21 @@ async function presetRowsCached(ctx, ttlMs = PRESET_ROWS_TTL) {
  * limit 条补投影缓存（标题 / 轮数），避免一次读上千个缓存文件。
  * 宿主没提供 controller 时退化成扫投影缓存目录（同样只按 mtime 取前 limit 条）。
  */
-async function browseSessions(ctx, query, liveTurns) {
+async function browseSessions(ctx, query, liveTurns, opts = {}) {
   const projectId = String(query?.projectId ?? '').trim()
   const limit = clampLimit(query?.limit)
   const before = toMs(query?.before)
   const byPath = projectIdByPath(workspaceRows(ctx))
   const isRunning = (id) => liveTurnRunning(liveTurns, id)
-  const rows = await sessionRowsCached(ctx)
+  // 列表页（App 冷启动、开历史页）走 SWR：先给缓存行、后台刷新，不让用户等宿主 list()。
+  // 派发/路由解析这类「必须准」的调用仍然走严格路径（默认）。
+  const rows = opts.soft === true ? await sessionRowsSoft(ctx) : await sessionRowsCached(ctx)
 
   if (rows.length) {
-    const picked = []
+    // 先只做便宜的过滤和排序（只碰 row 字段），再按「最近活跃」顺序懒加载投影：
+    // 宿主里可能堆着上千条会话，逐条 statSync+JSON.parse 才是这接口真正的耗时（实测 10 并发
+    // 叠到 2.5–3.4 s）。只算到够 limit+1 条为止，每请求的磁盘活从 O(全部) 降到 O(limit)。
+    const candidates = []
     for (const row of rows) {
       const id = String(row.id ?? '')
       if (!id) continue
@@ -1837,29 +1842,29 @@ async function browseSessions(ctx, query, liveTurns) {
       // 不带 projectId 时只列有项目归属的会话：手机上是「进项目看历史」，
       // 散落在 /private/tmp 的临时会话没有归属，列出来只会让人困惑。
       if (projectId ? projectIdOf !== projectId : !projectIdOf) continue
-      const meta = projectCacheOf(id)
-      const title = String(row.title ?? '') || meta.title || ''
-      // 开了没聊的空壳（无标题、0 轮）在手机列表里就是一串「未命名」，直接不列。
-      if (!title && (meta.turns ?? 0) === 0) continue
       const updatedAt = toMs(row.updatedAt)
       if (before && updatedAt >= before) continue
-      picked.push({ id, updatedAt, projectIdOf, cwd: String(row.cwd ?? ''), title })
+      candidates.push({ id, row, updatedAt, projectIdOf })
     }
-    picked.sort((a, b) => b.updatedAt - a.updatedAt)
-    const sliced = picked.slice(0, limit + 1)
-    const hasMore = sliced.length > limit
-    const sessions = sliced.slice(0, limit).map((row) => {
-      const meta = projectCacheOf(row.id)
-      return {
-        id: row.id,
-        title: row.title || meta.title || '',
-        projectId: row.projectIdOf,
-        cwd: row.cwd || meta.cwd || '',
-        updatedAt: row.updatedAt || meta.updatedAt || 0,
+    candidates.sort((a, b) => b.updatedAt - a.updatedAt)
+    const picked = []
+    for (const cand of candidates) {
+      if (picked.length > limit) break
+      const meta = projectCacheOf(cand.id)
+      const title = String(cand.row.title ?? '') || meta.title || ''
+      // 开了没聊的空壳（无标题、0 轮）在手机列表里就是一串「未命名」，直接不列。
+      if (!title && (meta.turns ?? 0) === 0) continue
+      picked.push({
+        id: cand.id,
+        title,
+        projectId: cand.projectIdOf,
+        cwd: String(cand.row.cwd ?? '') || meta.cwd || '',
+        updatedAt: cand.updatedAt || meta.updatedAt || 0,
         turns: meta.turns ?? 0,
-        running: isRunning(row.id),
-      }
-    })
+      })
+    }
+    const hasMore = picked.length > limit
+    const sessions = picked.slice(0, limit).map((row) => ({ ...row, running: isRunning(row.id) }))
     return {
       ok: true,
       sessions,
@@ -2048,6 +2053,12 @@ export const __dispatchInternals = {
   readPetSessionFile,
   petWorkspaceName,
   newSessionRoute,
+  // 单测用：同一进程里连跑多个用例时，「会话+原句 2.5s 去重」会把后一个用例吞成 deduped，
+  // 表现就是本该 202/取消的用例拿回 200。用例之间清一次，去重本身不动（线上照样生效）。
+  resetDedupe: () => {
+    DISPATCH_SEEN.clear()
+    TEXT_SEEN.clear()
+  },
 }
 
 /** 宿主列表缓存的单测入口（见 test/state-rows-cache.test.mjs）。 */
@@ -5424,6 +5435,7 @@ export function apply(ctx, config) {
                 before: url.searchParams.get('before') ?? '',
               },
               liveTurns,
+              { soft: true },
             ),
           )
         } catch (error) {

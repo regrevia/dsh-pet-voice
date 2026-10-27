@@ -11,6 +11,10 @@ process.env.DSH_PET_VOICE_PET_SESSION = petFile
 
 const { __dispatchInternals: D } = await import('../index.js')
 
+// 每个用例前清一次「会话+原句 2.5s 去重」：这些用例故意复用同一句文本，
+// 不清的话后一个用例会被前一个的去重记号吞成 deduped（去重是线上行为，不改）。
+test.beforeEach(() => D.resetDedupe())
+
 const PET_PATH = '/tmp/pet-lab'
 const ACTIVE = 'session-74575c14-ef72-45c0-8d6e-44e1fc0010d8'
 const PINNED = 'session-f389c442-7926-4ab0-beba-db6aadfbbfca'
@@ -20,7 +24,7 @@ const fakeReq = { headers: {} }
 
 /** 宿主替身：workspace 有专属项目；list() 可以故意漏掉会话（就是这次 bug 的场景）。 */
 function host({ rows = [], prompt = async () => ({ ok: true }), create = async () => ({ sessionId: 'session-created-1' }), get } = {}) {
-  const calls = { prompt: [], create: [], cancel: [], emit: [] }
+  const calls = { prompt: [], create: [], cancel: [], emit: [], ended: [] }
   const ctx = {
     get: (name) => {
       if (name === 'workspaceRegistry') return { list: () => [{ id: 'ef76a38a-8d4f-40e0-8e7c-f05734c1178a', title: D.petWorkspaceName(), path: PET_PATH }] }
@@ -36,7 +40,14 @@ function host({ rows = [], prompt = async () => ({ ok: true }), create = async (
       return undefined
     },
   }
-  const deps = { emit: (...args) => calls.emit.push(args), liveTurns: new Map(), liveAbort: new Map() }
+  const deps = {
+    emit: (...args) => calls.emit.push(args),
+    liveTurns: new Map(),
+    liveAbort: new Map(),
+    awaitPetTurn: new Map(),
+    turnOrigin: new Map(),
+    armEndFallback: (id, reason, graceMs) => calls.ended.push({ id, reason, graceMs }),
+  }
   return { ctx, deps, calls }
 }
 
@@ -110,16 +121,39 @@ test('专属会话被 list() 漏掉时沿用绑定，不重建', async () => {
   assert.equal(calls.create.length, 0)
 })
 
-test('③ 上一轮不是自己派的（有 live 标记但没有 abort）→ 先请宿主取消，再派新的一句', async () => {
+test('③ 电脑那轮在跑 → 不取消它，手机这句排队（回执带 queued）', async () => {
   writePet({ workspaceId: 'ef76a38a-8d4f-40e0-8e7c-f05734c1178a', cwd: PET_PATH, sessionId: PINNED })
   const { ctx, deps, calls } = host({ rows: [{ id: PINNED, title: '宠物', cwd: PET_PATH }] })
-  // 宿主里这条会话正在跑（比如用户在电脑上直接发的），但我们没有它的 AbortController。
+  // 宿主里这条会话正在跑，且那一轮是电脑上敲的（没有我们的 abort、来源标成 desktop）。
+  // 以前这里会 controller.cancel 把电脑上的活掐掉，主人看到的就是「手机这句没进队列，
+  // 电脑那边也不出结果」。现在只排队，不动别人的轮次。
   deps.liveTurns.set(PINNED, Date.now())
+  deps.turnOrigin.set(PINNED, 'desktop')
   const result = await D.dispatchToSession(ctx, { preset: '' }, { text: '说点别的', sessionId: PINNED }, fakeReq, deps)
   assert.equal(result.status, 200)
-  assert.equal(calls.cancel.length, 1, '没有自己的 abort 时必须请宿主取消当前轮')
-  assert.equal(calls.cancel[0].sessionId, PINNED)
-  assert.equal(calls.prompt.length, 1, '取消之后照常派新的一句')
+  assert.equal(calls.cancel.length, 0, '电脑那轮不能取消')
+  assert.equal(result.body.queued, true, '回执要告诉手机这句排在电脑那轮后面')
+  assert.equal(calls.prompt.length, 1, '照常派新的一句，让它排在队里')
+  const queuedFrame = calls.emit.find(([sid, event]) => sid === PINNED && event === 'queued')
+  assert.ok(queuedFrame, '要推一帧 queued，手机才知道是排队而不是在跑')
+  assert.equal(queuedFrame[2]?.origin, undefined, 'queued 帧不能带 origin：带了会被手机当成电脑那轮的帧丢掉')
+})
+
+test('③b 上一轮是手机派的但没留 abort → 仍然取消，避免手机自己排在自己后面', async () => {
+  writePet({ workspaceId: 'ef76a38a-8d4f-40e0-8e7c-f05734c1178a', cwd: PET_PATH, sessionId: PINNED })
+  const { ctx, deps, calls } = host({ rows: [{ id: PINNED, title: '宠物', cwd: PET_PATH }] })
+  deps.liveTurns.set(PINNED, Date.now())
+  deps.turnOrigin.set(PINNED, 'pet')
+  const result = await D.dispatchToSession(ctx, { preset: '' }, { text: '说点别的', sessionId: PINNED }, fakeReq, deps)
+  assert.equal(result.status, 200)
+  assert.equal(calls.cancel.length, 1, '自己派的上一轮要取消')
+  assert.equal(result.body.queued, false)
+  // 取消之后必须自己销账：否则 liveTurns 里这只永远活着，收尾兜底 90s→180s→5min 不敢发 end，
+  // 手机就卡在「处理中」（turn.log 里那串 end-hold held=90000ms/180012ms/270012ms 就是它）。
+  assert.equal(deps.liveTurns.has(PINNED), false, '取消后 liveTurns 要清掉')
+  assert.equal(calls.ended.length, 1, '取消后要主动安排收尾')
+  assert.equal(calls.ended[0].reason, 'interrupted')
+  assert.equal(calls.ended[0].graceMs, 2000)
 })
 
 test('④ 上一轮是自己派的 → 用自己的 abort 掐，不再额外取消', async () => {
@@ -134,4 +168,7 @@ test('④ 上一轮是自己派的 → 用自己的 abort 掐，不再额外取�
   assert.equal(result.status, 200)
   assert.equal(aborted, true, '自己的 abort 必须真的触发')
   assert.equal(calls.cancel.length, 0, '有 abort 就不该再取消')
+  assert.equal(deps.liveTurns.has(PINNED), false, '掐掉之后 liveTurns 也要清掉')
+  assert.equal(calls.ended.length, 1, '掐掉之后要主动安排收尾')
+  assert.equal(calls.ended[0].graceMs, 2000)
 })
