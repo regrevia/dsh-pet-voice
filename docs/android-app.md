@@ -1952,3 +1952,33 @@ App 这边：运行条写「引导中」，这一轮照常计时（不按「排�
 - 现在 `mergeHost()` 末尾统一按宿主序号排（`q` 升序），本地还没对上序号的行（`q=0`）按时间排在最末。
 - 实测（0.9.134 debug 真机，重启 App 进「对话」）：顺序恢复正常
   `看图` + 蓝色 320×200 缩略图 → 回复「看到了，320×200 纯蓝色…」→ 两张旧图 → 「用一句话说说现在几点」→ 回复「现在是 10 月 29 日凌晨 2 点 01 分…」，并且自动停在最底部。
+
+## 23.38 面板的配对链接连不上（0.9.135 / 插件 0.1.35）
+
+现象：桌面面板「连上手机」给的链接（`http://42.193.189.240/pet-voice/?k=…`）在 App 里扫码或粘贴，
+一律被拒：扫码提示「二维码内容认不出（既不是配对链接也不是令牌）」，手打地址提示「地址无效：公网必须 https://」。
+
+- 两个原因叠在一起：
+  1. App（0.9.134 及以前）：`PetSettings.normalizeBase()` 对明文 `http://` 只放行本机/局域网
+     （localhost、`.local/.lan/.home`、`192.168.*`、`10.*`、`172.16–31.*`），公网 IP 直接返回空串 →
+     `PetConfig.parsePairPayload()` 拿到空 base → 整条链接判成「认不出」。自建服务器没备案就签不出证书，
+     面板给的必然只能是 `http://`，于是这条配对路径对自建域名/服务器**完全不可用**。
+  2. 插件（0.1.34 及以前）：`probeTunnel()` 不管基址是什么协议都用 `httpsRequest`，对 `http://` 的入口
+     必然握手失败 → `/api/pair` 回 `alive:false` +「隧道域名可能已过期（cloudflared 重启会换域名）」，
+     面板自己先把这条路标成死的。
+- 修法（都只放开「用户亲手配对」这一个口子）：
+  - App：新增持久化白名单 `plaintext_hosts`（只存 host，逗号分隔）。扫码/粘贴/JSON 三种配对负载
+    遇到公网 `http://` 时，`parsePairLink()` 先把 host `rememberPlaintext()` 再重解析一次；手打「电脑地址」
+    仍然走严格 `normalizeBase()`，公网明文不会被顺手放进来。
+  - `PetSettings.load()` 读盘时与内存里的白名单**取并集**：`verify()` 里先 `load()` 再 `save()`，
+    否则这次 `load()` 会把刚确认的 host 冲掉（第一版就踩了这个坑：令牌写进去了、`base_url` 是空的）。
+  - 插件：`probeOnce()` 按目标协议选 `httpRequest`/`httpsRequest`，任何 HTTP 状态码（200/401/403/404/405）都算活着。
+- 实测（0.9.135 debug 真机，全程走公网链路）：
+  - 粘贴面板给的整条链接 → `解析并验证` → 首页变「大肥鱼 · 已连接」，截图 `docs/img/pair-link-0.9.135.jpg`。
+  - `shared_prefs/pet_prefs.xml`：`base_url = http://42.193.189.240/pet-voice/`、
+    `plaintext_hosts = 42.193.189.240`、`token = 56fd5ad1…`（真机 root 读取）。
+  - 面板 `/pet-voice/api/pair`（带 Bearer）返回
+    `{"ok":true,"publicBase":"http://42.193.189.240/pet-voice/","source":"tunnel","alive":true}`。
+- 顺带补的入口：绑定过之后扫码按钮一直是隐藏的，旧隧道一死首页只剩一句「重新扫码」却没有按钮可点。
+  现在「连不上 / 未连接」那行文字本身就是入口（`statusHost` 可点 → `startScan()`），文字改成
+  「电脑没响应，点这里重新扫码」/「点这里重新扫码，或检查同一个 Wi-Fi」。

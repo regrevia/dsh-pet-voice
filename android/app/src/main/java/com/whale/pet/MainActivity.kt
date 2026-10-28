@@ -454,6 +454,7 @@ class MainActivity : Activity() {
             statusHost.text = "扫码绑定"
             scan.visibility = View.VISIBLE
             launch.visibility = View.GONE
+            statusHost.setOnClickListener(null)
         } else {
             // 绑定后就不再出现扫码入口：绑了就是绑了，换绑/解绑去配对页
             statusHost.visibility = View.GONE
@@ -465,11 +466,14 @@ class MainActivity : Activity() {
                 null -> "${cfg.wakeName} · 已配置"
             }
             // 连不上时给一句能动手的，而不是让用户自己猜是网、是电脑、还是设置。
+            // 这行的字就是入口：旧隧道死了、换了服务器要重绑，扫码按钮已经藏起来了，只能点这里。
             if (connected == false) {
                 statusHost.visibility = View.VISIBLE
-                statusHost.text = if (hostLost) "电脑上的 DSH 没响应，打开它或重新扫码" else "重新扫码，或检查同一个 Wi-Fi"
+                statusHost.text = if (hostLost) "电脑没响应，点这里重新扫码" else "点这里重新扫码，或检查同一个 Wi-Fi"
+                statusHost.setOnClickListener { startScan() }
             } else {
                 statusHost.visibility = View.GONE
+                statusHost.setOnClickListener(null)
             }
             // 先用本地记下的项目名上屏，联网结果只做「纠正」，绝不先清空再等网络
             setProjectTitle(PetSettings.pinnedTitle(this))

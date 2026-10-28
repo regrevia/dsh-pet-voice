@@ -41,6 +41,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { request as httpsRequest } from 'node:https'
+import { request as httpRequest } from 'node:http'
 import { createConnection } from 'node:net'
 import { homedir, networkInterfaces } from 'node:os'
 import { dirname, extname, isAbsolute, join, sep } from 'node:path'
@@ -3137,7 +3138,10 @@ function probeTunnel(base) {
       resolve(v)
     }
     try {
-      const req = httpsRequest(target, { method: 'GET', rejectUnauthorized: false, timeout: TUNNEL_PROBE_TIMEOUT }, (res) => {
+      // 自建服务器没备案：公网入口就是明文 http，用 https 客户端去连只会一路失败，
+      // 于是面板永远显示「隧道可能已过期」。按地址自己的协议挑客户端。
+      const ask = target.startsWith('http://') ? httpRequest : httpsRequest
+      const req = ask(target, { method: 'GET', rejectUnauthorized: false, timeout: TUNNEL_PROBE_TIMEOUT }, (res) => {
         res.resume()
         finish(true)
       })

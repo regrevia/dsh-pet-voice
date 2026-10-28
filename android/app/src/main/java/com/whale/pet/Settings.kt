@@ -150,9 +150,13 @@ object PetSettings {
     private const val K_PENDING_NAME = "pending_apk_name"
     /** 播报游标（宿主 say 队列的 seq）：重启后接着上次念到的地方，别把听过的句子再念一遍。 */
     private const val K_SAY_CURSOR = "say_cursor"
+    /** 用户扫码/粘贴确认过的明文 http 主机（逗号分隔，只存 host）。 */
+    private const val K_PLAIN_HOSTS = "plaintext_hosts"
 
     @Volatile
     private var cached: SharedPreferences? = null
+    @Volatile
+    private var plainHosts: Set<String> = emptySet()
 
     private fun prefs(context: Context): SharedPreferences {
         cached?.let { return it }
@@ -166,6 +170,12 @@ object PetSettings {
 
     fun load(context: Context): PetConfig {
         val p = prefs(context)
+        // 并上内存里的：verify 里会先 load 再 save，不能让这次 load 把刚确认的主机冲掉
+        plainHosts = plainHosts + (p.getString(K_PLAIN_HOSTS, "") ?: "")
+            .split(',')
+            .map { it.trim().lowercase() }
+            .filter { it.isNotEmpty() }
+            .toSet()
         return PetConfig(
             baseUrl = p.getString(K_BASE, "") ?: "",
             token = p.getString(K_TOKEN, "") ?: "",
@@ -196,6 +206,7 @@ object PetSettings {
             .putInt(K_SPRITE, PetConfig.cleanSpriteSize(cfg.spriteSize))
             .putString(K_OUTFIT, PetConfig.cleanOutfit(cfg.outfit))
             .putString(K_DISPLAY, PetConfig.cleanDisplayMode(cfg.displayMode))
+            .putString(K_PLAIN_HOSTS, plainHosts.joinToString(","))
             .apply()
         // 新令牌落盘就算重新配对成功，401 的欠账清掉
         AuthWatch.clear(context)
@@ -232,8 +243,9 @@ object PetSettings {
      * 公网地址必须 https —— trycloudflare 和自定义域名隧道都自带证书，没有理由退让。
      */
     fun plaintextHostAllowed(authority: String): Boolean {
-        val host = authority.substringBefore(':').substringAfter('[').substringBefore(']').lowercase()
+        val host = hostOf(authority)
         if (host.isEmpty()) return false
+        if (host in plainHosts) return true
         if (host == "localhost" || host == "::1" || host == "10.0.2.2" || host == "127.0.0.1") return true
         if (host.endsWith(".local") || host.endsWith(".lan") || host.endsWith(".home")) return true
         if (host.startsWith("192.168.") || host.startsWith("10.")) return true
@@ -253,10 +265,28 @@ object PetSettings {
         }
         val token = uri.getQueryParameter("k") ?: uri.getQueryParameter("token") ?: return null
         if (token.isBlank()) return null
-        val base = normalizeBase(raw)
+        var base = normalizeBase(raw)
+        if (base.isEmpty() && (uri.scheme ?: "").lowercase() == "http") {
+            // 自建服务器没备案就签发不了证书，面板给的配对链接只能是 http://公网IP。
+            // 扫码/粘贴这一下就是用户亲手确认这个地址，记进白名单再解析一次。
+            rememberPlaintext(uri.authority.orEmpty())
+            base = normalizeBase(raw)
+        }
         if (base.isEmpty()) return null
         return base to token.trim()
     }
+
+    /** 用户亲手配对过的明文主机（不含端口）。只由配对链接写入。 */
+    fun plaintextHosts(): Set<String> = plainHosts
+
+    fun rememberPlaintext(authority: String) {
+        val host = hostOf(authority)
+        if (host.isEmpty()) return
+        plainHosts = plainHosts + host
+    }
+
+    private fun hostOf(authority: String): String =
+        authority.substringBefore(':').substringAfter('[').substringBefore(']').lowercase()
 
     /** 「现在钉在哪个项目」：只存标题给界面显示用；真身以 `/api/workspaces` 的 pinned 为准。 */
     fun pinnedTitle(context: Context): String = prefs(context).getString(K_PINNED, "").orEmpty()

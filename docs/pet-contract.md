@@ -11,7 +11,10 @@
 - 基址：`{base}/pet-voice`，其中 `{base}` 是宿主 origin（本机 `http://127.0.0.1:52356`，
   手机走隧道域名（推荐自有域名的命名隧道 `https://pet.example.com`；临时用快速隧道
   `https://xxx.trycloudflare.com`，域名每次重启都变），局域网走 `http://<内网IP>:52356`）。
-  公网**必须 https**：客户端 `PetSettings.plaintextHostAllowed()` 拒绝明文 http 的公网地址。
+  公网默认**必须 https**：客户端 `PetSettings.plaintextHostAllowed()` 拒绝明文 http 的公网地址；
+  例外只走用户亲手配对的那一下——扫码/粘贴配对链接遇到公网 `http://` 时把 host 记进
+  `plaintext_hosts`（`PetSettings.rememberPlaintext()`）再重解析一次，手打「电脑地址」仍然只认 https。
+  没备案、签不出证书的自建服务器就靠这条链路；面板里这类配置标注「明文」。
 - 除 `xiaoai*` 外**全部端点都必须鉴权**；未鉴权一律 `401`。
 - 所有响应都是 UTF-8 JSON（`/api/tts` 成功时是音频流，`/api/stream` 是 SSE）。
 - JSON 响应头固定 `cache-control: no-store`。
@@ -82,7 +85,7 @@
 ```jsonc
 {
   "ok": true,
-  "pluginVersion": "0.1.34",       // App 用它判断插件够不够新
+  "pluginVersion": "0.1.35",       // App 用它判断插件够不够新
   "tokenHint": "a1b2c3d4",        // string，token 前 8 位，不含完整 token
   "linkHint": "在电脑上执行 cat ... 可查看完整配对链接里的 token", // string，给用户看的提示
   "projects": [                   // Workspace[]，可能为空数组
