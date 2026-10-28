@@ -241,7 +241,9 @@ function createPet (container) {
   const legacy = Array.from(container.querySelectorAll('.pet-video'))
   legacy.forEach((v) => { v.classList.remove('front'); v.style.display = 'none' })
 
-  const vids = [0, 1].map(() => {
+  // 三个 <video>：一段正在淡出、一段在播、还要有一段能立刻接下一段。
+  // 只有两个的时候，下一段只能复用正在淡出的那个元素，极快连点会丢步。
+  const vids = [0, 1, 2].map(() => {
     const v = document.createElement('video')
     v.muted = true
     v.playsInline = true
@@ -867,7 +869,9 @@ function createPet (container) {
     }
     const id = ++seq
     const prev = activeVid
-    const next = vids.find((x) => x !== activeVid) || vids[0]
+    // 优先挑既不是当前层、也不是正在淡出的那一层的元素
+    const next = vids.find((x) => x !== activeVid && !(fadePrev && x === fadePrev.vid)) ||
+      vids.find((x) => x !== activeVid) || vids[0]
     curClip = name
     try { next.pause() } catch (e) {}
     next.loop = !o.once
