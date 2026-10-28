@@ -11,7 +11,7 @@
  * 对外接口不变：setMode / setMouth / tap / tapKind / celebrate / playOnce /
  *               setDragging / setActive / destroy
  */
-import { idlePool, nextIdleDelay, pickIdle } from './idle.js'
+import { idlePool, idleCombos, nextIdleDelay, pickIdle, pickCombo } from './idle.js'
 
 export function createPet (container) {
   const CLIPS = { idle: 'idle', listening: 'idle', thinking: 'thinking', talking: 'talking', happy: 'cheer' }
@@ -173,6 +173,10 @@ export function createPet (container) {
     whale_bubble: 4000, thinking: 4000, wake_up: 4000, look_around: 4000, yawn: 4000,
     curtsy: 3500, tap_pout: 3500, tap_shy: 3500, tap_tickle: 3500, drag: 2500,
   }
+  // 按片段名缓存的真实时长：链播排下一步时 activeVid 可能还是上一段，
+  // 用它的 duration 会把等待算成 5.8s（idle 的长度），于是这一段播完要干等 2s 才接下一段。
+  const DUR_SEEN = {}
+  const durOf = (name) => DUR_SEEN[name] || CLIP_DUR[name] || 4000
   const clipDurMs = (name, v) => {
     if (v && isFinite(v.duration) && v.duration > 0.15) return v.duration * 1000
     return CLIP_DUR[name] || 3000
@@ -718,6 +722,12 @@ export function createPet (container) {
     if (destroyed) return
     if (av.on) { avPlay(name, o); curClip = name; return }
     if (!o.once && name === curClip && activeVid && !activeVid.paused) return
+    // 同一段被交叉淡入淡出「暂停」过（老层 200ms 后被 pause）：接着播比从头开始
+    // 平滑得多 —— 从头播会跳回第一帧，待机这种循环片段上就是眼睛能看见的一顿。
+    if (!o.once && name === curClip && name === 'idle' && activeVid && activeVid.paused && !activeVid.ended) {
+      activeVid.play().catch(() => {})
+      return
+    }
     const id = ++seq
     const prev = activeVid
     const next = vids.find((x) => x !== activeVid) || vids[0]
@@ -748,6 +758,7 @@ export function createPet (container) {
       next.play().catch(() => {})
       activeVid = next
       vidClip.set(next, name)
+      if (isFinite(next.duration) && next.duration > 0.15) DUR_SEEN[name] = next.duration * 1000
       // 交互片段（点击反应、说话、拖动…）优先于待机连招：不掐掉进行中的连招，
       // 待机链的下一步会在 0.2s 后把刚起的反应顶掉——看着就是「点了没反应/反应被打断」。
       if (!o.chain && name !== 'idle' && chainDeadline) {
@@ -766,6 +777,7 @@ export function createPet (container) {
       } else {
         fadePrev = null
         if (prev && prev !== next) setTimeout(() => { try { prev.pause() } catch (e) {} }, 60)
+        if (o.chain) console.warn('[cut] ' + (vidClip.get(prev) || 'none') + '→' + name + ' 无渐变 rs=' + (prev ? prev.readyState : -1))
       }
       if (!pumping) startPump()
     }
@@ -807,6 +819,9 @@ export function createPet (container) {
       if (i >= list.length) return
       let name = list[i]
       const last = i === list.length - 1
+      // 链首是 idle 且人物本来就在待机循环里：不用再「交叉淡化到 idle」浪费 200ms，
+      // 直接从第一个小动作开始，起手更快，也不会多一次 idle→idle 的重启。
+      if (i === 0 && !last && name === 'idle' && curClip === 'idle' && activeVid && !activeVid.paused) { step(1); return }
       // 已经在播同一段就别再交叉一次（待机链最后一步回 idle 时常见，纯浪费一帧渐变）
       if (!last && name === curClip && name !== 'idle') { step(i + 1); return }
       if (last) {
@@ -816,9 +831,12 @@ export function createPet (container) {
         return
       }
       play(name, { once: true, chain: true })
-      const wait = Math.max(60, clipDurMs(name, activeVid) - gap)
+      const wait = Math.max(60, durOf(name) - gap)
       chainDeadline = nowMs() + wait
       chainNext = () => step(i + 1)
+      // 先清再挂：上一步的 setTimeout 和 __petTick 可能都推进了这一步，
+      // 残留的旧定时器晚一拍又会把「下一步」提前叫起来（日志里 2/4 出现两次）。
+      clearTimeout(chainTimer)
       chainTimer = setTimeout(chainNext, wait)
     }
     step(0)
@@ -861,6 +879,14 @@ export function createPet (container) {
   let idleTimer = 0
   let tapTimes = []
   let lastIdle = ''
+  // 最近 4 段待机小动作：只避开「上一段」不够，池子 13 段也会出现 jump/dance/jump/dance
+  // 这种两段来回倒的节奏。这里在挑之前就把最近几段剔掉，剔空了再放开。
+  let idleRecent = []
+  const pickFresh = (list, rand) => {
+    const rest = list.filter((k) => idleRecent.indexOf(k) < 0)
+    const src = rest.length ? rest : list
+    return src[Math.floor(Math.max(0, Math.min(0.999999, rand)) * src.length)]
+  }
   let idleHold = 0
   const scheduleIdle = () => {
     clearTimeout(idleTimer)
@@ -873,13 +899,28 @@ export function createPet (container) {
         // 待机小动作一次都没真正播出来）。
         const busy = (chainDeadline && nowMs() < chainDeadline + 120) || nowMs() < idleHold
         if (!busy) {
-          const pool = idlePool(new Date().getHours())
-          const a = pickIdle(pool, lastIdle, Math.random())
-          const b = pickIdle(pool, a, Math.random())
+          const hour = new Date().getHours()
+          const pool = idlePool(hour)
+          // 有 45% 的轮次走「剧情连招」（哈欠→伸懒腰 这类本来就连着的两段），
+          // 剩下的走随机两段。两种都一轮两个动作，但连招看着像一件事，不像两段硬拼。
+          let combo = Math.random() < 0.45 ? pickCombo(idleCombos(hour), lastIdle, Math.random()) : null
+          if (combo && idleRecent.indexOf(combo[0]) >= 0 && idleRecent.indexOf(combo[1]) >= 0) combo = null
+          const a = combo ? combo[0] : pickFresh(pool, Math.random())
+          const b = combo ? combo[1] : pickFresh(pool.filter((k) => k !== a), Math.random())
           lastIdle = b
+          idleRecent = [b, a].concat(idleRecent).slice(0, 4)
+          // 一行一个轮次（≈20 s）：能直接从 logcat 看出这一轮走的是剧情连招还是随机两段。
+          console.warn('[idle] ' + (combo ? '连招 ' : '两段 ') + a + '→' + b)
           // 一轮里放两个不同的小动作：池子里 10 种，单轮一个要近 2 分钟才轮一遍，
           // 看着像「老是那几个」；两段之间仍夹一次 idle，衔接不断。
-          playChain(['idle', a, 'idle', b, 'idle'], 160)
+          // overlap 200 = 交叉时长：上一段在结尾前 200ms 就开始让位，
+          // 交叉走完刚好接上，不会「淡入还没完片段已经切了」。
+          // 18% 的轮次接第三段：一轮里三个不同小动作，轮换更快、看着更「活」。
+          // 接的是同一套池子/连招里的片段，不用另做素材。
+          const three = Math.random() < 0.18
+          const c = three ? pickFresh(pool.filter((k) => k !== a && k !== b), Math.random()) : ''
+          if (three) idleRecent = [c].concat(idleRecent).slice(0, 4)
+          playChain(three ? [a, 'idle', b, 'idle', c, 'idle'] : [a, 'idle', b, 'idle'], 200)
         }
       }
       scheduleIdle()
@@ -1000,6 +1041,8 @@ export function createPet (container) {
       else if (k >= 3) play('tap_pout', { once: true })
       else play(pick(ONCE.tap), { once: true })
     },
+    // 给 boot.js 的连点分级用：知道现在正播哪一段，才能避免「点两下还是同一段」。
+    clip () { return curClip },
     tapKind (kind) {
       if (av3Play(kind)) return
       const list = ONCE[kind]

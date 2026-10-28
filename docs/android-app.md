@@ -1075,3 +1075,121 @@ W PetJs : WARNING [size] 统一缩放 1.000（基准 idle 身高 346px）
 ```
 
 每轮两个动作后（0.9.87）一轮之内就能看到两种，轮换周期从约 2 分钟降到约 1 分钟。
+
+### 23.11 连点分级、待机连招、以及「不许突然变大变小」（0.9.88 – 0.9.97）
+
+这一轮的三个诉求都来自肉眼看片：连点要一层层升级而不是随机抽；待机要有更多动作、
+一轮里能看到不同的小动作；任何一次动作切换都不许出现「人物突然变大或变小」。
+
+**A. 连点分级只在一处做（0.9.88）**
+
+`boot.js` 的 `action()` 是唯一的分级权威，2600 ms 窗口内的第 N 下：
+
+| 下数 | 播放 | 说明 |
+| --- | --- | --- |
+| 1 | `pet.tap()` 随机（`tap / tap_shy / tap_tickle / tap_wave / tap_joy`） | 单点永远是「轻快反应」，不会生气 |
+| 2 | 四个「更开心」变体里挑一个 ≠ 当前片段 | 以前固定 `tap_joy`，第一下随机到 `tap_joy` 时第二下就成了同一段 |
+| 3 | `tap_pout` | 生气只由连点触发 |
+| 4 | `tap_proud` | 得意 |
+| 5 | `startle` | 吓一跳，固定，方便验证 |
+| 6+ | 甩尾 / 跳 / 转圈 / 欢呼 轮流 | 用「不重复袋」抽，袋空才重洗 |
+
+`ONCE` 表里有没有某个 key，决定 `playOnce` 会不会**静默失败**。这里踩过一个坑：
+甩尾的素材名是 `tail_slap`，但 `ONCE` 的 key 是 `tail`，把 `tail_slap` 传给
+`playOnce` 会查不到 key、静默退回 `startle`，于是连点第 9、10 下看着还是同一段惊吓。
+现在袋里放的是 key（`tail / jump / dance / cheer`），并在注释里写明两者不同。
+
+另一个坑：重洗袋时把上一段 `push` 到末尾，而抽牌用的是 `pop()`，等于下一发立刻抽回
+刚刚播过的那段（真机第 10 下出现 `cheer→cheer`）。改成 `unshift` 后，上一段被排到最后
+一次才抽到，第 6–12 下是真机连续 7 段互不相同：
+
+```
+[fade] tap_proud→startle   200ms 实测208ms
+[fade] startle→jump        200ms 实测208ms
+[fade] jump→dance          200ms 实测207ms
+[fade] dance→tail_slap     200ms 实测207ms
+[fade] tail_slap→cheer     200ms 实测207ms
+[fade] cheer→dance         200ms 实测206ms
+[fade] dance→jump          200ms 实测207ms
+[fade] jump→tail_slap      200ms 实测205ms
+```
+
+Kotlin 侧还有一层收口：900 ms 内的第二下只回执不转发（`PetTap: 连点收口：Nms 内第二下只回执`），
+避免一次连点被当成多次「唤醒对话」。它在日志里和上表的分级同时出现，互不干扰。
+
+**B. 更多待机动作：池子 + 连招 + 罕见三段（0.9.88 – 0.9.94）**
+
+素材没变（`anim/` 下 23 段 webm，没有生成脚本，Aster 的 v2/v3 包也补不了新的具名片段），
+「增加动作包」落在**重新编排已有素材**上：
+
+- `idle.js` 按时段给池子和连招：白天 13 段动作 / 8 组连招，傍晚 9 / 5，夜里 6 / 3
+  （夜里偏 `sleep / yawn / stretch / look_around / whale_bubble / tap_shy`）。
+- 每次待机取一组连招的概率 45%，连招是「两个片段夹一次 idle」，衔接不断。
+- 18% 的轮次再接第三段（`[a, idle, b, idle, c, idle]`），一轮三个不同小动作。
+- `idleRecent`（长度 4）做新鲜度过滤，`pickFresh` 优先挑最近没出现过的；`pickCombo` 过滤
+  `c[0] !== last`，避免连着两组同一个起手。
+
+**C. 链式播放的三个真缺陷（0.9.91 加临时 `[chain]` 追踪定位，0.9.92 修完删追踪）**
+
+1. **同一段被跳过**：`playChain` 里 `name === curClip && name !== 'idle'` 会跳过该步——设计如此，
+   但它当时把「跳过」和「已经播过」混在一起，导致中间那步永远不出现。
+2. **`clearTimeout` 在重设前**：`window.__petTick`（原生时钟推进）和 `setTimeout` 都会推进链，
+   两边同时到点会**重复推进**两步。修法是推进前先 `clearTimeout(chainTimer)`，且推进函数
+   只认 `chainNext` 当前值。
+3. **等待时长靠猜**：非末步以前固定等一个近似值，4 s 的片段被多压 2 s、6 s 的被截断。
+   现在 `go()` 在 `vidClip.set(next, name)` 之后记下真实的 `next.duration` 到 `DUR_SEEN`，
+   `durOf(name) = DUR_SEEN[name] || CLIP_DUR[name] || 4000`，等待量 = `durOf(name) - gap`。
+
+临时追踪里还有一条假设被证伪：曾经怀疑「渐变没走完就硬切」是重叠贴图的来源，于是在
+fade 的 `else` 分支加了永久、廉价、warn 级的 `[cut]` 探针。95 s + 70 s 两次真机采样
+**一条 `[cut]` 都没有**，说明没有静默硬切；重叠来自两个图层同时存在（见 D）。
+
+**D. 链首的 idle 是多余的（0.9.93）**
+
+连招字面量是 `['idle', a, 'idle', b, 'idle']`，第 0 步在人物本来就在 idle 循环里时
+仍然会 `play('idle')`，日志里每次起链都先来一条 `[fade] idle→idle 200ms`。现在第 0 步
+若 `!last && name === 'idle' && curClip === 'idle' && activeVid && !activeVid.paused` 就直接
+`step(1)`，肉眼效果不变，少一次无意义重启。
+
+真机 110 s（白天池）采样里每轮两个动作都完整出现，且不再有 `idle→idle`：
+
+```
+[idle] 连招 dance→curtsy
+[fade] idle→dance        200ms 实测203ms
+[fade] dance→idle        200ms 实测205ms
+[fade] idle→curtsy       200ms 实测207ms
+[fade] curtsy→idle       240ms 实测246ms
+[idle] 连招 yawn→stretch
+[fade] idle→yawn         200ms 实测205ms
+[fade] yawn→idle         200ms 实测205ms
+[fade] idle→stretch      200ms 实测206ms
+```
+
+中间那步（`yawn→stretch`）在 0.9.92 的采样里是不出现的，当时判为「被 `name === curClip`
+守卫跳过，不是硬切」；0.9.93 的链首跳过把它一起解决了。
+
+**E. 「不许突然变大变小」：三层保证**
+
+1. **统一缩放**：以前每段素材各自归一化到自己的高度，切片段时人物会「抽一下」。
+   现在所有片段共用一个 `SCALE = clamp(TARGET_H / BODY.idle[3])`，真机日志
+   `[size] 统一缩放 1.000（基准 idle 身高 346px）`——缩放系数恒为 1，不存在按片段变化。
+2. **窗口几何不变**：气泡出现时不是改窗口大小，而是 `#stage` 平移 + 轻微缩放。
+   真机 `dumpsys window` 在气泡出现前后都是 `contentSize=594x462`、`frame=[Rect(218,2716 - 812,3178)]`。
+   运行时日志同时打印 `[bubble] 让位 30px / 缩放 0.967`（30 px 与 0.967 是当前布局下
+   由页面按 `#bubble` 高度算出来的值，不是手写常量）。
+3. **渐变而非闪现**：`#stage` 的 `transition` 从 `.18s cubic-bezier(.2,.8,.2,1)` 改成
+   `.26s cubic-bezier(.22,.61,.36,1)`，让位的 30 px 位移和 3.3% 缩放变成一段短动画，
+   不会被读成「突然变小」；`transform-origin` 固定在 `50% 0`，缩放时脚不会移出画布。
+
+跨片段切换走双层交叉淡化（200 ms，回 idle 240 ms），两个图层用同一个 `SCALE`，
+新图层的位置从旧图层的 `geo` 平滑插值到本片段目标位，透明度 `1-e` / `e`，总和不超 1。
+这样既没有「先虚化再重叠」的突兀，也不会两段都满不透明地贴在一起。
+
+**F. 已知限制（诚实记录）**
+
+- 视频池只有 2 个 `<video>`：一段还在淡出时开始下一段，会复用正在淡出的元素；
+  极快连点时某一步可能被 `go()` 的 `id !== seq` 守卫静默丢掉（表现为少一条 `[fade]`，
+  不是硬切）。要彻底消除需把池子扩到 3 个或把下一步延到 `fadePrev` 清空之后。
+- 让位的 30 px / 0.967 是在当前窗口 462×594、density 2.5 下的值；换分辨率或改
+  `#bubble` 高度会得到不同数字，写死会有「脚被裁」的风险。
+- `look_around` 同时出现在池子和连招里，偶尔会连着两轮都是它。

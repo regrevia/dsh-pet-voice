@@ -57,6 +57,11 @@ let lastInteract = Date.now()
  */
 let taps = 0
 let lastTapAt = 0
+// 逗过头之后换着花样炸：连吓两次同一段等于没反应
+let lastBurst = ''
+// 逗过头的后续反应用一个「不重复袋」轮流抽：袋空了再洗一遍，且洗的时候
+// 把刚播过的那段排到最后，连点 8–10 下也不会连着看到同一段。
+let burstBag = []
 let sleeping = false
 
 const POOL = {
@@ -209,13 +214,40 @@ window.PetBridge = {
     } else if (n >= 5) {
       // 逗过头：吓一跳。分级只在这里做，随机池里没有生气，
       // 所以「点一下突然生气」不会再有，连点才升级。
-      pet.playOnce('startle')
+      // 第 5 下一定是 startle（能被稳定验证）；再往上就不重复同一段惊吓，
+      // 换成甩尾/跳/转圈/欢呼这类更炸的反应，并且避开上一段。
+      if (n === 5) {
+        lastBurst = 'startle'
+        pet.playOnce('startle')
+      } else {
+        // 这里的名字是 playOnce 的 key（ONCE 表），不是素材名：甩尾的 key 是 tail
+        // （ONCE.tail = ['tail_slap']）。写成 tail_slap 会查不到 key，静默退回 startle。
+        const burstPool = ['tail', 'jump', 'dance', 'cheer']
+        if (!burstBag.length) {
+          burstBag = burstPool.slice()
+          // 洗牌：Fisher–Yates，然后把上一段挪到末尾
+          for (let i = burstBag.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1))
+            const t = burstBag[i]; burstBag[i] = burstBag[j]; burstBag[j] = t
+          }
+          const li = burstBag.indexOf(lastBurst)
+          // 注意是 unshift：push 到末尾会被紧接着的 pop() 立刻抽回同一段
+          if (li >= 0) { burstBag.splice(li, 1); burstBag.unshift(lastBurst) }
+        }
+        const k = burstBag.pop() || 'startle'
+        lastBurst = k
+        if (!pet.playOnce(k)) pet.playOnce('startle')
+      }
     } else if (n === 4) {
       pet.playOnce('tap_proud')
     } else if (n === 3) {
       pet.playOnce('tap_pout')
     } else if (n === 2) {
-      pet.playOnce('tap_joy')
+      // 第 2 下是「更开心」：从四个变体里挑一个和当前正在播的不一样的，
+      // 否则第一下随机到 tap_joy 时第二下还是 tap_joy，看着像没反应。
+      const cur = pet.clip && pet.clip()
+      const joy = ['tap_joy', 'tap_wave', 'tap_tickle', 'tap_shy'].filter((k) => k !== cur)
+      pet.playOnce(joy[Math.floor(Math.random() * joy.length)] || 'tap_joy')
     } else {
       pet.tap()
     }
