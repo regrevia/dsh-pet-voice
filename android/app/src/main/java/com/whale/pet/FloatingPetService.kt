@@ -290,6 +290,8 @@ class FloatingPetService : Service() {
         alive = true
         inst = this
         cfg = PetSettings.load(this)
+        // 接着上次念到的位置继续：宿主队列不会因为取过就删，从 -1 开会把听过的句子再念一遍
+        sayCursor = PetSettings.sayCursor(this)
         client = PetClient { cfg }
         asr = NativeAsr(this)
         wake = WakeWordEngines.create(this)
@@ -823,9 +825,13 @@ class FloatingPetService : Service() {
                 // 连发超过 SAY_MAX_PER_POLL 时直接用它会把没搬的中间几句永久跳过。
                 if (consumed > sayCursor) {
                     sayCursor = consumed
+                    PetSettings.saveSayCursor(this@FloatingPetService, sayCursor)
                 } else if (items == null || items.length() == 0) {
                     val cursor = json.optLong("cursor", sayCursor)
-                    if (cursor > sayCursor) sayCursor = cursor
+                    if (cursor > sayCursor) {
+                        sayCursor = cursor
+                        PetSettings.saveSayCursor(this@FloatingPetService, sayCursor)
+                    }
                 }
                 if (accepted > 0) Log.i("PetSay", "气泡收下 $accepted 条 cursor=$sayCursor")
             }
@@ -2488,9 +2494,11 @@ class FloatingPetService : Service() {
 
     /** 长句切成 TTS 能收的段：宿主对 text 有上限，切在原句标点上最自然。 */
     fun splitForTts(text: String, max: Int = 160): List<String> {
-        if (text.length <= max) return listOf(text)
+        val whole = text.trim()
+        if (whole.isEmpty()) return emptyList()
+        if (whole.length <= max) return listOf(whole)
         val out = ArrayList<String>()
-        var rest = text
+        var rest = whole
         while (rest.length > max) {
             var cut = -1
             for (i in max downTo max / 2) {

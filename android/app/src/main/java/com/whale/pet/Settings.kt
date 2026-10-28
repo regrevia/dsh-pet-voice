@@ -148,6 +148,8 @@ object PetSettings {
     private const val K_PENDING_APK = "pending_apk_path"
     private const val K_PENDING_CODE = "pending_apk_code"
     private const val K_PENDING_NAME = "pending_apk_name"
+    /** 播报游标（宿主 say 队列的 seq）：重启后接着上次念到的地方，别把听过的句子再念一遍。 */
+    private const val K_SAY_CURSOR = "say_cursor"
 
     @Volatile
     private var cached: SharedPreferences? = null
@@ -261,6 +263,22 @@ object PetSettings {
 
     fun savePinnedTitle(context: Context, title: String) {
         prefs(context).edit().putString(K_PINNED, title.trim()).apply()
+    }
+
+    /**
+     * 上次念到哪一句（宿主 say 队列的 seq）。-1 = 没有记录，按老规矩只对齐不回放。
+     * 宿主的队列是环形缓存，取过的句子不会立刻删掉，所以每次服务重启都从 -1 开始会把旧句子再念一遍。
+     */
+    fun sayCursor(context: Context): Long {
+        val v = prefs(context).getLong(K_SAY_CURSOR, -1L)
+        // 宿主换过机器/重置过 seq 时这个数会大得离谱，宁可重新对齐也不要一直收不到
+        if (v < 0 || v > System.currentTimeMillis() + 300_000L) return -1L
+        return v
+    }
+
+    fun saveSayCursor(context: Context, seq: Long) {
+        if (seq < 0) return
+        prefs(context).edit().putLong(K_SAY_CURSOR, seq).apply()
     }
 
     /* ---------------- 会话：默认复用专属会话 ---------------- */
