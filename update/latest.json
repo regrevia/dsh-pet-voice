@@ -1,12 +1,12 @@
 {
-  "versionCode": 157,
-  "versionName": "0.9.87",
-  "size": 30036998,
-  "sha256": "8999a7c2d234efb5ad322d27c41447caaa9bc20247ccd473586fbbc679e22c4d",
+  "versionCode": 167,
+  "versionName": "0.9.97",
+  "size": 30042274,
+  "sha256": "0b5c932e1c099a54ed3dcb7d74d7a58457c921314f047619ad5bde973e83706b",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.87/app-release.apk",
-  "notes": "点按分级：点 2 下高兴、3 下才撅嘴生气、4 下得意、5 下吓一跳；待机动作一轮两个、轮换更密；换动作 200/240ms 渐进交叉，角色大小恒定",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.87/app-release.apk",
-  "publishedAt": "2026-10-28T04:11:52.002Z",
-  "promotedAt": "2026-10-28T04:11:54.351Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.97/app-release.apk",
+  "notes": "连点分级：1 轻点 / 2 更开心 / 3 生气 / 4 得意 / 5 吓一跳 / 6 起甩尾·跳·转圈·欢呼轮流且不重复；待机连招新增时段池与三段轮换，链首不再多播一次 idle；统一缩放 1.000，气泡让位改为 0.26s 缓动，窗口几何始终 594x462。",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.97/app-release.apk",
+  "publishedAt": "2026-10-28T06:59:27.859Z",
+  "promotedAt": "2026-10-28T06:59:30.293Z"
 }
