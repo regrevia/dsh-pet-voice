@@ -2072,7 +2072,7 @@ async function goalActionRoute(ctx, body) {
   const action = String(body?.action ?? '').trim()
   const id = String(body?.id ?? '').trim()
   const revision = Number(body?.revision ?? 0) || 0
-  if (!sessionId || !['pause', 'resume', 'complete'].includes(action) || !id) {
+  if (!sessionId || !['pause', 'resume', 'complete', 'clear'].includes(action) || !id) {
     return { status: 400, body: { ok: false, error: '参数不对' } }
   }
   const controller = ctx.get?.('sessionController')
@@ -2087,12 +2087,14 @@ async function goalActionRoute(ctx, body) {
     const run = goals?.[action]
     if (typeof run !== 'function') return { status: 503, body: { ok: false, error: '宿主没有目标接口' } }
     const view = run.call(goals, agent, { id, revision })
+    // clear 返回的是墓碑 ref（没有 objective/phase），这里统一收成 null 表示「已经没有目标了」
+    const cleared = action === 'clear'
     netLog('goal-action', { sessionId, action })
     return {
       status: 200,
       body: {
         ok: true,
-        goal: view
+        goal: view && !cleared
           ? {
               id: String(view.id),
               objective: String(view.objective ?? ''),

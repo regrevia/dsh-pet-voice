@@ -263,6 +263,11 @@ class HistoryActivity : Activity() {
         goalAction = findViewById(R.id.goalAction)
         goalQueue = findViewById(R.id.goalQueue)
         goalAction.setOnClickListener { toggleGoal() }
+        // 删除跟桌面端那个 🗑 一样：长按整行才出现，避免误触
+        goalBar.setOnLongClickListener {
+            confirmClearGoal()
+            true
+        }
 
         pickerScrim = findViewById(R.id.pickerScrim)
         pickerSheet = findViewById(R.id.pickerSheet)
@@ -616,6 +621,44 @@ class HistoryActivity : Activity() {
                 syncSession()
             }
         }, "pet-goal-action").apply { isDaemon = true }.start()
+    }
+
+    /** 长按目标行：确认后清掉这个目标（宿主留墓碑，历史里还能查到）。 */
+    private fun confirmClearGoal() {
+        val id = goalId
+        if (id.isBlank() || goalPending) return
+        android.app.AlertDialog.Builder(this)
+            .setMessage("删除这个目标？")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("删除") { _, _ -> clearGoal(id) }
+            .show()
+    }
+
+    private fun clearGoal(id: String) {
+        goalPending = true
+        goalAction.text = "删除中…"
+        val sid = PetSettings.chatSession(this)
+        val rev = goalRevision
+        Thread({
+            val res = try {
+                PetClient { PetSettings.load(this) }.goalAction(sid, "clear", id, rev)
+            } catch (_: Exception) { null }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                val body = res?.json
+                if (body?.optBoolean("ok") != true) {
+                    toast(body?.optString("error").orEmpty().ifBlank { "没删成，稍后再试" })
+                    goalPending = false
+                    syncSession()
+                    return@runOnUiThread
+                }
+                goalPending = false
+                goalBar.visibility = View.GONE
+                goalId = ""
+                goalPhase = ""
+                syncSession()
+            }
+        }, "pet-goal-clear").apply { isDaemon = true }.start()
     }
 
     /**

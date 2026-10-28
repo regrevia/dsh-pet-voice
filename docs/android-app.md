@@ -1421,7 +1421,7 @@ fade 的 `else` 分支加了永久、廉价、warn 级的 `[cut]` 探针。95 s 
 
 **B. 目标操作**
 
-`POST /api/goal`，body `{sessionId, action, id, revision}`，`action` = `pause | resume | complete`。
+`POST /api/goal`，body `{sessionId, action, id, revision}`，`action` = `pause | resume | complete | clear`。
 实现走宿主自己的 goals 接口（`agent.ctx.get('goals')`），先 `sessionController.resolveAgent(sessionId)`
 拿活着的 agent；`revision` 原样回传做并发保护，桌面刚改过就会返回 `ok:false`。
 
@@ -1432,6 +1432,7 @@ fade 的 `else` 分支加了永久、廉价、warn 级的 `[cut]` 探针。95 s 
 - 有目标才出现一行窄卡：状态（目标进行中 / 已暂停 / 受阻 / 已完成）+ 目标正文（最多两行）。
 - 右侧动作跟桌面一致：进行中给「暂停」（跑过轮次时写「第 N/M 轮 · 暂停」），暂停/受阻给「继续」，
   已完成不给按钮。点下去先置灰成「暂停中…」，成功后立刻重新同步，失败把宿主最新状态拉回来。
+- 长按整行删除目标（短按不动，避免误触）。
 - 队列在目标卡第二行，只在真有排队时显示：「待输入 · 正文」，超过两条折成「等 N 条」。
 - 两块都跟着已有的状态核对走（20 s / 有回合 3 s），没有额外的定时器。
 
@@ -1441,10 +1442,13 @@ fade 的 `else` 分支加了永久、廉价、warn 级的 `[cut]` 探针。95 s 
 - 手机点「继续」（此前 API 暂停到 `revision:2`）→ 宿主回到 `status:"active"`, `revision:3`，
   手机标题刷新成「目标进行中」。
 - `POST /api/goal` 标记完成后宿主 `revision:4`，手机显示「目标已完成」且不再给按钮。
+- 建新目标 → 手机读到「目标进行中」「第 13/256 轮 · 暂停」；长按 1200 ms 弹出「删除这个目标？」，
+  点「删除」后宿主 `goal:null`，手机卡片收起（同步后 `adb_ui` 已无 goal 节点）。
 
 **E. 已知边界**
 
 - 手机端派发的消息不写投影的 `inbox` 行：宿主把第二句直接交给正在跑的回合（实测两句都在，
   `seq 4584/4585`），所以这条队列行对手机自己发的消息一般是空的。桌面编排器里排的队才会出现。
-- 目标删除（桌面上的 🗑）没有对应的宿主远程接口，这轮没做。
+- 删除走宿主 goals 的 `clear`：手机上是长按目标行 → 确认「删除这个目标？」。宿主留墓碑，
+  再查 `/api/session` 就是 `goal:null`，手机卡片同时收起。
 
