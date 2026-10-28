@@ -1,12 +1,12 @@
 {
-  "versionCode": 195,
-  "versionName": "0.9.125",
-  "size": 30082782,
-  "sha256": "49b20f8faf2be77c938bcedf0c40103800792f94fd1a474fc3aa9a24001e3224",
+  "versionCode": 196,
+  "versionName": "0.9.126",
+  "size": 30083354,
+  "sha256": "c566be30dfe530465ebb816a1395f9206978ab534a29a9b07a5098eaf9d772fe",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.125/app-release.apk",
-  "notes": "被杀后闹钟自愈：进程被系统清理，75 秒内自己回来，悬浮窗、通知、待发队列都恢复",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.125/app-release.apk",
-  "publishedAt": "2026-10-28T15:09:25.736Z",
-  "promotedAt": "2026-10-28T15:09:28.749Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.126/app-release.apk",
+  "notes": "保活闹钟改成链式：被系统杀掉后回来会把下一次叫醒自己挂上（15 分钟一条，不再每次重置）；恢复走恢复分支，不向系统申请后台麦克风类型；升级时清掉旧版遗留闹钟",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.126/app-release.apk",
+  "publishedAt": "2026-10-28T15:31:17.454Z",
+  "promotedAt": "2026-10-28T15:31:20.472Z"
 }
