@@ -1,12 +1,12 @@
 {
-  "versionCode": 198,
-  "versionName": "0.9.128",
-  "size": 30086554,
-  "sha256": "025113b333268e5d27dc37efa7f9dd2d61b5dc493b2e35f3fa62304e48c36c8a",
+  "versionCode": 199,
+  "versionName": "0.9.129",
+  "size": 30087166,
+  "sha256": "4a9c5fc58cf127a2df5398e9aae550d073516e52d4b4c58ef47035aa19b7a635",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.128/app-release.apk",
-  "notes": "待输入队列条不再依赖目标：没有目标时也能看见/撤掉排队的句子；空闲时队列与目标每 8 秒对一次（原来 20 秒）",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.128/app-release.apk",
-  "publishedAt": "2026-10-28T15:44:55.399Z",
-  "promotedAt": "2026-10-28T15:44:58.426Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.129/app-release.apk",
+  "notes": "查更新只有在真查到（拿到版本信息）后才计时：断网那一次不占掉窗口，下次进 App 会马上再查",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.129/app-release.apk",
+  "publishedAt": "2026-10-28T15:47:43.315Z",
+  "promotedAt": "2026-10-28T15:47:46.459Z"
 }
