@@ -1,12 +1,12 @@
 {
-  "versionCode": 168,
-  "versionName": "0.9.98",
-  "size": 30042538,
-  "sha256": "18d8039ea9314c8996e35d3ce51cd6e1030b7a33f0519bad4589a3d6624edffc",
+  "versionCode": 169,
+  "versionName": "0.9.99",
+  "size": 30042906,
+  "sha256": "a42eb93de74e6d127d6a78d1cdecf3ff9ad39ed69fbe4cd2513435252de86bb5",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.98/app-release.apk",
-  "notes": "视频层从 2 个扩到 3 个：连点不再丢失动画步骤（12 连点 12 条渐变，零硬切）；常驻解码 3 路，CPU 约 0.54 核。",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.98/app-release.apk",
-  "publishedAt": "2026-10-28T07:19:07.159Z",
-  "promotedAt": "2026-10-28T07:19:09.418Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.99/app-release.apk",
+  "notes": "动作交接的虚化拉长到 340/420ms 并提前起淡，曲线换成更缓的 smootherstep；几何改用人物主体框对齐，23 段素材脚底落点统一到 444，点击时不再上下滑/显小。",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.99/app-release.apk",
+  "publishedAt": "2026-10-28T07:55:33.131Z",
+  "promotedAt": "2026-10-28T07:55:35.254Z"
 }
