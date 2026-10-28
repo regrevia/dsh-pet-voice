@@ -1,12 +1,12 @@
 {
-  "versionCode": 178,
-  "versionName": "0.9.108",
-  "size": 30061402,
-  "sha256": "c6ed7e1d6d02275cefd042f47a65393f1f2120c7744042e378ccaccbba699ad4",
+  "versionCode": 179,
+  "versionName": "0.9.109",
+  "size": 30063762,
+  "sha256": "54810e835592d662eff11cf075920b820bb9c99693da4f9ec94d67d3a80446df",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.108/app-release.apk",
-  "notes": "弱网不再丢话：发不出去的那句落盘，联网自动补发（同一条 requestId，宿主去重 24h）；补发后把这轮回答捞回手机；只有我问没有回答时进页面自动补回。网络日志改由 Application 接上，对话页也留得住现场。",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.108/app-release.apk",
-  "publishedAt": "2026-10-28T10:33:06.891Z",
-  "promotedAt": "2026-10-28T10:33:09.638Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.109/app-release.apk",
+  "notes": "弱网/被杀不丢话：发之前先落盘，进程被杀重启后同一 requestId 自动补发；只有我问没有答时进页面自动补回；标题行显示电脑正在回复。",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.109/app-release.apk",
+  "publishedAt": "2026-10-28T10:45:53.052Z",
+  "promotedAt": "2026-10-28T10:45:55.506Z"
 }
