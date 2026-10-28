@@ -64,7 +64,8 @@ tunnel_running() {
   local p
   p=$(cat "$TUNNEL_PID" 2>/dev/null)
   if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then return 0; fi
-  p=$(pgrep -f "R 0.0.0.0:${PV_REMOTE_PORT}:127.0.0.1:8443" 2>/dev/null | head -1)
+  # 两种写法都要认：`-R 0.0.0.0:8443:…`（旧脚本起的）和 `-R 8443:…`（launchd 里的 owner 用的是这个）
+  p=$(pgrep -f -- "-R (0\.0\.0\.0:)?${PV_REMOTE_PORT}:127\.0\.0\.1:8443" 2>/dev/null | head -1)
   [ -n "$p" ] || return 1
   mkdir -p "$RUN_DIR" && printf '%s\n' "$p" >"$TUNNEL_PID"
   return 0

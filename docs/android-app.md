@@ -1887,3 +1887,21 @@ App 这边：运行条写「引导中」，这一轮照常计时（不按「排�
 - 现在双层过滤：插件端 `isInjectedUserText()` 里 `## Primary Request and Intent` / `## Key Technical Concepts` 两个小节标题 + `looksLikeCheckpointDump()`（正文 ≥ 600 字且「- `/…」开头的清单 ≥ 4 条）；App 端 `HistoryActivity.isInjectedText()` 同规则，`reload()` 渲染本地库时再挡一道（老版本已经写进手机本地库的残留也会消失）。
 - 顺带修掉「只有图」气泡残留：正文被 `stripImageRefs()` 清空后，自己那侧不再留一颗空的胶囊占位（`bubble.setPadding(0,0,0,0)`）。
 - 实测：重启后对话只剩真实轮次（两张图 + `colour?` + 回复），压缩摘要碎块不再上屏。
+
+## 23.35 转发搬到自己的域名和服务器；旧机器上的转发清干净（0.9.132 起）
+
+- 现在这条链是：手机 → `http://42.193.189.240/pet-voice/`（`pet.regrevia.com` / `pet.regrevia.cn` 的 A 记录都指这个 IP，
+  备案没下来前只开 80，443 关着）→ 服务器 Caddy `:80` → 服务器 `127.0.0.1:8443`（sshd `-R` 落点）→
+  Mac 上 launchd 常驻的 `ssh -N -T -R 8443:127.0.0.1:8443 regrevia` → Mac `127.0.0.1:8443` TLS 反代 → 宿主 `127.0.0.1:62741`。
+- 旧机器（`134.175.47.91`，`ubuntu`）上已无任何转发：`ss -ltnp` 里 80 / 443 / 8443 一个都不监听，
+  `cloudflared` / nginx / caddy 进程也都不在。机器本身还在，退不退由主人决定。
+- 本机 `~/.dsh/pet-voice/public.env`、`local/server.env`、两份 `pair.json`、`tunnel-url.txt` 都已改指这条新链。
+- `scripts/pv-public.sh status` 以前只认 `-R 0.0.0.0:8443:…` 这一种写法，launchd owner 用的是 `-R 8443:…`，
+  于是链在手却报「ssh -R 没跑」。现在两种写法都认（自愈回写 pid 的逻辑不变）。
+
+**实测（0.9.132，2026-10-29）**：
+- `dig +short pet.regrevia.com pet.regrevia.cn` → 两条都是 `42.193.189.240`。
+- 服务器 `ss -ltnp`：`caddy` 只听 `*:80`，`sshd` 守着 `127.0.0.1:8443`；443 没有监听。
+- 公网 `curl http://42.193.189.240/pet-voice/api/state` 无 token → `401`；带 token → `{"ok":true,"pluginVersion":"0.1.32","tokenHint":"56fd5ad1",…}`。
+- 旧机器 `ssh ubuntu@134.175.47.91` 复核：`ss` 无 80/443/8443，`pgrep cloudflared|nginx|caddy` 无输出。
+- `bash scripts/pv-public.sh status` → `8443 反代 在跑（宿主自带）`、`ssh -R 在跑（→ root@42.193.189.240 的 8443）`、`公网 HTTP 401`。
