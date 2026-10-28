@@ -1,12 +1,12 @@
 {
-  "versionCode": 202,
-  "versionName": "0.9.132",
-  "size": 30092386,
-  "sha256": "778df88b84fbee302fb9d7dce8124b11b1e7196dd80a809aafb54ac8aafc39c1",
+  "versionCode": 203,
+  "versionName": "0.9.133",
+  "size": 30092506,
+  "sha256": "8eefd2125608e4d5f91f764822df22566ebc3e072f0dfa663dd3102e81e29498",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.132/app-release.apk",
-  "notes": "手机端：宿主注入的压缩摘要碎块不再上屏；只有图的气泡不再留空胶囊；发图走「先上传→缩略图→再发」，桌面端看到的是真图片附件",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.132/app-release.apk",
-  "publishedAt": "2026-10-28T17:31:51.028Z",
-  "promotedAt": "2026-10-28T17:31:54.150Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.133/app-release.apk",
+  "notes": "0.9.133：手机发的图在电脑端是真图片附件；宿主回显的图手机上也能看",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.133/app-release.apk",
+  "publishedAt": "2026-10-28T18:02:00.078Z",
+  "promotedAt": "2026-10-28T18:02:04.124Z"
 }
