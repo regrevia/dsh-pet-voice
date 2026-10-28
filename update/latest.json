@@ -1,12 +1,12 @@
 {
-  "versionCode": 146,
-  "versionName": "0.9.76",
-  "size": 30028982,
-  "sha256": "e0966602f6d0ba15f3e1b9c305bbac1554f361d6d75c21185044ff2dddac7007",
+  "versionCode": 147,
+  "versionName": "0.9.77",
+  "size": 30029006,
+  "sha256": "2f4047cb5e48481a79449480de5bfa95c5fe3a8e8541b9ac9033f4c481d86217",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.76/app-release.apk",
-  "notes": "0.9.76：连点收口窗口顺延——连点十几下只有第一下进麦克风，不再每 900ms 重新开麦、不再多弹「按住说话」；队列满日志去重",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.76/app-release.apk",
-  "publishedAt": "2026-10-28T00:04:39.408Z",
-  "promotedAt": "2026-10-28T00:04:41.578Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.77/app-release.apk",
+  "notes": "0.9.77：播报拉取间隔 700ms → 300ms，真机单句上屏平均 253 → 150ms、最差 687 → 264ms，空闲 CPU 不变",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.77/app-release.apk",
+  "publishedAt": "2026-10-28T00:14:41.872Z",
+  "promotedAt": "2026-10-28T00:14:43.994Z"
 }
