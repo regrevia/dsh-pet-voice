@@ -18,18 +18,16 @@
     #stage {
       position: fixed; inset: 0;
       pointer-events: none;             /* 视频层不吃触摸，点哪都是点小人 */
-      /* 让位只做「小幅等比缩放 + 整体下移」，不动盒子：改 top/height 会把 canvas 压扁。
-         scale 交给合成器，宽高比不变，毛发/水花跟身体同一个系数。
-         锚点必须在顶部：先按顶部缩（216 窗口只缩 3%，到 0.967），再整体下移约 30px，
-         头顶正好落在气泡下沿，脚底踩窗口底边（只下移不缩 = 头顶被气泡盖住，看着像被裁）。 */
+      /* 让位只做「整体下移」，永远不缩放：缩放会让小人看起来在点下去那一下变小。
+         位移量由 boot.js 按头顶到气泡下沿的距离算，上限取帧底透明留白的余量，
+         所以永远只吃留白、不会真把人裁掉。 */
       transform-origin: 50% 0;
-      transition: transform .26s cubic-bezier(.22,.61,.36,1);
+      transition: transform .42s cubic-bezier(.33,.72,.24,1);
       will-change: transform;
     }
-    /* 系数由 boot.js 在 say() 里按人物主体的实际上下边界算（window.__petBodyBox()）：
-       --shrink = (窗口高 - 气泡底) / 人物高，--shift = 窗口高 - 人物底 × --shrink。
+    /* 位移量由 boot.js 在 say() 里按人物主体的实际上下边界算（window.__petBodyBox()）。
        窗口大小换了会自动跟着算，写死的是兜底值。 */
-    body.has-bubble #stage { transform: translateY(var(--shift, 30px)) scale(var(--shrink, .967)); }
+    body.has-bubble #stage { transform: translateY(var(--shift, 18px)); }
     /* 形象：两路 video 交叉淡化（换动作时先出画再切前台，不闪黑底）。
        素材是 420x465 的透明 VP9，object-fit: contain 撑满窗口不裁切 */
     .pet-video {

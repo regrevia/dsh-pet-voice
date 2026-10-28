@@ -2332,7 +2332,13 @@ function composeDispatchText(text, paths = []) {
   const body = String(text ?? '')
   const list = Array.isArray(paths) ? paths.filter(Boolean).map(String) : []
   if (!list.length) return body
-  const tail = list.map((path) => `${attachmentMark(path)} ${path}`).join('\n')
+  // 图片用 markdown 图片语法：电脑端的渲染层会把「本地绝对路径 + 图片扩展名」直接转成图片预览，
+  // 光写 `[图片] /path` 只会在气泡里留一行路径。路径同时留在语法里，模型照样能拿到能 read 的路径。
+  const tail = list
+    .map((path) =>
+      attachmentMark(path) === '[图片]' ? `![图片](${path.replace(/[()]/g, '\\$&')})` : `[视频] ${path}`,
+    )
+    .join('\n')
   return body.trim() ? `${body}\n\n${tail}` : tail
 }
 
@@ -5605,6 +5611,7 @@ export function apply(ctx, config) {
 
       if (route === 'poll' && method === 'GET') {
         // 与 SSE 等价的「请求-响应」通道：公网隧道缓冲 SSE 时靠它兜底。
+        let pollIdleAt = 0
         let sessionId = url.searchParams.get('sessionId') ?? ''
         if (!sessionId) {
           try {
@@ -5646,7 +5653,15 @@ export function apply(ctx, config) {
         // 明确告诉客户端「你漏了」，别让它以为对话就是断的。
         const oldest = buf.frames.length ? buf.frames[0].seq : 0
         const gap = Boolean(oldest && cursor > 0 && oldest > cursor + 1)
-        netLog('poll', { sessionId, cursor, got: pending.length, sent: batch.length, gap })
+        // 空转的 poll 以前每 300ms 写一行，一分钟就把 200 行的环形日志冲干净，出问题现场没了。
+        // 只在「这次真送了帧」或「发现断档」时记，其余最多一分钟留一行心跳。
+        if (batch.length || gap) {
+          netLog('poll', { sessionId, cursor, got: pending.length, sent: batch.length, gap })
+          pollIdleAt = 0
+        } else if (Date.now() - pollIdleAt > 60_000) {
+          pollIdleAt = Date.now()
+          netLog('poll-idle', { sessionId, cursor, got: pending.length })
+        }
         return sendJson(res, 200, {
           ok: true,
           sessionId,

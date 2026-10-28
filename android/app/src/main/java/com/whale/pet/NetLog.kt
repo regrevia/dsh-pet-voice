@@ -31,9 +31,27 @@ object NetLog {
         app = context.applicationContext
     }
 
+    /** 被折叠的播报轮询次数：正常 200 的 300ms 轮询不逐条记，只在攒够一批时留一行。 */
+    private var sayQuiet = 0
+    private const val SAY_QUIET_BATCH = 40
+
     fun record(path: String, code: Int, ms: Long, note: String = "") {
         lastStatus = code
+        // 播报轮询每 300ms 一条：逐条记会把 200 行的环形日志在一分钟内冲干净，
+        // 真出问题时现场已经没了。正常的轮询折叠成「×N」，失败/慢请求照常逐条留。
+        if (path == "GET /api/say" && code in 200..299 && ms < 3000 && note.isBlank()) {
+            val batch = synchronized(lock) { if (++sayQuiet >= SAY_QUIET_BATCH) { sayQuiet = 0; true } else false }
+            if (batch) push("${fmt.format(Date())} 播报轮询 ×$SAY_QUIET_BATCH 正常 ${ms}ms")
+            return
+        }
+        flushSayQuiet()
         push("${fmt.format(Date())} $path" + (if (code > 0) " http=$code" else "") + " ${ms}ms" + if (note.isBlank()) "" else " $note")
+    }
+
+    /** 有别的网络事件要记：先把折叠着的播报轮询结掉，免得前后顺序看不出来。 */
+    private fun flushSayQuiet() {
+        val n = synchronized(lock) { val v = sayQuiet; sayQuiet = 0; v }
+        if (n > 0) push("${fmt.format(Date())} 播报轮询 ×$n 正常")
     }
 
     fun reconnect() {

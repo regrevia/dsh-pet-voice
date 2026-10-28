@@ -403,7 +403,7 @@ class PetTurn(
         adoptResolved(sessionId, adoptionBaseline())
         startPollFallback()
         status("正在想…")
-        val deadline = System.currentTimeMillis() + 180_000
+        val deadline = System.currentTimeMillis() + 360_000
         while (!cancelled.get() && !ended.get() && System.currentTimeMillis() < deadline) {
             Thread.sleep(120)
         }
@@ -732,7 +732,7 @@ class PetTurn(
                 val sid = expectedSession.ifBlank { sessionId }
                 if (sid.isBlank()) return@Thread
                 var cursor = turnCursor
-                val deadline = System.currentTimeMillis() + 180_000
+                val deadline = System.currentTimeMillis() + 360_000
                 var failed = 0
                 var failedSince = 0L
                 // 这一行状态只报一次断、一次恢复，别让兜底通道把界面刷成日志

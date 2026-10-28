@@ -284,7 +284,6 @@ window.PetBridge = {
       // 气泡底边：top 2 + 高 68 + 4px 缝（68 与 #bubble 的 height 一致，两处要一起改）
       const bubBottom = 74
       const box = window.__petBodyBox ? window.__petBodyBox() : null
-      let shrink = 0.96
       let shiftPx = Math.round(stageH * 0.14)
       if (box && box.h > 0 && box.bottom > box.top) {
         // 让位的目标只有一个：头顶露在气泡下沿之外、脚不跑出窗口。
@@ -292,23 +291,38 @@ window.PetBridge = {
         // 216 窗口下是 (216-74)/146.8 ≈ 0.967，也就是只缩 3%，肉眼看不出来。
         // 旧算法按 (窗口高 - 让位高) / 窗口高 缩到 0.667：说一句话人就突然小一圈，
         // 那是「输出气泡的时候突然变小很多」的根源。
-        shrink = Math.min(1, (box.h - bubBottom) / (box.bottom - box.top))
-        shrink = Math.max(0.85, shrink)
-        // 脚底贴窗口下沿：下移量正好把缩掉的空隙补回来，人物不下坠也不悬空。
-        shiftPx = Math.round(box.h - box.bottom * shrink)
+        // 让位只下移、不缩放：缩放就是「点一下变小」的观感来源。
+        // 下移量 = 头顶到气泡下沿的距离；上限取帧底透明留白的余量（CH-TARGET_BOTTOM
+        // 换算成舞台像素后再多给 2%，保证只吃留白、不真裁到脚）。
+        const headClear = Math.max(0, bubBottom - box.top + 2)
+        const slack = Math.max(0, box.h - box.bottom) + box.h * 0.02
+        shiftPx = Math.round(Math.min(headClear, slack))
       }
       document.documentElement.style.setProperty('--shift', shiftPx + 'px')
-      document.documentElement.style.setProperty('--shrink', shrink.toFixed(4))
+      document.documentElement.style.setProperty('--shrink', '1')
       // 只在这两个值真的变了时才打一行（窗口尺寸换了才会有），平时一条不多；
       // 用 warn 是因为宿主只把 warn/error 转进 logcat（PetJs），info 看不到。
-      const key = shiftPx + '/' + shrink.toFixed(4)
+      const key = shiftPx + ''
       if (key !== sayGeomKey) {
         sayGeomKey = key
-        console.warn('[bubble] 让位 ' + shiftPx + 'px / 缩放 ' + shrink.toFixed(3))
+        console.warn('[bubble] 让位 ' + shiftPx + 'px')
       }
     }
     bubble.classList.add('show')
     document.body.classList.add('has-bubble')
+    // 让位实测：气泡可见期间舞台的合成矩阵必须是纯平移（缩放 = 1），
+    // 出现缩放就是「点一下变小」的观感来源。520ms 后再量，避开 .42s 过渡。
+    setTimeout(() => {
+      try {
+        const m = getComputedStyle(stage).transform
+        let scale = '1'
+        if (m && m.startsWith('matrix(')) {
+          const p = m.slice(7, -1).split(',').map(Number)
+          scale = Math.hypot(p[0], p[1]).toFixed(4)
+        }
+        console.warn('[bubble] 舞台矩阵 ' + m + ' 缩放 ' + scale)
+      } catch (e) {}
+    }, 520)
     // 量真实高度再决定身体让位多少：一行、两行、三行都对齐，末字不会被裁。
     // 必须同步量：待机 900ms 后 rAF 会被冻掉，放进 rAF 里这段永远不执行——之前就踩过，
     // --shift 一直是空值、退回默认 52px，120dp 档才会贴头。

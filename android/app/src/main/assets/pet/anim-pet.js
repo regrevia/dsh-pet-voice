@@ -601,9 +601,12 @@ export function createPet (container) {
     const n = NORM[clip] || [0, 0, CW, CH]
     const b = BODY[clip] || n
     const bcx = b[0] + b[2] / 2
+    const bBot = b[1] + b[3]
     const dw = n[2] * SCALE, dh = n[3] * SCALE
-    let dx = TARGET_CX + (n[0] - bcx) * SCALE
-    const dy = TARGET_BOTTOM - dh
+    // 用「人物主体框」(BODY) 对齐，而不是整块内容框(NORM)：各片段的裁剪边距不一样，
+    // 按内容框贴底会让脚底落在不同高度 —— 换动作时人物整体上下滑一下，看着就像「变小/掉一下」。
+    let dx = TARGET_CX - (bcx - n[0]) * SCALE
+    const dy = TARGET_BOTTOM - (bBot - n[1]) * SCALE
     // 气泡这类特效会伸出画布左右：整体挪回画布内，宁可偏一两像素也不裁掉
     if (dx < 0) dx = 0
     else if (dx > CW - dw) dx = Math.max(0, CW - dw)
@@ -643,8 +646,8 @@ export function createPet (container) {
     const f = fadePrev
     if (f) {
       const t = Math.min(1, (nowMs() - f.t0) / (f.dur || 150))
-      // smoothstep：两端缓起缓落，动作交接不「跳闪」
-      const e = t * t * (3 - 2 * t)
+      // smootherstep：两端比 smoothstep 更缓，起步和收尾都看不出「开始淡」那一刻
+      const e = t * t * t * (t * (t * 6 - 15) + 10)
       // 真正的交叉淡化：旧层 1-e、新层 e，画面不会整体变虚（背景透出来）也不会双影——
       // 前提是两层用同一个缩放（SCALE 对所有片段一致），位移按 e 从旧落位滑到新落位。
       // 双影 = 两层各按各的落位画；这里只差一次平移，淡化过去就是「换了个姿势」。
@@ -772,7 +775,7 @@ export function createPet (container) {
       }
       if (!o.chain && name !== 'idle') idleHold = nowMs() + 6000
       // 进动作略快（200ms）让反馈跟手，回待机更慢（260ms）显得稳
-      const dur = o.fade === undefined ? (o.once ? 200 : 240) : o.fade
+      const dur = o.fade === undefined ? (o.once ? 520 : 640) : o.fade
       if (prev && prev !== next && prev.readyState >= 2 && dur > 0) {
         // 旧层继续播完这段渐变（画面在动，不是定格），渐变结束由 draw() 停掉它
         fadePrev = { vid: prev, clip: vidClip.get(prev) || name, t0: nowMs(), dur, geo: geoAt(vidClip.get(prev) || name) }
@@ -817,7 +820,7 @@ export function createPet (container) {
   function playChain (list, overlapMs) {
     if (destroyed || !list || !list.length) return
     clearTimeout(chainTimer)
-    const gap = overlapMs === undefined ? 120 : overlapMs
+    const gap = overlapMs === undefined ? 40 : overlapMs
     const step = (i) => {
       if (destroyed) return
       if (i >= list.length) return
@@ -924,7 +927,7 @@ export function createPet (container) {
           const three = Math.random() < 0.18
           const c = three ? pickFresh(pool.filter((k) => k !== a && k !== b), Math.random()) : ''
           if (three) idleRecent = [c].concat(idleRecent).slice(0, 4)
-          playChain(three ? [a, 'idle', b, 'idle', c, 'idle'] : [a, 'idle', b, 'idle'], 200)
+          playChain(three ? [a, 'idle', b, 'idle', c, 'idle'] : [a, 'idle', b, 'idle'], 460)
         }
       }
       scheduleIdle()
