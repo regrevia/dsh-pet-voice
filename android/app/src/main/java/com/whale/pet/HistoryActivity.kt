@@ -76,7 +76,7 @@ class HistoryActivity : Activity() {
         /** 一次向宿主要多少条：一页多一点，翻两下刚好一小段。 */
         const val HOST_PAGE = 40
         /** 页面开着时多久核一次「这只对话还在不在、叫什么」（不跟电脑切）。 */
-        const val HOST_WATCH_MS = 20_000L
+        const val HOST_WATCH_MS = 8_000L  // 空闲时也每 8 s 对一下队列/目标，电脑那边改了很快看得见
 
         /** 聊天里能看的图：跟宿主 /api/file 的白名单一致。 */
         val IMAGE_EXT = setOf("jpg", "jpeg", "png", "webp", "gif")
@@ -662,11 +662,25 @@ class HistoryActivity : Activity() {
         peekLabel.visibility = if (peekTitle.isBlank()) View.GONE else View.VISIBLE
     }
 
+    /** 宿主那边还没轮到跑的那几句：跟桌面端同一份队列，撤掉/调序也改同一份。 */
+    private fun renderQueueOf(detail: JSONObject) {
+        val inbox = detail.optJSONArray("inbox")
+        val queued = (0 until (inbox?.length() ?: 0)).mapNotNull { i ->
+            val row = inbox?.optJSONObject(i) ?: return@mapNotNull null
+            val text = row.optString("text").trim().replace('\n', ' ')
+            val id = row.optString("id").trim()
+            if (text.isBlank() || id.isBlank()) null else Queued(id, text)
+        }
+        renderQueue(queued)
+    }
+
     /**
      * 目标行：有目标才出现，没目标就整块收起（不占地方、不说空话）。
      * 右边那个动作跟桌面端一致——在跑的给「暂停」，停下的给「继续」。
      */
     private fun renderGoal(detail: JSONObject) {
+        // 待输入队列和目标是同一份 detail，但队列条不依赖目标：先渲染，别被下面的提前 return 吞掉
+        renderQueueOf(detail)
         val goal = detail.optJSONObject("goal")
         if (goal == null || goal.optString("id").isBlank()) {
             goalPending = false
@@ -698,14 +712,6 @@ class HistoryActivity : Activity() {
             goalAction.text = if (phase == "complete") "" else if (phase == "active") "暂停" else "继续"
         }
         goalAction.visibility = if (goalAction.text.isBlank()) View.GONE else View.VISIBLE
-        val inbox = detail.optJSONArray("inbox")
-        val queued = (0 until (inbox?.length() ?: 0)).mapNotNull { i ->
-            val row = inbox?.optJSONObject(i) ?: return@mapNotNull null
-            val text = row.optString("text").trim().replace('\n', ' ')
-            val id = row.optString("id").trim()
-            if (text.isBlank() || id.isBlank()) null else Queued(id, text)
-        }
-        renderQueue(queued)
         goalQueue.visibility = View.GONE
         goalBar.visibility = View.VISIBLE
     }
