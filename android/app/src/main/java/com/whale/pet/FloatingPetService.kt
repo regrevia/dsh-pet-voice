@@ -99,6 +99,9 @@ class FloatingPetService : Service() {
 
     /** 当前前台服务是否带 microphone 类型：没有这一位，Android 12+ 会把后台录音整段静音成全零。 */
     private var fgsMic = false
+    /** 闹钟已经挂上了就不再重挂：否则每次被闹钟叫醒都会把下一次往后推。 */
+    @Volatile
+    private var keepAliveArmed = false
     /** 流式气泡节流：60ms 内只刷一次，60fps 下看不出跳。 */
     private var lastBubbleAt = 0L
     /** 嘴型合帧：录音线程 50Hz 推上来，只把最后一个值交给主线程，别把 JS 队列灌满。 */
@@ -394,6 +397,24 @@ class FloatingPetService : Service() {
             applyDisplayMode()
             return START_STICKY
         }
+        if (action == ACTION_REVIVE) {
+            // 闹钟把自己叫回来：进程可能是新的，也可能还活着（只是闹钟到点了）。
+            // 一律按「后台恢复」启动：不要麦克风类型，Android 14+ 会拒；
+            // 进程还活着时这条分支是幂等的，重复走一遍不吃亏。
+            if (!startAsForeground(mic = false)) {
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            keepAlive()
+            applyConfigIfChanged()
+            ensureOverlay()
+            startHostStateTick()
+            applyDisplayMode()
+            maybeAutoUpdate()
+            // 闹钟链：这次是被叫醒的，顺手把下一次挂上
+            armRevive(KEEPALIVE_MS)
+            return START_STICKY
+        }
         // 只有用户自己点「立即对话」才用 microphone 类型；
         // 开机恢复 / 系统 START_STICKY 拉回一律走 specialUse（Android 14+ 禁止后台起麦克风前台服务）。
         val restored = action != ACTION_START
@@ -435,36 +456,74 @@ class FloatingPetService : Service() {
     }
 
     /**
-     * 系统或小米把进程杀掉后 START_STICKY 不一定有人来拉：留一个 15 分钟的闹钟，
-     * 到点由系统 AlarmManager 把自己叫醒（闹钟归系统管，进程死掉它还在）。
+     * 系统或小米把进程杀掉后 START_STICKY 不一定有人来拉：挂一个「叫回来」的闹钟，
+     * 到点由系统 AlarmManager 拉起服务（闹钟归系统管，进程死掉它还在）。
+     * 每次被叫醒后自己续下一次，所以是闹钟链，不是一次性。
      * 用户自己按「退出」时在 [quitAll] 里取消，不会自己又爬起来。
      */
     private fun keepAlive() {
+        if (keepAliveArmed) return
+        keepAliveArmed = true
+        // 旧版本把叫醒意图写成 ACTION_START，同一个 requestCode 换了 action 就等于换了闹钟，
+        // 老的会一直留着并在后台申请麦克风类型（必被拒）。升级后顺手清掉。
+        try {
+            val am = getSystemService(AlarmManager::class.java)
+            am.cancel(
+                PendingIntent.getService(
+                    this,
+                    KEEPALIVE_REQ,
+                    Intent(this, FloatingPetService::class.java).setAction(ACTION_START),
+                    PendingIntent.FLAG_IMMUTABLE,
+                ),
+            )
+            am.cancel(
+                PendingIntent.getService(
+                    this,
+                    KEEPALIVE_REQ + 1,
+                    Intent(this, FloatingPetService::class.java).setAction(ACTION_START),
+                    PendingIntent.FLAG_IMMUTABLE,
+                ),
+            )
+        } catch (_: Exception) {
+        }
+        armRevive(KEEPALIVE_FIRST_MS)
+    }
+
+    /**
+     * 挂下一次叫醒。精确闹钟可用就只用精确的（到点自己再续），
+     * 不可用（旧系统 / 用户没给权限）才退回普通重复闹钟兜底。
+     */
+    private fun armRevive(delayMs: Long) {
         val am = try {
             getSystemService(AlarmManager::class.java)
         } catch (_: Exception) {
             null
         } ?: return
-        val now = SystemClock.elapsedRealtime()
-        // 兜底：普通重复闹钟，权限不够、精确闹钟被限流时靠它在十几分钟内爬起来
+        val at = SystemClock.elapsedRealtime() + delayMs
+        val exactOk = Build.VERSION.SDK_INT < 31 ||
+            try {
+                am.canScheduleExactAlarms()
+            } catch (_: Exception) {
+                false
+            }
+        if (exactOk) {
+            try {
+                am.setExactAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    at,
+                    keepAliveIntent(KEEPALIVE_REQ),
+                )
+                return
+            } catch (_: Exception) {
+            }
+        }
         try {
             am.setInexactRepeating(
                 AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                now + KEEPALIVE_FIRST_MS,
+                at,
                 KEEPALIVE_MS,
                 keepAliveIntent(KEEPALIVE_REQ),
             )
-        } catch (_: Exception) {
-        }
-        // 准点那一次：Android 12+ 允许的话用精确闹钟，别等系统的 15 分钟窗口
-        try {
-            if (Build.VERSION.SDK_INT < 31 || am.canScheduleExactAlarms()) {
-                am.setExactAndAllowWhileIdle(
-                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                    now + KEEPALIVE_FIRST_MS,
-                    keepAliveIntent(KEEPALIVE_REQ + 1),
-                )
-            }
         } catch (_: Exception) {
         }
     }
@@ -472,11 +531,12 @@ class FloatingPetService : Service() {
     private fun keepAliveIntent(req: Int): PendingIntent = PendingIntent.getService(
         this,
         req,
-        Intent(this, FloatingPetService::class.java).setAction(ACTION_START),
+        Intent(this, FloatingPetService::class.java).setAction(ACTION_REVIVE),
         PendingIntent.FLAG_IMMUTABLE,
     )
 
     private fun cancelKeepAlive() {
+        keepAliveArmed = false
         try {
             val am = getSystemService(AlarmManager::class.java)
             am.cancel(keepAliveIntent(KEEPALIVE_REQ))
@@ -2380,6 +2440,8 @@ class FloatingPetService : Service() {
 
     companion object {
         const val ACTION_START = "com.whale.pet.action.START"
+        /** 保活闹钟专用：后台恢复，绝不申请麦克风类型。 */
+        const val ACTION_REVIVE = "com.whale.pet.action.REVIVE"
         const val ACTION_HIDE = "com.whale.pet.action.HIDE"
     const val ACTION_SHOW = "com.whale.pet.action.SHOW"
     const val ACTION_STOP = "com.whale.pet.action.STOP"

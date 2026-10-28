@@ -1794,17 +1794,25 @@ App 这边：运行条写「引导中」，这一轮照常计时（不按「排�
 
 不点退出、也不是划掉任务，就是进程被系统/小米后台清理杀掉：`START_STICKY` 在这台机器上不生效——实测 `kill -9` 后 4 分钟没人来拉，悬浮窗、叫名字、待发补发全停。
 
-现在服务起来时挂两个系统闹钟（`AlarmManager`，闹钟归系统管，进程死掉它还在）：
+现在服务起来时挂一条**闹钟链**（`AlarmManager`，闹钟归系统管，进程死掉它还在）：
 
 | 闹钟 | 时刻 | 作用 |
 | --- | --- | --- |
-| 精确一次性（`setExactAndAllowWhileIdle`） | 起服务后 60 s | 准点把自己叫回来；`canScheduleExactAlarms()` 为假时跳过 |
-| 普通重复（`setInexactRepeating`，15 分钟） | 起服务后 60 s 起 | 精确闹钟被限流时的兜底，系统窗口最多十几分钟 |
+| 精确一次性（`setExactAndAllowWhileIdle`） | 起服务后 60 s，之后每次被叫醒再挂 +15 分钟 | 准点把自己叫回来，回来时顺手续下一次；`canScheduleExactAlarms()` 为假时跳过 |
+| 普通重复（`setInexactRepeating`，15 分钟） | 只在精确闹钟不可用时 | 旧系统或用户没给权限时的兜底，系统窗口最多十几分钟 |
 
-清单里加了 `USE_EXACT_ALARM`（Android 13+ 装机即给）和 `SCHEDULE_EXACT_ALARM`（`maxSdkVersion=32`）。`dumpsys alarm` 里能看到两条：一条 `window=+11m15s`，一条 `window=0 exactAllowReason=policy_permission`。
+闹钟意图的 action 是 `com.whale.pet.action.REVIVE`（0.9.126 起），走「恢复」分支：`startAsForeground(mic = false)`，
+不向系统申请 `microphone` 类型——Android 14+ 禁止后台起麦克风前台服务，申请必被拒后再降级，白折腾一次。
+旧版本用的是 `ACTION_START`（同一个 requestCode、不同 action = 不同 PendingIntent），升级后 `keepAlive()` 会先把那两条
+旧闹钟 `cancel` 掉，否则它们会在后台以麦克风类型把自己拉起来。
+
+清单里加了 `USE_EXACT_ALARM`（Android 13+ 装机即给）和 `SCHEDULE_EXACT_ALARM`（`maxSdkVersion=32`）。`dumpsys alarm` 里能看到一条
+`window=0 exactAllowReason=policy_permission` 的 `action.REVIVE`，下一次在 15 分钟内；带 `window=+11m15s` 的重复项只在降级路径出现。
 
 自愈回来走的是「恢复」分支：重建悬浮窗、通知回到「按住说话」，唤醒引擎不自己抢麦克风（第一次用还是要点一下），待发队列照常补发。
 
-**实测（0.9.125 / vc195）**：起服务 → `su -c "kill -9 <pid>"` → 45 s 仍无进程 → 75 s 内新 pid 起来，`dumpsys activity services` 显示 `FloatingPetService isForeground=true`，`dumpsys window` 里 `com.whale.pet` 的 `APPLICATION_OVERLAY` 窗口回来了（676×462 @1652,2306），`dumpsys alarm` 里两条闹钟已重新挂上——链条不会断。
+**实测（0.9.125 / vc195，双闹钟版）**：起服务 → `su -c "kill -9 <pid>"` → 45 s 仍无进程 → 75 s 内新 pid 起来，`dumpsys activity services` 显示 `FloatingPetService isForeground=true`，`dumpsys window` 里 `com.whale.pet` 的 `APPLICATION_OVERLAY` 窗口回来了（676×462 @1652,2306），`dumpsys alarm` 里两条闹钟已重新挂上——链条不会断。
+
+**实测（0.9.126 / vc196，链式版）**：起服务后 `dumpsys alarm` 只有一条 `action.REVIVE`（`window=0 exactAllowReason=policy_permission`，`origWhen=+51s`）；60 s 后被叫醒一次、`keepAliveArmed` 挡住重挂，同一时间点出现下一条 `origWhen=+14m32s` 的精确闹钟——恢复后链条自动往后接 15 分钟，进程没死时不会每 15 分钟被无条件重置。
 
 **边界**：用户按通知「退出」走 `quitAll()`，那里先 `cancelKeepAlive()` 再停服务，不会自己又爬起来；开机自启仍走 `BOOT_COMPLETED` 那条老路。小米的「自启动/省电策略」仍可能整体压制，闹钟窗口也就到十几分钟这个量级，不承诺秒级。
