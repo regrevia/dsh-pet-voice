@@ -1,12 +1,12 @@
 {
-  "versionCode": 189,
-  "versionName": "0.9.119",
-  "size": 30076254,
-  "sha256": "2a6f681220feeb84503e51300a6474a9f41eede5a5ee8f5b7d40f804c1ebb9ff",
+  "versionCode": 190,
+  "versionName": "0.9.120",
+  "size": 30076810,
+  "sha256": "b2f7b111f907d987229b283c1cfcf4ed52992526d1d2a58d2df30864730fe141",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.119/app-release.apk",
-  "notes": "0.9.119：宿主拒收的会话一次说清（409），不再无限退避重试；引导/排队回执与单测补齐",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.119/app-release.apk",
-  "publishedAt": "2026-10-28T13:10:23.084Z",
-  "promotedAt": "2026-10-28T13:10:25.859Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.120/app-release.apk",
+  "notes": "0.9.120：补发被宿主拒收时气泡说一句；引导重试沿用同一 requestId，网络抖动不会落成两条；插件 0.1.24 修好播报游标对齐（积压的播报不再被跳过）",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.120/app-release.apk",
+  "publishedAt": "2026-10-28T13:36:57.434Z",
+  "promotedAt": "2026-10-28T13:37:00.333Z"
 }
