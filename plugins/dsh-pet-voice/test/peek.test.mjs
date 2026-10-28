@@ -219,10 +219,51 @@ test('宿主塞的运行时上下文不算用户说的话：对话页一条都�
     'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.',
     '<system-reminder>\nUpdated instructions from: ~/.dsh/AGENTS.md',
     '<available_skills>\n- foo',
+    'Auto schedule: this turn is long enough that prose is now the cost.',
+    '## Primary Request and Intent\n- 起点：我想申请一个域名',
+    '前言\n\n## Key Technical Concepts\n- 域名是租来的名字',
   ]) {
     assert.equal(isInjectedUserText(body), true, body)
   }
   assert.equal(isInjectedUserText('最近进展怎么样'), false)
+  // 摘要被切成碎块：长文 + 一串反引号路径清单
+  const dump = [
+    '- `/Users/apple/Desktop/odd/server-setup.sh` — 已创建，随后已编辑',
+    '- `/Users/apple/Desktop/odd/Caddyfile` — 已创建，阶段 1 启用 80',
+    '- `/Users/apple/.ssh/tencent-guangzhou-lighthouse` — `-rw-------`，ed25519',
+    '- `/Users/apple/.ssh/config` — **已编辑**：在现有主机之后追加了块',
+    '这些是当时落盘的位置和指纹，口令存在 Keychain 里，已经加载进 agent。收尾时把上面的清单核一遍。',
+    '另外把 public.env 的 PV_PUBLIC 指到新域名，顺手确认旧隧道没人再连。' + '收尾时把这些位置再核一遍。'.repeat(30),
+  ].join('\n')
+  assert.equal(isInjectedUserText(dump), true)
+  assert.equal(isInjectedUserText('帮我看看这几条：\n' + '正文'.repeat(500)), false)
+})
+
+test('注入段和原话同处一条消息：只剔掉注入那段', () => {
+  const lines = [
+    {
+      seq: 1,
+      type: 'user/message',
+      time: 1,
+      data: {
+        content: [
+          { type: 'text', text: '看这张图' },
+          { type: 'text', text: 'Auto schedule: this turn is long enough that prose is now the cost.' },
+        ],
+      },
+    },
+    {
+      seq: 2,
+      type: 'user/message',
+      time: 2,
+      data: { content: [{ type: 'text', text: 'Fast mode reminder: the context was just compacted' }] },
+    },
+  ]
+  const entries = entriesOfTranscript(lines.map((line) => JSON.stringify(line)).join('\n'))
+  assert.deepEqual(
+    entries.map((entry) => [entry.role, entry.text]),
+    [['user', '看这张图']],
+  )
 })
 
 test('转录里只剩用户原话：注入内容和非空正文都按规矩处理', () => {

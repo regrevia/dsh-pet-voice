@@ -2477,6 +2477,13 @@ class FloatingPetService : Service() {
      * 聊天页那一轮的回复（[ChatWatch] 递进来的增量）：App 在后台就用桌宠讲出来，
      * 跟前台语音回合走同一个 say + TTS 入口，气泡和声音都不另起一套。
      */
+    /**
+     * 聊天页自己那一路正在念这一轮回复时置 true：服务侧的兜底观察者（ChatWatch）别再念一遍。
+     * 以前两边同时念，手机上是「一前一后、同一句话」的二重音——退出页面后页面那路还活着，兜底那路也开了口。
+     */
+    @Volatile
+    var appReplySpeaking = false
+
     fun deliverWatched(text: String, final: Boolean) {
         val s = inst ?: return
         val body = text.trim()
@@ -2484,6 +2491,7 @@ class FloatingPetService : Service() {
         s.main.post {
             if (s.destroyed) return@post
             if (s.turnActive) return@post // 自己的语音回合正在跑，别两条线抢麦
+            if (appReplySpeaking) return@post // 聊天页那路已经在念了，别叠一层
             if (s.appFg) return@post
             s.setMode("talking")
             s.say(body)

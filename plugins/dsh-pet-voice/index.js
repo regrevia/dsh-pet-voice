@@ -1691,6 +1691,21 @@ function partsText(parts) {
   return out.join('').trim()
 }
 
+/**
+ * 用户槽里只留主人真说的话：宿主注入的提醒按「段」剔掉。
+ * 一段是 [文本段] 或整条字符串；剔完没剩下就当这条不算主人发的。
+ */
+function ownerSaidText(parts) {
+  if (typeof parts === 'string') return isInjectedUserText(parts) ? '' : parts.trim()
+  if (!Array.isArray(parts)) return ''
+  const out = []
+  for (const part of parts) {
+    const text = typeof part === 'string' ? part : part?.type === 'text' ? part.text : ''
+    if (typeof text === 'string' && text.trim() && !isInjectedUserText(text)) out.push(text)
+  }
+  return out.join('').trim()
+}
+
 function partsTextOfType(parts, type) {
   if (!Array.isArray(parts)) return ''
   const out = []
@@ -1721,7 +1736,8 @@ function entriesOfTranscript(text) {
     const time = toMs(event?.time)
     const data = event?.data ?? {}
     if (type === 'user/message') {
-      const body = stripPeekText(partsText(data.content ?? data.message?.content))
+      // 注入段可能和主人原话同处一条消息（`问题正文\n\nAuto schedule: …`）：按段剔，别把整句一起丢。
+      const body = stripPeekText(ownerSaidText(data.content ?? data.message?.content))
       if (body && !isInjectedUserText(body)) {
         entries.push({ seq, role: 'user', text: clipText(body, MESSAGE_TEXT_LIMIT), time })
       }
@@ -2318,6 +2334,8 @@ export const __uploadInternals = {
   handleUpload,
   attachmentMark,
   composeDispatchText,
+  imageMediaTypeFor,
+  buildAttachmentBlocks,
   normalizeAttachments,
   MAX_UPLOAD_BYTES: UPLOAD_MAX_BYTES,
   MAX_VIDEO_BYTES: UPLOAD_MAX_VIDEO_BYTES,
@@ -2530,6 +2548,53 @@ function composeDispatchText(text, paths = []) {
     )
     .join('\n')
   return body.trim() ? `${body}\n\n${tail}` : tail
+}
+
+/** 图片扩展名 → 宿主认的 mediaType；不认识的回空（这类不进图片块，走路径回退）。 */
+function imageMediaTypeFor(path) {
+  const ext = extname(String(path ?? '')).slice(1).toLowerCase()
+  if (ext === 'png') return 'image/png'
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
+  if (ext === 'webp') return 'image/webp'
+  if (ext === 'gif') return 'image/gif'
+  return ''
+}
+
+/**
+ * 附件上行走宿主的附件存储：图片变成真正的 image 块（桌面端显示成图片附件，
+ * 和电脑端拖图进来一个样），视频/存不进去的图回退成路径行。
+ *
+ * 以前只拼一行 `![图片](/abs/path)`：手机上看得见，电脑端只是一段 markdown 文本，
+ * 主人原话是「手机发的图片到桌面端还是不能显示成图片附件」。
+ * 返回 {images:[ImageBlock], leftover:[path]}；宿主没有附件服务时全走 leftover。
+ */
+async function buildAttachmentBlocks(ctx, paths = [], readers = {}) {
+  const list = Array.isArray(paths) ? paths.filter(Boolean).map(String) : []
+  if (!list.length) return { images: [], leftover: [] }
+  const svc = ctx.get?.('attachments')
+  const read = readers.readFileSync ?? readFileSync
+  const base = readers.basename ?? ((p) => String(p).split(/[\\/]/).pop() || 'image')
+  const images = []
+  const leftover = []
+  for (const path of list) {
+    const mediaType = attachmentMark(path) === '[图片]' ? imageMediaTypeFor(path) : ''
+    if (!svc?.saveImages || !mediaType) {
+      leftover.push(path)
+      continue
+    }
+    try {
+      const data = read(path)
+      const [ref] = await svc.saveImages([{ data, mediaType, name: base(path) }])
+      // 宿主各版本 ref 的 id 字段名不完全一致：认得出是哪一张就够，别为了字段名把图退回去。
+      const known = Boolean(ref && (ref.attachmentId || ref.id || ref.ref?.id))
+      if (known) images.push({ type: 'image', attachment: ref })
+      else leftover.push(path)
+    } catch (error) {
+      LOG('附件存进宿主失败：', error?.message ?? error)
+      leftover.push(path)
+    }
+  }
+  return { images, leftover }
 }
 
 /**
@@ -3335,12 +3400,33 @@ const INJECTED_USER_PATTERNS = [
   /^<system-reminder>/,
   /^<available[-_]skills>/,
   /^<environment_context>/,
+  // 宿主自己塞进 user 槽的「上下文压缩摘要」和「Fast mode 提醒」：是给模型看的，不是主人说的话。
+  /^This is an automatically generated checkpoint\b/i,
+  /^The context was just compacted\b/i,
+  /^Fast mode reminder[:：]/i,
+  // 轮内调度提醒（`Auto schedule: this turn is long enough …`）同样是宿主说给模型听的。
+  /^Auto schedule[:：]/i,
+  /^\[?checkpoint\]?\s*condensing an earlier span\b/i,
+  // 压缩摘要正文本身（标题头被宿主吃掉时只剩这些小节）：同样一条都不上屏。
+  /^##\s*Primary Request and Intent\b/im,
+  /^##\s*Key Technical Concepts\b/im,
 ]
 
 function isInjectedUserText(text) {
   const body = String(text ?? '').trim()
   if (!body) return true
-  return INJECTED_USER_PATTERNS.some((pattern) => pattern.test(body))
+  if (INJECTED_USER_PATTERNS.some((pattern) => pattern.test(body))) return true
+  return looksLikeCheckpointDump(body)
+}
+
+/**
+ * 压缩摘要被宿主切成碎块塞进 user 槽时，开头那几个小节标题已经没了，只剩一串
+ * 「- `/绝对路径` — 做了什么」。主人自己讲话很少长这样，长文 + 多条路径清单就算摘要残留。
+ */
+function looksLikeCheckpointDump(body) {
+  if (body.length < 600) return false
+  const bullets = body.match(/^[-*]\s*`/gm)
+  return Boolean(bullets && bullets.length >= 4)
 }
 
 /** sessionId -> { text, title, at }：刚挂上去的旁听材料，下一轮同步隐藏提示时一起带上。 */
@@ -3564,7 +3650,9 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
   if (!attachments.ok) return { status: 400, body: { ok: false, error: attachments.error } }
   const attachmentPaths = attachments.paths
   if (!text && !attachmentPaths.length) return { status: 400, body: { ok: false, error: 'text 为空' } }
-  let promptText = composeDispatchText(text, attachmentPaths)
+  // 图片走宿主附件存储（桌面端显示成图片附件），其余按原样拼路径行。
+  const blocks = await buildAttachmentBlocks(ctx, attachmentPaths)
+  let promptText = composeDispatchText(text, blocks.leftover)
   const controller = ctx.get?.('sessionController')
   if (!controller?.prompt) return { status: 503, body: { ok: false, error: '宿主缺少 sessionController' } }
 
@@ -3706,7 +3794,11 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
       requestId: rid || randomBytes(8).toString('hex'),
       sessionId,
       mode: steerInto ? 'steer' : 'queue',
-      content: [{ type: 'text', text: buildDispatchPrompt(promptText) }],
+      content: [
+        { type: 'text', text: buildDispatchPrompt(promptText) },
+        // 真图片块排在文字后面：电脑端气泡里是缩略图附件，模型拿到的是图本身。
+        ...blocks.images,
+      ],
       clientTimeZone: tzOf(req),
     },
     ac.signal,
@@ -3718,8 +3810,28 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
   })
 
   // 立刻回执，别让手机等整轮；若 1.2s 内就报错则如实返回，方便现场定位契约问题。
+  // 附件块被宿主拒（版本契约不一致）：退一步只发文字 + 路径，别让整句话发不出去。
+  let settledPrompt = prompt
+  if (blocks.images.length) {
+    settledPrompt = prompt.catch(async (error) => {
+      LOG('图片块派发失败，退回路径：', error?.message ?? error)
+      deps.emit?.(sessionId, 'error', { message: '图片没进会话，已按路径发' })
+      const retryText = composeDispatchText(text, attachmentPaths)
+      return controller.prompt(
+        {
+          requestId: randomBytes(8).toString('hex'),
+          sessionId,
+          mode: steerInto ? 'steer' : 'queue',
+          content: [{ type: 'text', text: buildDispatchPrompt(retryText) }],
+          clientTimeZone: tzOf(req),
+        },
+        ac.signal,
+      )
+    })
+  }
+
   const first = await Promise.race([
-    prompt.then((value) => ({ settled: true, value }), (error) => ({ failed: true, error })),
+    settledPrompt.then((value) => ({ settled: true, value }), (error) => ({ failed: true, error })),
     new Promise((resolve) => setTimeout(() => resolve({ settled: false }), 1200)),
   ])
   if (first.failed) {
@@ -3737,7 +3849,7 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
     return { status: 502, body: { ok: false, error: String(first.error?.message ?? first.error) } }
   }
   if (first.settled === false) {
-    prompt.catch((error) => {
+    settledPrompt.catch((error) => {
       LOG('prompt 异步失败：', error?.message ?? error)
       // 1.2s 内就把 202 发出去了，这轮可能压根没起来（还没 turn/start 就炸）：
       // 只撤回还没被认领的记号；已经被 turn/start 认领的 origin=pet 是对的，留着。
@@ -6486,7 +6598,14 @@ export function apply(ctx, config) {
 
       // 本机语音识别：POST 识别，GET 是只读探针（方便 curl 自检「装没装/在不在跑」）。
       if (route === 'diag' && method === 'GET') {
-        return sendJson(res, 200, { ok: true, streams: [...streams.keys()], events: NET_LOG.slice(-200) })
+        // attachments/imageBlocks 是「图片能变成真附件」的运行时证据：宿主没有附件服务时退化成路径行。
+        return sendJson(res, 200, {
+          ok: true,
+          streams: [...streams.keys()],
+          attachments: Boolean(ctx.get?.('attachments')?.saveImages),
+          imageBlocks: true,
+          events: NET_LOG.slice(-200),
+        })
       }
       if (route === 'upload' && method === 'POST') return handleUpload(ctx, req, res, url)
       if (route === 'asr' && method === 'POST') return handleAsr(req, res)

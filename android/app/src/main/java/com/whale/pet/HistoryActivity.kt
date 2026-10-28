@@ -951,11 +951,26 @@ class HistoryActivity : Activity() {
     private fun isInjectedText(text: String): Boolean {
         val body = text.trim()
         if (body.isEmpty()) return true
+        // 宿主塞进 user 槽的上下文：压缩摘要、Fast mode 提醒，都不是主人说的话。
         return body.startsWith("Time sampled while preparing turn") ||
             body.startsWith("Current runtime context.") ||
             body.startsWith("<system-reminder>") ||
             body.startsWith("<available_skills>") ||
-            body.startsWith("<environment_context>")
+            body.startsWith("<environment_context>") ||
+            body.startsWith("This is an automatically generated checkpoint") ||
+            body.startsWith("The context was just compacted") ||
+            body.startsWith("Fast mode reminder") ||
+            body.startsWith("Auto schedule") ||
+            // 压缩摘要正文：标题头被宿主吃掉时只剩这些小节的正文
+            body.contains("## Primary Request and Intent") ||
+            body.contains("## Key Technical Concepts") || looksLikeCheckpointDump(body)
+    }
+
+    /** 摘要碎块：长文 + 一串「- `/绝对路径`」清单；主人自己讲话很少长这样。 */
+    private fun looksLikeCheckpointDump(body: String): Boolean {
+        if (body.length < 600) return false
+        val bullets = Regex("(?m)^[-*]\\s*`").findAll(body).count()
+        return bullets >= 4
     }
 
     /** 会话 id 在 state 里查名字；查不到回空串（宁可不显示，也不把 id 糊到脸上）。 */
@@ -1019,6 +1034,8 @@ class HistoryActivity : Activity() {
             if (item.isNote) {
                 rows.add(ChatRow.Note(item.text))
             } else if (item.isMe) {
+                // 本地库里有更早版本落下的注入残留（压缩摘要碎块）：显示时再挡一道
+                if (isInjectedText(item.text)) return@forEachIndexed
                 rows.add(ChatRow.Me(item.text, item.ts, item.atts))
             } else {
                 // 只有最后一条助手消息挂富文本渲染器：历史长列表里塞多个 WebView 会卡
@@ -1440,6 +1457,7 @@ class HistoryActivity : Activity() {
                     NetLog.record("TTS", 0, 0, "再排一句「${sentence.take(14)}」")
                     val cfg = PetSettings.load(this@HistoryActivity)
                     val player = tts ?: TtsPlayer(this@HistoryActivity, client, { cfg }, {}, {}).also { tts = it }
+                    FloatingPetService.appReplySpeaking = true
                     player.enqueue(sentence)
                 }
 
@@ -1467,6 +1485,7 @@ class HistoryActivity : Activity() {
     }
 
     private fun finishTurn(error: String?) {
+        FloatingPetService.appReplySpeaking = false
         ui.removeCallbacks(ticker)
         localBusy = false
         sendBtn.contentDescription = "发送"
@@ -2603,6 +2622,15 @@ class HistoryActivity : Activity() {
         return rest.replace(Regex("[\\s\\p{P}]+"), "").isBlank()
     }
 
+    /** 正文里已经画成缩略图的图片引用（markdown 图、`[图片]` 回显、裸路径）全去掉。 */
+    private fun stripImageRefs(raw: String): String {
+        var rest = raw
+        MARKDOWN_IMG_FULL.findAll(raw).forEach { rest = rest.replace(it.value, "") }
+        ABS_IMG.findAll(raw).forEach { rest = rest.replace(it.value, "") }
+        rest = rest.replace("[图片]", "")
+        return rest.replace(Regex("(?m)[ \\t]+$"), "").trim()
+    }
+
     /** 本轮的流式文本（还没落库）。 */
     private var liveText: String
         get() = adapter.live
@@ -2756,7 +2784,9 @@ class HistoryActivity : Activity() {
             text.visibility = View.VISIBLE
             // 行视图会复用：字体大小也必须显式回到正文尺寸，否则接着上一条提示行就是小字
             text.textSize = 15f
-            text.text = if (mine) raw else MdPlain.of(raw)
+            // 图已经在下面画成缩略图了：正文里的 `![图片](/abs/path)` 别再留一行裸路径。
+            val shown = if (media.any { !it.isVideo } || imagePathsOf(raw).isNotEmpty()) stripImageRefs(raw) else raw
+            text.text = if (mine) shown else MdPlain.of(shown)
             // 复刻桌面端：我说的靠右、短气泡；鱼回的不带气泡、占满整行
             (v as android.widget.LinearLayout).gravity = if (mine) Gravity.END else Gravity.START
             val full = resources.displayMetrics.widthPixels - dp(24)
@@ -2776,7 +2806,11 @@ class HistoryActivity : Activity() {
             val clips = media.filter { it.isVideo }
             val thumbs = bindThumbs(v, raw, imgs, clips)
             // 只有图的行：正文已经是缩略图了，别在气泡里剩一截空文本
-            if (!mine && thumbs > 0 && onlyImages(raw)) text.visibility = View.GONE
+            if (thumbs > 0 && shown.isBlank()) {
+                text.visibility = View.GONE
+                // 我说的话才有底色；正文空了就别留一颗小胶囊占位
+                if (mine) bubble.setPadding(0, 0, 0, 0)
+            }
             text.setOnLongClickListener { copy(raw); true }
             return v
         }

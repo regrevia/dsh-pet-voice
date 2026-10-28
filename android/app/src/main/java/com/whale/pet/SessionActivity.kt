@@ -399,11 +399,24 @@ class SessionActivity : Activity() {
     private fun isInjectedText(text: String): Boolean {
         val body = text.trim()
         if (body.isEmpty()) return true
+        // 宿主塞进 user 槽的上下文：压缩摘要、Fast mode 提醒，都不是主人说的话。
         return body.startsWith("Time sampled while preparing turn") ||
             body.startsWith("Current runtime context.") ||
             body.startsWith("<system-reminder>") ||
             body.startsWith("<available_skills>") ||
-            body.startsWith("<environment_context>")
+            body.startsWith("<environment_context>") ||
+            body.startsWith("This is an automatically generated checkpoint") ||
+            body.startsWith("The context was just compacted") ||
+            body.startsWith("Fast mode reminder") ||
+            body.startsWith("Auto schedule") ||
+            body.contains("## Primary Request and Intent") ||
+            body.contains("## Key Technical Concepts") || looksLikeCheckpointDump(body)
+    }
+
+    /** 摘要碎块：长文 + 一串「- `/绝对路径`」清单；主人自己讲话很少长这样。 */
+    private fun looksLikeCheckpointDump(body: String): Boolean {
+        if (body.length < 600) return false
+        return Regex("(?m)^[-*]\\s*`").findAll(body).count() >= 4
     }
 
     /** 宿主说它正在看另一只的活：标题栏下给一行，没有就收起。 */
