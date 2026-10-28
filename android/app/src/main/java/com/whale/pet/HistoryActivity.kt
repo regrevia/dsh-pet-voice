@@ -154,6 +154,10 @@ class HistoryActivity : Activity() {
     private var videoView: android.widget.VideoView? = null
     /** 屏幕上这只对话的名字（宿主说叫什么就叫什么，查不到就空着）。 */
     private var liveSessionTitle = ""
+    /** 电脑上这只正在跑回合（`/api/state.turns`）；手机自己发起的回合另有进度条。 */
+    @Volatile private var hostBusy = false
+    /** 这一轮是手机自己发的：进度条已经在说话，标题行不再重复。 */
+    @Volatile private var localBusy = false
     private var peekTitle = ""
     private var syncing = false
     private var tts: TtsPlayer? = null
@@ -374,9 +378,9 @@ class HistoryActivity : Activity() {
         syncSession()
         // 进来先补一次「只有我问、没有回答」的缺口：上一轮可能因断网断在一半
         repairMissingReply()
-        // 页面开着的时候核一下这只还在不在、名字对不对（20 秒一次，够快也不费电）
+        // 页面开着的时候核一下这只还在不在、名字对不对（20 秒一次；有回合在跑就 3 秒）
         ui.removeCallbacks(hostWatch)
-        ui.postDelayed(hostWatch, HOST_WATCH_MS)
+        ui.postDelayed(hostWatch, if (hostBusy || localBusy) 3_000L else HOST_WATCH_MS)
     }
 
     @Volatile private var repairing = false
@@ -449,7 +453,7 @@ class HistoryActivity : Activity() {
     private val hostWatch = object : Runnable {
         override fun run() {
             syncSession()
-            ui.postDelayed(this, HOST_WATCH_MS)
+            ui.postDelayed(this, if (hostBusy || localBusy) 3_000L else HOST_WATCH_MS)
         }
     }
 
@@ -497,8 +501,15 @@ class HistoryActivity : Activity() {
         projectBtn.text = title.ifBlank { "项目" }
         // 第二行是「这一问落在哪只会话」。还没拿到会话名（刚开的新会话、名字还没生成）
         // 就直说「新会话」：拿项目名顶上会让人以为自己在旧对话里。
-        val line = liveSessionTitle.ifBlank {
+        val base = liveSessionTitle.ifBlank {
             if (PetSettings.chatSession(this).isNotBlank()) "新会话" else ""
+        }
+        // 电脑那边这一轮还没跑完（比如上一条是从别处发的、或本地回合被系统掐了）：
+        // 名字行末尾挂一句状态，不用盯着屏幕猜它是不是还在想。
+        val line = when {
+            base.isBlank() -> ""
+            hostBusy && !localBusy -> "$base · 正在回复"
+            else -> base
         }
         sessionLabel.text = line
         sessionLabel.visibility = if (line.isBlank()) View.GONE else View.VISIBLE
@@ -536,6 +547,16 @@ class HistoryActivity : Activity() {
     /** 宿主现状 → 标题 + 本地指针。只在真的变了的时候动。 */
     private fun adoptHostState(state: JSONObject) {
         val target = state.optString("dispatchTarget").orEmpty()
+        // turns 的键是裸 uuid（宿主两种写法都存，投影时归一过）
+        val turns = state.optJSONObject("turns")
+        val myKey = PetSettings.chatSession(this).ifBlank { target }.removePrefix("session-")
+        val busy = turns != null && myKey.isNotBlank() && turns.has(myKey)
+        if (busy != hostBusy) {
+            hostBusy = busy
+            refreshHeader()
+            ui.removeCallbacks(hostWatch)
+            ui.postDelayed(hostWatch, if (busy) 3_000L else HOST_WATCH_MS)
+        }
         val current = state.optJSONObject("current")
         val hostId = target.ifBlank { current?.optString("id").orEmpty() }
         val mine = PetSettings.chatSession(this)
@@ -824,6 +845,13 @@ class HistoryActivity : Activity() {
         adapter.errorAction = null
         adapter.live = ""
         turnStart = System.currentTimeMillis()
+        // 这句已经进历史了，宿主到底收没收到还不知道：先落盘，进程被杀也能接着发
+        val rid = java.util.UUID.randomUUID().toString()
+        PendingSend.begin(this, rid, text, PetSettings.chatSession(this),
+            media.map { it.host }.filter { it.isNotBlank() })
+        localBusy = true
+        ui.removeCallbacks(hostWatch)
+        ui.postDelayed(hostWatch, 3_000L)
         // 每次发都换一个代号：切会话时也换，旧轮的回调就认不出自己了
         turnToken = ++turnSeq
         val token = turnToken
@@ -857,7 +885,10 @@ class HistoryActivity : Activity() {
                     adapter.live = fullText
                     adapter.notifyDataSetChanged()
                     scrollToBottom()
-                    if (isFinal) FloatingPetService.sayToBubble(fullText)
+                    if (isFinal) {
+                        PendingSend.clear(this@HistoryActivity, rid)
+                        FloatingPetService.sayToBubble(fullText)
+                    }
                 }
 
                 override fun onSentence(sentence: String) {
@@ -869,6 +900,7 @@ class HistoryActivity : Activity() {
 
                 override fun onDone() {
                     if (token != turnToken) return
+                    if (turn?.isDelivered() == true) PendingSend.clear(this@HistoryActivity, rid)
                     finishTurn(null)
                 }
 
@@ -880,6 +912,7 @@ class HistoryActivity : Activity() {
             PetSettings.chatSession(this),
             onSession = { id -> onSessionResolved(id) },
             attachments = media.map { it.host }.filter { it.isNotBlank() },
+            requestIdOverride = rid,
             appCtx = this,
         )
         turn = t
@@ -888,6 +921,7 @@ class HistoryActivity : Activity() {
 
     private fun finishTurn(error: String?) {
         ui.removeCallbacks(ticker)
+        localBusy = false
         // 先留住这一轮：终局要按「宿主到底收没收到」决定补发，turn 清早了就没处问了
         val ended = turn
         turn = null

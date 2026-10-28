@@ -46,6 +46,8 @@ class PetApp : Application() {
         runCatching { NetLog.attach(this) }
         // 待发队列要在任何界面之前就活起来：上次没发出去的那句，联网就自动补发
         runCatching { Outbox.start(this) }
+        // 上次在这句「按了发送」之后被杀掉的，交给待发队列接着发（宿主按 requestId 去重）
+        runCatching { Thread({ PendingSend.recover(this) }, "pet-pending").apply { isDaemon = true }.start() }
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) = AppForeground.enter()
             override fun onActivityStopped(activity: Activity) = AppForeground.exit()

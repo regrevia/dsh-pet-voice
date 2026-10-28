@@ -424,6 +424,9 @@ class PetTurn(
      * 交给界面在一次终局里补一次落盘，宁可慢一点也绝不静默丢句。
      * 返回 true = 已排队；界面据此显示「已排队，联网后自动发出」而不是「重试」。
      */
+    /** 宿主到底收没收到这一轮（回执/回答都算）。界面据此决定要不要留着落盘凭据。 */
+    fun isDelivered(): Boolean = delivered
+
     fun requeueIfLost(): Boolean {
         if (delivered) return false
         val ctx = appCtx ?: return false
