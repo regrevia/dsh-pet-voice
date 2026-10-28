@@ -1,12 +1,12 @@
 {
-  "versionCode": 196,
-  "versionName": "0.9.126",
-  "size": 30083354,
-  "sha256": "c566be30dfe530465ebb816a1395f9206978ab534a29a9b07a5098eaf9d772fe",
+  "versionCode": 197,
+  "versionName": "0.9.127",
+  "size": 30086458,
+  "sha256": "857d705536ba1550bae01ea50c3699f730fd49bc97f7ac9dd2daba8a9d78c3a2",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.126/app-release.apk",
-  "notes": "保活闹钟改成链式：被系统杀掉后回来会把下一次叫醒自己挂上（15 分钟一条，不再每次重置）；恢复走恢复分支，不向系统申请后台麦克风类型；升级时清掉旧版遗留闹钟",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.126/app-release.apk",
-  "publishedAt": "2026-10-28T15:31:17.454Z",
-  "promotedAt": "2026-10-28T15:31:20.472Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.127/app-release.apk",
+  "notes": "读接口在网络抖动时原地再试一次；打开 App 只要距上次检查超 10 分钟就静默查更新（后台仍是 6 小时）",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.127/app-release.apk",
+  "publishedAt": "2026-10-28T15:37:41.124Z",
+  "promotedAt": "2026-10-28T15:37:44.374Z"
 }
