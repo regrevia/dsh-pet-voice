@@ -2,34 +2,11 @@
 
 一只住在你电脑里的像素鲸鱼娘。**屏幕和麦克风在你手上，大脑跑在你自己电脑上的 [DeepSeek Harness](https://github.com/deepseek-ai) 会话里。**
 
-![桌面悬浮窗](docs/img/pet-overlay.png)
+<img src="https://raw.githubusercontent.com/regrevia/dsh-pet-voice/main/assets/pet-hero-white.png" width="320" alt="鲸灵">
 
-手机端是一个 30 MB 的 Android App：桌面悬浮着会呼吸、会说话的小鲸鱼，点一下就能说话，
-它把你这句话派给电脑上的专属会话，边生成边把回复念出来、把动作放出来。电脑关机，它就不在——
-**项目不运营任何服务器，也不用注册任何账号，会话和记忆都在你自己电脑上。**
+**DSH 的 App 端，还融合了桌宠玩法**：语音唤醒、随口说话、语音指挥。远程操作电脑上的 DeepSeek Harness 有三种连法——局域网、自建域名、服务器中转；也能直接和工作在项目里的小鲸鱼聊天，一句话指挥它干活。出门在外，再也不用担心没带电脑。
 
-要说清楚的两条外部依赖：默认语音合成走微软 Edge 的在线语音接口（`edge-tts`，免 key），
-手机端的唤醒与识别走 Android 系统的语音服务（`SpeechRecognizer`，是否上传音频由系统/厂商决定）。
-换个音色或换成本地 TTS 也能用，但这两条链路本身不是纯离线的；选隧道/自建域名时还多一层你自己的服务器或隧道商。
-
-## 现在能用吗
-
-| 项 | 状态 |
-| --- | --- |
-| APK | `0.9.33`（versionCode 103），Android 8.0+（API 26），targetSdk 35 |
-| 验证环境 | Android 11 模拟器（1080×2340）跑通全链路：配对、语音、回复、动作、历史、检查更新 |
-| 真机 | 厂商权限跳转与硬件麦克风只在 AOSP 页面验证过，各家 ROM 仍可能不同，欢迎回报 |
-| Android 14/15 | 未做实机验证：后台恢复、麦克风前台服务在收紧后的行为【需真机确认】，见 [docs/android-app.md](docs/android-app.md) 的兼容边界一节 |
-| iOS | 不支持（悬浮窗与常听麦克风是 Android 特性） |
-
-安装包在 [Releases](../../releases/latest)。这是维护者自签名的构建，签名指纹写在
-[docs/android-app.md](docs/android-app.md)；要自己签就照「开发与构建」编译。
-
-> 内置信任锚：APK 里带了一张**示例自签 CA 的公钥证书**（`res/raw/pet_ca.pem`，无私钥），
-> 让「不买域名、机器上跑自签 https」的人开箱能连。换成自己的 CA 请跑 `scripts/tls-ca.sh` 再重新出包；
-> 只用系统 CA 的部署不受影响。别人的 CA 不要信，也不要装来路不明的 APK。
-
-**第一次用、什么都没有？** 照 [docs/quickstart.md](docs/quickstart.md) 走一遍：装 APK、选连法、扫码或粘链接、说话。
+不运营任何服务器、不用注册账号，会话与记忆都在你自己电脑上。APK 是 30 MB 的 Android 自签名包，装完扫码就能用。
 
 ## 三步用起来
 
@@ -52,39 +29,47 @@ https://<你的地址>/pet-voice/?k=<一次性配对码>
 
 **3. 手机上扫码**
 
-装 APK → 首页「扫码绑定」→ 扫上一步的二维码 → 「立即对话」。
+装 APK（[Releases](../../releases/latest)）→ 首页「扫码绑定」→ 扫上一步的二维码 →「立即对话」。
 悬浮窗出现后，说「大肥鱼」唤醒，或者直接点它说话。
 
-> 手机和电脑必须能互相访问。最省事的是同一个 WiFi（局域网档），在外面用就选「经自己的服务器转发」：
-> 面板里填**账号**（`账号@服务器`）、**公网地址**（`https://服务器:公网端口`）、**私钥**，点「连接」。
-> 配置只存在你这台电脑上，别人装的时候填自己的；插件不硬编码任何人的服务器。
-> 服务器要满足的两个条件、纯局域网档和自建域名做法的细节，见 **[docs/self-host.md](docs/self-host.md)**。
+第一次用、什么都没有？照 [docs/quickstart.md](docs/quickstart.md) 走一遍。
 
-## 能做到什么
+## 三种连法
 
-- **说停就停**：尾静音 1 秒判定说完，不是固定 6 秒录音；悬浮窗里可以连续对话。
-- **回复一定到**：先试长连接，拿不到立刻转轮询；网络一断自动重连，断网期间的话不会丢。
-- **动作有反馈**：听、想、说、待机四种状态各有动作，动作时长按素材本身走，不靠固定计时器。
-- **能发表情**：输入栏点笑脸挑一个插进去；表情不会被念出来，鱼也会顺着回你一个。
-- **能翻历史**：手机上能看这个会话的完整对话，也能切项目、切人设、开新会话。
-- **8 套衣服**：水手裙 / 女仆装 / 鲸鱼卫衣 / 冬日斗篷 / 深海公主 / 深海研究员 / 星潮小魔女 / 泡泡睡衣，设置里直接换。
-- **面板可配**：连哪种网、人设、输出长度、气泡开关、唤醒词都在插件面板里改，改完手机立刻按新规矩走。
-- **检查更新**：App 内直接下载安装，覆盖安装保留配对信息。
+手机和电脑必须能互相访问。开源版默认**不使用作者的任何基础设施**，代码里没有硬编码的域名或 IP，配置只存在你这台电脑上。
+
+| 连法 | 适合 | 需要 | 面板选哪档 |
+| --- | --- | --- | --- |
+| 局域网 | 手机和电脑同一个 WiFi | 无 | 局域网 |
+| 自建域名 | 长期用、自己有域名 | 一台能跑 nginx/caddy 的机器 + 证书 | 自建域名，填自己的域名 |
+| 服务器中转 | 在外面也想用，不想碰路由器和证书 | 装 `cloudflared` / `ngrok`，或自己的中转服务器 | 自建域名，填工具给的 https 地址 |
+
+细节、证书与排错：[docs/self-host.md](docs/self-host.md)。不想买域名也能 https：[docs/tls-self-signed.md](docs/tls-self-signed.md)。
+
+## 现在能用吗
+
+| 项 | 状态 |
+| --- | --- |
+| APK | `0.9.33`（versionCode 103），Android 8.0+（API 26），targetSdk 35 |
+| 验证环境 | Android 11 模拟器跑通全链路：配对、语音、回复、动作、历史、检查更新 |
+| 真机 | 厂商权限跳转与硬件麦克风只在 AOSP 页面验证过，各家 ROM 仍可能不同，欢迎回报 |
+| Android 14/15 | 未做实机验证：后台恢复、麦克风前台服务在收紧后的行为【需真机确认】，见 [docs/android-app.md](docs/android-app.md) |
+| iOS | 不支持（悬浮窗与常听麦克风是 Android 特性） |
+
+> 内置信任锚：APK 里带了一张**示例自签 CA 的公钥证书**（`res/raw/pet_ca.pem`，无私钥），
+> 让「不买域名、机器上跑自签 https」的人开箱能连。换成自己的 CA 请跑 `scripts/tls-ca.sh` 再重新出包；
+> 只用系统 CA 的部署不受影响。别人的 CA 不要信，也不要装来路不明的 APK。
+
+## 它能做什么
+
+- **说停就停**：尾静音 1 秒判定说完；悬浮窗里可以连续对话。
+- **回复一定到**：先试长连接，拿不到立刻转轮询；断网期间的话不会丢。
+- **动作有反馈**：听、想、说、待机四种状态各有动作，时长按素材走。
+- **能指挥项目**：手机上直接切项目、切人设、开新会话，语音就把活派出去。
+- **8 套衣服**：水手裙 / 女仆装 / 鲸鱼卫衣 / 冬日斗篷 / 深海公主 / 深海研究员 / 星潮小魔女 / 泡泡睡衣。
+- **面板可配**：连法、人设、输出长度、气泡开关、唤醒词都在插件面板里改。
 
 ![手机上的对话页](docs/img/pet-chat.png)
-
-## 三种自接入方式
-
-开源版默认**不使用作者的任何基础设施**，代码里没有硬编码的域名或 IP。
-
-| 方案 | 适用 | 需要 | 面板选哪档 |
-| --- | --- | --- | --- |
-| A 内网穿透 | 在外面也想用，不想碰路由器和证书 | 装 `cloudflared` 或 `ngrok` | 自建域名，填工具给的 https 地址 |
-| B 自建域名 + 反代 | 长期用、自己有域名 | 一台能跑 nginx/caddy 的机器 + 证书 | 自建域名，填自己的域名 |
-| C 纯局域网 | 手机和电脑同一个 WiFi | 无 | 局域网 |
-
-细节、证书、排错：[docs/self-host.md](docs/self-host.md)。
-不想买域名也能 https：[docs/tls-self-signed.md](docs/tls-self-signed.md)。
 
 ## 它怎么工作
 
@@ -97,26 +82,24 @@ https://<你的地址>/pet-voice/?k=<一次性配对码>
   念 ◄── /api/tts    ◄── 句子级音频
 ```
 
-接口一条条写在 [docs/pet-contract.md](docs/pet-contract.md)：端点、鉴权、帧格式、错误码。
-手机端实现与限制见 [docs/android-app.md](docs/android-app.md)。
+端点、鉴权、帧格式、错误码见 [docs/pet-contract.md](docs/pet-contract.md)；手机端实现与限制见 [docs/android-app.md](docs/android-app.md)。
+
+**两条外部依赖**：默认语音合成走微软 Edge 的在线语音接口（`edge-tts`，免 key），手机端唤醒与识别走 Android 系统语音服务（`SpeechRecognizer`，是否上传音频由系统/厂商决定）。换本地 TTS 或换音色也能用，但这两条链路本身不是纯离线的。
 
 ## 开发与构建
 
-前置：**Node.js ≥ 22.15.0**（插件静态引用 `node:zlib` 的 `zstdDecompressSync`，Node 20 加载即报错）、JDK 17、Android SDK。
+前置：**Node.js ≥ 22.15.0**（插件静态引用 `node:zlib` 的 `zstdDecompressSync`）、JDK 17、Android SDK。
 
 ```bash
 # 自测（离线部分不碰真实配置）
 SKIP_LIVE=1 bash scripts/verify.sh
 
 # 编 APK（JDK 17，别用 21+）
-export JAVA_HOME=~/jdk17/Contents/Home
+export JAVA_HOME=/path/to/jdk17/Contents/Home
 android/gradlew -p android :app:assembleRelease
 ```
 
-产物在 `android/app/build/outputs/apk/release/app-release.apk`。
-要发布自己的版本，用同一个 keystore 签名才能覆盖安装、保住配对信息，
-流程见 [docs/android-app.md](docs/android-app.md) 的发布一节。
-改完想确认「回复收得到、动画没卡、测试没红」，照着 [docs/verification.md](docs/verification.md) 跑一遍。
+产物在 `android/app/build/outputs/apk/release/app-release.apk`。要发布自己的版本，用同一个 keystore 签名才能覆盖安装、保住配对信息，流程见 [docs/android-app.md](docs/android-app.md) 的发布一节。
 
 参与开发前请读 [CONTRIBUTING.md](CONTRIBUTING.md)；安全问题走 [SECURITY.md](SECURITY.md)。
 
@@ -124,21 +107,13 @@ android/gradlew -p android :app:assembleRelease
 
 ```
 plugins/dsh-pet-voice/   DSH 插件：/pet-voice/ 页面、语音闭环、配对、更新通道
-  public/                手机页与像素素材（v3 素材 8 套 × 3 动作）
-  selftest.mjs           离线自测（模拟 HOME，不碰真实配置）
-mcp/pet-bridge/          MCP 服务端：把鲸灵能力暴露给外部助手
 android/                 Android 客户端（Kotlin，零 androidx）
-docs/                    契约、安装、自接入、真机、架构与早期调研
+docs/                    契约、安装、自接入、真机、架构
 scripts/                 自测、验收、素材生成、发布
-demo/                    早期零依赖原型（可单独跑）
-bench/                   时延与编解码的可复现测试
 ```
-
-早期调研（为什么是这个形态、ESP32 硬件路线、时延预算）留在
-[docs/prototype-log.md](docs/prototype-log.md)，不作为当前实现说明。
 
 ## 许可
 
-代码与文档 [MIT](LICENSE)。像素素材由本项目生成（`scripts/gen-pet-asset.mjs`），同样 MIT。
+代码与文档 [MIT](LICENSE)。像素素材由本项目生成，同样 MIT。
 
 “DeepSeek Harness” 是它自己的项目，与它的许可证一致；本仓库只通过插件接口与它交互。
