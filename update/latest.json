@@ -1,12 +1,12 @@
 {
-  "versionCode": 179,
-  "versionName": "0.9.109",
-  "size": 30063762,
-  "sha256": "54810e835592d662eff11cf075920b820bb9c99693da4f9ec94d67d3a80446df",
+  "versionCode": 180,
+  "versionName": "0.9.110",
+  "size": 30067450,
+  "sha256": "2a31203abee2b4ebe8950809ff93a35f6afee3c9e1d15fb45261d50eb7e1186a",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.109/app-release.apk",
-  "notes": "弱网/被杀不丢话：发之前先落盘，进程被杀重启后同一 requestId 自动补发；只有我问没有答时进页面自动补回；标题行显示电脑正在回复。",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.109/app-release.apk",
-  "publishedAt": "2026-10-28T10:45:53.052Z",
-  "promotedAt": "2026-10-28T10:45:55.506Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.110/app-release.apk",
+  "notes": "0.9.110 目标行与待输入队列：会话里直接看见目标、暂停/继续",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.110/app-release.apk",
+  "publishedAt": "2026-10-28T11:03:35.384Z",
+  "promotedAt": "2026-10-28T11:03:37.783Z"
 }
