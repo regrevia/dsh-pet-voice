@@ -140,8 +140,8 @@ mp.prepareAsync()
 ## 四、生效步骤（需要 lead 做，我这边写不进 `~/.dsh`）
 
 ```bash
-cp /Users/apple/Desktop/work/Pet/plugins/dsh-pet-voice/index.js      ~/.dsh/plugins/dsh-pet-voice/index.js
-cp /Users/apple/Desktop/work/Pet/plugins/dsh-pet-voice/tts/stream.py ~/.dsh/plugins/dsh-pet-voice/tts/stream.py
+cp plugins/dsh-pet-voice/index.js      ~/.dsh/plugins/dsh-pet-voice/index.js
+cp plugins/dsh-pet-voice/tts/stream.py ~/.dsh/plugins/dsh-pet-voice/tts/stream.py
 curl -s -X POST http://127.0.0.1:60930/dsh-unlag/reload    # 不重启宿主（PID 66999）
 ```
 

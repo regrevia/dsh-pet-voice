@@ -432,7 +432,7 @@ APK 因此从 **1.96 MB 长到 debug 3,674,327 B / release 3,388,437 B**（0.2.0
 
 - 目录：`<对话所属项目根目录>/.pet-uploads/`，独立于代码，不跟 `src/`、`docs/` 混在一起。
 - 项目根怎么定：`~/.dsh/pet-voice/pet-session.json` 里的 `cwd`（手机钉住的那只对话在哪，就存哪）→ 其次该项目 `workspaceId` 查出来的路径 → 最后才用宿主进程当前目录。
-- 兜底：项目目录不可写（只读挂载、`dr-x` 的仓库）时退到 `~/.dsh/pet-voice/uploads/`，并往日志写一行 `图片落盘失败： EACCES …`；这一条是 2026-10-26 真实踩到的——`/Users/apple/Desktop/work/Pet` 当时是 `dr-x------`，于是 10 月 25 日之后所有上传都静默退到了兜底目录，修权限（`chmod u+w`）后立刻回到项目内 `.pet-uploads/`【实测 09:41】。
+- 兜底：项目目录不可写（只读挂载、`dr-x` 的仓库）时退到 `~/.dsh/pet-voice/uploads/`，并往日志写一行 `图片落盘失败： EACCES …`；这一条是 2026-10-26 真实踩到的——项目目录当时是 `dr-x------`，于是 10 月 25 日之后所有上传都静默退到了兜底目录，修权限（`chmod u+w`）后立刻回到项目内 `.pet-uploads/`【实测 09:41】。
 - 文件名：`<可读前缀>-YYYYMMDD-HHmmss-<6 位随机>.<扩展名>`，例 `pet-photo-20261026-094104-0bf254.png`。扩展名只从 content-type 白名单取（`jpeg/png/webp/gif`），`?name=` 只贡献可读前缀（≤40 字，`../` 之类会被洗掉），不能靠它改路径。
 - 不进 git：首次落盘时往 **`<gitDir>/info/exclude`** 追加一行 `.pet-uploads/`（幂等；worktree/子模块的 `.git` 文件也认），只改本地的 exclude，**不动仓库里的 `.gitignore`**（里面本来也有这一条）。所以拍多少张，`git status` 都是干净的。
 - 清理：这是普通目录，直接删就行；被删掉的图在对话里只是一行文字路径（历史气泡仍显示「图片」）。
@@ -603,7 +603,7 @@ adb shell am broadcast -a com.whale.pet.action.DEBUG_TURN -p com.whale.pet --es 
   静态检查改到联网机器上 `gradle :app:lintDebug` 另跑。
 - 产物：`dist/jingling-0.2.0.apk`（= `android/app/build/outputs/apk/release/app-release.apk`，3,388,437 B，SHA-256 `6fff49d7…c946e`）。
 - 真机安装/权限/接线步骤见 [`docs/real-device-install.md`](real-device-install.md)。
-- **已发布版本都能用当前仓库重建**（2026-10-28 验证 0.9.68）：`cd android && JAVA_HOME=/Users/apple/jdk17/Contents/Home ./gradlew :app:assembleRelease -q`
+- **已发布版本都能用当前仓库重建**（2026-10-28 验证 0.9.68）：`cd android && JAVA_HOME=/path/to/jdk17 ./gradlew :app:assembleRelease -q`
   重建出 30,027,270 B、SHA-256 `276e280b…573c`，与线上 `latest.json` 逐字节一致；生成物 `assets/pet/index.html` 也由 `genPetAsset` 还原（`git diff` 干净）。
   所以不要用「环境里没有 JDK / 构建不了」当理由，先按上面这条命令试。
 
@@ -1265,8 +1265,8 @@ fade 的 `else` 分支加了永久、廉价、warn 级的 `[cut]` 探针。95 s 
 同一次派发前后，会话记录里的文本：
 
 ```
-旧： 图片预览自检\n\n[图片] /Users/apple/Desktop/work/Pet/.pet-uploads/e2e-thumb.png
-新： 图片预览自检\n\n![图片](/Users/apple/Desktop/work/Pet/.pet-uploads/e2e-thumb.png)
+旧： 图片预览自检\n\n[图片] <项目>/.pet-uploads/e2e-thumb.png
+新： 图片预览自检\n\n![图片](<项目>/.pet-uploads/e2e-thumb.png)
 ```
 
 **F. 已知限制**
