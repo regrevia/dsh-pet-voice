@@ -1,12 +1,13 @@
 {
-  "versionCode": 204,
-  "versionName": "0.9.134",
-  "size": 30092830,
-  "sha256": "73ae7ac607dc89f9b043c521b92f9d0b3885f1d3a570686af1356f63987e7d7f",
+  "versionCode": 205,
+  "versionName": "0.9.135",
+  "size": 30093430,
+  "sha256": "8e0d5ba86dde8a008d31e681a189730292bca0aee20f80c956b2b723bc97cbdb",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.134/app-release.apk",
-  "notes": "0.9.134：宿主补回的旧消息按序号归位，图片消息不再乱序",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.134/app-release.apk",
-  "publishedAt": "2026-10-28T18:07:06.989Z",
-  "promotedAt": "2026-10-28T18:07:10.556Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.135/app-release.apk",
+  "notes": "配对链接支持自建明文服务器（面板链接扫码/粘贴即可绑定）；连不上时那行字可点重新扫码",
+  "minPlugin": "0.1.35",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.135/app-release.apk",
+  "publishedAt": "2026-10-28T21:55:42.910Z",
+  "promotedAt": "2026-10-28T21:55:46.304Z"
 }
