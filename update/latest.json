@@ -1,12 +1,12 @@
 {
-  "versionCode": 184,
-  "versionName": "0.9.114",
-  "size": 30071798,
-  "sha256": "9447c8e09d9f57291fcc637702e2937587c4b6187b59945ab27901896b094de2",
+  "versionCode": 185,
+  "versionName": "0.9.115",
+  "size": 30072894,
+  "sha256": "01cc6643649b871b0983da8153b25534edd636b7461fb3bbe4bb64118a3a6b98",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.114/app-release.apk",
-  "notes": "进会话只取最近一页，翻到顶才向宿主取更早的；运行时注入行不再进对话。",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.114/app-release.apk",
-  "publishedAt": "2026-10-28T12:31:03.430Z",
-  "promotedAt": "2026-10-28T12:31:06.189Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.115/app-release.apk",
+  "notes": "回复中再发一句直接当引导插进这一轮；中断的回合末尾留一行可点的重发。",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.115/app-release.apk",
+  "publishedAt": "2026-10-28T12:36:37.208Z",
+  "promotedAt": "2026-10-28T12:36:39.801Z"
 }
