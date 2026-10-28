@@ -298,6 +298,8 @@ class FloatingPetService : Service() {
         tts.prewarm(FILLERS) // 口头填充句先合成好，宿主一句要 0.9s+，不能让用户干等
         createChannel()
         AppForeground.onChange = { on -> main.post { applyAppForeground(on) } }
+        // 服务活着就自己接住「发出去但没等到回执」的那句：进程被杀时不会只靠下一次打开 App 兜底
+        runCatching { Thread({ PendingSend.recover(this) }, "pet-pending-svc").apply { isDaemon = true }.start() }
         // 401 = 这台手机的令牌跟宿主对不上：说一句，别让「按住说话没反应」变成哑谜。
         AuthWatch.onUnauthorized = {
             AuthWatch.remember(this)
@@ -1949,7 +1951,8 @@ class FloatingPetService : Service() {
                 }
                 setMode("talking")
                 say(sentence)
-                tts.enqueue(sentence)
+                // 宿主一句最多收 600 字，长段落按标点切开排队讲：整句丢过去会被 400 掉，听感就是「没播完」
+                for (chunk in splitForTts(sentence)) tts.enqueue(chunk)
             }
 
             override fun onDone() {
@@ -2460,6 +2463,47 @@ class FloatingPetService : Service() {
     /** 服务实例：App 里的文字轮次也让回复落到气泡上，和宿主 say 共用同一个入口。 */
     @Volatile
     private var inst: FloatingPetService? = null
+
+    /** 观察者问一句「App 现在是不是在前台」：在前台就不抢话，页面上已经看得到。 */
+    fun appForeground(): Boolean = inst?.appFg ?: false
+
+    /**
+     * 聊天页那一轮的回复（[ChatWatch] 递进来的增量）：App 在后台就用桌宠讲出来，
+     * 跟前台语音回合走同一个 say + TTS 入口，气泡和声音都不另起一套。
+     */
+    fun deliverWatched(text: String, final: Boolean) {
+        val s = inst ?: return
+        val body = text.trim()
+        if (body.isEmpty()) return
+        s.main.post {
+            if (s.destroyed) return@post
+            if (s.turnActive) return@post // 自己的语音回合正在跑，别两条线抢麦
+            if (s.appFg) return@post
+            s.setMode("talking")
+            s.say(body)
+            for (chunk in splitForTts(body)) s.tts.enqueue(chunk)
+            if (final) s.afterReply()
+        }
+    }
+
+    /** 长句切成 TTS 能收的段：宿主对 text 有上限，切在原句标点上最自然。 */
+    fun splitForTts(text: String, max: Int = 160): List<String> {
+        if (text.length <= max) return listOf(text)
+        val out = ArrayList<String>()
+        var rest = text
+        while (rest.length > max) {
+            var cut = -1
+            for (i in max downTo max / 2) {
+                val c = rest[i]
+                if (c == '。' || c == '！' || c == '？' || c == '；' || c == '，' || c == '\n') { cut = i + 1; break }
+            }
+            if (cut <= 0) cut = max
+            out.add(rest.substring(0, cut).trim())
+            rest = rest.substring(cut)
+        }
+        if (rest.isNotBlank()) out.add(rest.trim())
+        return out.filter { it.isNotBlank() }
+    }
 
     /** 桌宠没在跑就什么都不做；在跑就按正常气泡时长上屏（App 在前台则挂起，回桌面再讲）。 */
     fun sayToBubble(text: String) {

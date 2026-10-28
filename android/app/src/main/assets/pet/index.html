@@ -612,6 +612,7 @@ function createPet (container) {
 
   function av3Draw (ts) {
     if (!ctx || !usingCanvas || !active || destroyed) return
+    if (window.__petRender) window.__petRender.sprite++
     const m = metrics()
     if (!m) return
     ctx.setTransform(1, 0, 0, 1, 0, 0)
@@ -811,12 +812,17 @@ function createPet (container) {
   function fadeTick () {
     fadeRaf = 0
     if (!fadePrev || destroyed || !usingCanvas) return
+    if (v3.on || v3.pending) { fadePrev = null; return }
     draw(activeVid)
     if (fadePrev) fadeRaf = requestAnimationFrame(fadeTick)
   }
 
   function draw (v) {
     if (!ctx || !usingCanvas) return
+    // 立绘期间视频层必须彻底停手：两条渲染循环同时往一张 canvas 上画，
+    // 屏幕上就是「一会立绘一会大肥鱼」的闪。
+    if (v3.on || v3.pending) return
+    if (window.__petRender) window.__petRender.video++
     const m = metrics()
     if (!m) return
     ctx.setTransform(1, 0, 0, 1, 0, 0)
@@ -884,6 +890,7 @@ function createPet (container) {
 
   function pump (v) {
     if (destroyed || !active) { pumping = false; return }
+    if (v3.on || v3.pending) { pumping = false; return }
     if (v !== activeVid) { pumping = false; startPump(); return }
     draw(v)
     checkAlpha()
@@ -891,6 +898,7 @@ function createPet (container) {
   }
   function startPump () {
     if (av.on) { avStart(); pumping = false; return }
+    if (v3.on || v3.pending) { pumping = false; return }
     const v = activeVid
     if (!v || destroyed || !active) { pumping = false; return }
     pumping = true
@@ -909,6 +917,9 @@ function createPet (container) {
     // 平滑得多 —— 从头播会跳回第一帧，待机这种循环片段上就是眼睛能看见的一顿。
     if (!o.once && name === curClip && name === 'idle' && activeVid && activeVid.paused && !activeVid.ended) {
       activeVid.play().catch(() => {})
+      // 从立绘切回视频时视频是暂停状态，这里续播必须把帧回调泵一起拉起来，
+      // 否则画面停在立绘最后一帧，看着像「切回大肥鱼没反应」。
+      if (!pumping) startPump()
       return
     }
     const id = ++seq
@@ -1046,8 +1057,9 @@ function createPet (container) {
       if (fn) { try { fn() } catch (e) {} }
     }
     if (av.on || v3.on || v3.pending) avDraw(avNow())
-    // 解码被节流时把当前段拉回播放态，画面继续走
-    if (active && activeVid && activeVid.paused && document.visibilityState !== 'hidden') {
+    // 解码被节流时把当前段拉回播放态，画面继续走。
+    // 立绘期间例外：那时候视频层是故意停的，每帧再拉起来就是白烧解码器。
+    if (!v3.on && !v3.pending && active && activeVid && activeVid.paused && document.visibilityState !== 'hidden') {
       try { activeVid.play() } catch (e) {}
     }
   }
@@ -1160,6 +1172,20 @@ function createPet (container) {
     blink: !!av.lastBlink
   })
 
+  // 排查用只读窗口：宿主日志能直接看到「现在到底哪条渲染路径在画」，
+  // 不用再靠截屏猜闪一下是立绘还是旧视频。
+  window.__petState = {
+    av: av, v3: v3,
+    get active () { return active },
+    get pumping () { return pumping },
+    get usingCanvas () { return usingCanvas },
+    get clip () { return curClip },
+    get vid () {
+      if (!activeVid) return null
+      return { paused: activeVid.paused, ended: activeVid.ended, rs: activeVid.readyState, src: activeVid.getAttribute('src') }
+    },
+  }
+
   return {
     /** 换形象：'' 或 'jelly' = 原来的鲸鱼娘视频素材；sailor/maid/casual/winter/princess = Aster 立绘。 */
     setOutfit (id) {
@@ -1169,6 +1195,11 @@ function createPet (container) {
       // v3 优先：这套有三动作素材就懒加载，期间显示旧形象最后一帧
       if (next && av3Load(next)) {
         av.on = false
+        // 立绘接管画面后，旧视频层要停播：不停的话解码器一直在后台跑，
+        // 而且它每帧回调还会往同一张 canvas 上盖一帧（「一会睡衣一会大肥鱼」的闪）。
+        pumping = false
+        fadePrev = null
+        vids.forEach((v) => { try { v.pause() } catch (e) {} })
         return
       }
       if (v3.on || v3.pending) {

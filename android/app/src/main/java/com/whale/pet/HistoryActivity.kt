@@ -94,8 +94,6 @@ class HistoryActivity : Activity() {
     private lateinit var toBottom: TextView
     private lateinit var runBar: View
     private lateinit var runText: TextView
-    private lateinit var runStop: TextView
-    private lateinit var runSteer: TextView
     private lateinit var input: EditText
     private lateinit var sendBtn: android.widget.ImageView
     private lateinit var emojiBtn: android.widget.ImageView
@@ -187,6 +185,8 @@ class HistoryActivity : Activity() {
     private var liveSessionTitle = ""
     /** 电脑上这只正在跑回合（`/api/state.turns`）；手机自己发起的回合另有进度条。 */
     @Volatile private var hostBusy = false
+    /** 发送位当前是不是中断形态（避免每帧重复换图标）。 */
+    private var sendIsStop = false
     /** 这一轮是手机自己发的：进度条已经在说话，标题行不再重复。 */
     @Volatile private var localBusy = false
     private var peekTitle = ""
@@ -275,8 +275,6 @@ class HistoryActivity : Activity() {
         toBottom = findViewById(R.id.chatToBottom)
         runBar = findViewById(R.id.chatRun)
         runText = findViewById(R.id.chatRunText)
-        runStop = findViewById(R.id.chatStop)
-        runSteer = findViewById(R.id.chatSteer)
         input = findViewById(R.id.chatInput)
         sendBtn = findViewById(R.id.chatSend)
         emojiBtn = findViewById(R.id.chatEmoji)
@@ -376,20 +374,16 @@ class HistoryActivity : Activity() {
         pickerList.onItemClickListener =
             AdapterView.OnItemClickListener { _, _, pos, _ -> onPickerPick(pos) }
 
-        sendBtn.setOnClickListener { sendChat() }
+        // 发送位是一个双态按钮，跟桌面端一致：框里有字就是「发送」，空着又有轮次在跑就是「中断」。
+        // 以前「引导」「中断」是跑动条上的两个小字按钮，既占地方又要多点一次。
+        sendBtn.setOnClickListener { if (stopAffordance()) interruptTurn() else sendChat() }
         emojiBtn.setOnClickListener { showEmojiPicker() }
         attachBtn.setOnClickListener { showAttachMenu() }
-        runStop.setOnClickListener { stopTurn() }
-        // 引导：这一轮还没说完时补一句。框里已经有字就直接插进去，没有就把光标放回输入框。
-        runSteer.setOnClickListener {
-            val say = input.text?.toString()?.trim().orEmpty()
-            if (say.isNotEmpty()) {
-                steer(say)
-            } else {
-                input.requestFocus()
-                input.setHint("说一句，插进这一轮")
-            }
-        }
+        input.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+            override fun afterTextChanged(s: android.text.Editable?) = updateSendAffordance()
+        })
         input.setOnEditorActionListener { _, actionId, ev ->
             if (actionId == EditorInfo.IME_ACTION_SEND || (ev?.keyCode == KeyEvent.KEYCODE_ENTER && ev.action == KeyEvent.ACTION_DOWN)) {
                 sendChat()
@@ -745,9 +739,28 @@ class HistoryActivity : Activity() {
                 setPadding(dp(10), dp(4), dp(4), dp(4))
                 setOnClickListener { queueAct("remove", item.id) }
             })
+            // 点一行 = 立刻把这一句插进正在跑的这一轮（就是引导）：桌面端也是点排队的那句发出去
+            row.setOnClickListener { steerQueued(item) }
             row.setOnLongClickListener { showQueueMenu(item); true }
             queueBar.addView(row)
         }
+    }
+
+    /**
+     * 点排队那条：原文当引导发出去，然后再从宿主队列里撤掉——一步到位，
+     * 不用先「撤掉」再重新打一遍字。
+     */
+    private fun steerQueued(item: Queued) {
+        val sid = PetSettings.chatSession(this)
+        if (sid.isBlank()) return
+        queueBar.visibility = View.GONE
+        steer(item.text)
+        Thread({
+            try {
+                PetClient { PetSettings.load(this) }.inboxAction(sid, "remove", item.id)
+            } catch (_: Exception) {
+            }
+        }, "pet-queue-steer").apply { isDaemon = true }.start()
     }
 
     private fun showQueueMenu(item: Queued) {
@@ -1253,6 +1266,7 @@ class HistoryActivity : Activity() {
         }
         input.setText("")
         runText.text = "引导中"
+        ChatWatch.start(this, sid)
         if (append) PetHistory.append(this, PetHistory.ROLE_ME, text)
         reload()
         scrollToBottom(force = true)
@@ -1373,6 +1387,8 @@ class HistoryActivity : Activity() {
         PendingSend.begin(this, rid, text, PetSettings.chatSession(this),
             media.map { it.host }.filter { it.isNotBlank() })
         localBusy = true
+        // 这轮交给服务盯着：人一走（页面没了、SSE 没了）回复照样能讲出来、落进历史
+        ChatWatch.start(this, PetSettings.chatSession(this))
         ui.removeCallbacks(hostWatch)
         ui.postDelayed(hostWatch, 3_000L)
         // 每次发都换一个代号：切会话时也换，旧轮的回调就认不出自己了
@@ -1574,8 +1590,7 @@ class HistoryActivity : Activity() {
                 return
             }
             runText.text = if (ms > 90_000) "还在跑 ${ms / 1000} s · 可中断" else "处理中 ${ms / 1000} s"
-            // 正在回复时按发送不是「再排一轮」，是插一句引导：按钮说法跟着变
-            sendBtn.contentDescription = "发送引导"
+            updateSendAffordance()
             ui.postDelayed(this, 1000)
         }
     }
@@ -2059,6 +2074,51 @@ class HistoryActivity : Activity() {
         userStopped = true
         t.cancel()
         finishTurn(null)
+    }
+
+    /** 发送位此刻是不是「中断」形态：框里没字、且这一轮真在跑（本机起的或电脑上的）。 */
+    private fun stopAffordance(): Boolean {
+        if (input.text?.toString()?.isNotBlank() == true) return false
+        if (pending.isNotEmpty()) return false
+        return turn != null || hostBusy || localBusy
+    }
+
+    /**
+     * 发送位换脸：有字 = 发送（正在回复时就是「发引导」），空着且有轮次在跑 = 中断方块。
+     * 跟桌面端同一个位置同一个动作，不用先去别处找按钮。
+     */
+    private fun updateSendAffordance() {
+        val stop = stopAffordance()
+        if (stop == sendIsStop) return
+        sendIsStop = stop
+        if (stop) {
+            sendBtn.setImageResource(R.drawable.ic_stop)
+            sendBtn.contentDescription = "中断"
+        } else {
+            sendBtn.setImageResource(R.drawable.ic_send)
+            sendBtn.contentDescription = if (turn != null || hostBusy) "发送引导" else "发送"
+        }
+    }
+
+    /** 空框点中断：本机起的回合直接取消；电脑上跑的那一轮拍一条 /api/cancel。 */
+    private fun interruptTurn() {
+        if (turn != null) {
+            stopTurn()
+            return
+        }
+        val sid = PetSettings.chatSession(this)
+        if (sid.isBlank()) return
+        runText.text = "中断中"
+        Thread({
+            val res = try { PetClient { PetSettings.load(this) }.cancel(sid) } catch (_: Exception) { null }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (res?.ok != true) toast("没停下来，再点一次")
+                hostBusy = false
+                refreshHeader()
+                syncSession()
+            }
+        }, "pet-interrupt").apply { isDaemon = true }.start()
     }
 
     /* ---------------- 新对话 ---------------- */

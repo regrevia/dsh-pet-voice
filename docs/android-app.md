@@ -1836,3 +1836,21 @@ App 这边：运行条写「引导中」，这一轮照常计时（不按「排�
 **实测启动（0.9.129 / vc199，本机 15ca9736）**：`am force-stop` 后 `am start -W .MainActivity` =
 `LaunchState: COLD / TotalTime 232 ms / WaitTime 237 ms`；紧接 `am start -W .HistoryActivity` =
 `WARM / TotalTime 72 ms / WaitTime 78 ms`。冷启动已在 250 ms 内，首屏不再有可感知等待。
+
+## 23.32 换装闪屏、语音被截断、退出后收不到回复（0.9.130）
+
+- **换装闪屏**：根因是页面里三条渲染路径同时在画同一张 canvas —— 大肥鱼的视频泵（`pump()`/`draw()` 按
+  `requestVideoFrameCallback` 把隐藏 `<video>` 的帧画上去）、24 帧立绘 `avDrawBody()`、v3 精灵 `av3Draw()`。
+  选立绘时视频泵没停，于是「一会睡衣一会大肥鱼」。现在 `draw()`/`fadeTick()`/`pump()`/`startPump()` 在
+  `v3.on || v3.pending` 时直接返回；`setOutfit()` 切到 v3 时关掉 `av.on`、`pumping`、`fadePrev` 并暂停视频元素；
+  切回视频时 `play()` 里补 `startPump()`，避免回鲸鱼娘后画面冻住；`__petTick` 里恢复暂停视频的那行也只在非 v3 时执行。
+- **收到的语音被截断**：宿主 `/say` 对 `text` 限 `TTS_MAX_CHARS=600`，超了直接 HTTP 400，App 侧拿不到音频就静音。
+  现在 `splitForTts(text, max=160)` 先按句切开再逐段 `tts.enqueue`，长回复也能整段念完。
+- **发完消息退出 App 收不到回复**：新增 `ChatWatch`（1.5 s 轮询该会话、最长 12 分钟、连续 4 次稳定后收尾），
+  把本轮回复按句增量念出来并写入 `PetHistory`；`PendingSend.recover()` 在进程重启后重发没拿到回执的那条。
+- **发送位/排队/中断**（对齐桌面端）：轮次在跑时发送位变成方块「中断」，输入框有内容时换回「发送」；
+  排队项点一下就是引导（`steerQueued`），不再单独给引导按钮。
+
+**实测（0.9.130 / vc200，本机 15ca9736，签名变更用 debug 包覆盖安装以保留数据）**：`pet_outfit=pajamas` 起浮窗后
+`adb logcat -s PetSprite` 连续输出 `sprite o=pajamas v3=v3 pajamas idle frame=13.webp / 04.webp / 07.webp`——帧在推进；
+同一时刻截图只有睡衣立绘、没有大肥鱼视频帧；`fade` 字段只有切装那一次 `n=0`，没有来回闪的淡化序列。

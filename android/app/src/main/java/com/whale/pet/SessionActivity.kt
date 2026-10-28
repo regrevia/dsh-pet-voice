@@ -51,9 +51,15 @@ class SessionActivity : Activity() {
     private var maxSeq: Long = 0
     private var loading = false
     private var sending = false
+    // 这句是什么时候发出去的、宿主有没有开始跑：都用来判断「这一轮真的结束了」，
+    // 否则刚入队那一秒宿主还没 running，会被当成结束，回执回来就没处放。
+    private var sentAt = 0L
+    // 还贴着底吗：贴底就一直把最新一行顶到最下面，用户翻上去看历史就停手
+    private var stickBottom = true
+    private var chaseBottom: Runnable? = null
+    private var chaseUntil = 0L
+    private var sawRunning = false
     /** 这一轮发给宿主的 requestId：人退出页面时拿它补进待发队列，宿主按它去重，不会多跑一轮。 */
-    private var inflightRid = ""
-    private var inflightText = ""
     private var running = false
     private var queued = ""
     private var errorLine: String = ""
@@ -124,6 +130,31 @@ class SessionActivity : Activity() {
 
         adapter = MsgAdapter()
         list.adapter = adapter
+        // setSelection 只管「这一行露出来了」，露半截也算露出来；气泡里的 WebView 出高度又更晚。
+        // 所以贴底那几秒里反复补差量，把最后一行的底对齐到列表底。
+        chaseBottom = object : Runnable {
+            override fun run() {
+                if (rows.isEmpty() || !stickBottom || System.currentTimeMillis() > chaseUntil) return
+                list.setSelection(list.count - 1)
+                val last = list.getChildAt(list.childCount - 1)
+                if (last != null) {
+                    val rest = last.bottom + list.paddingBottom - list.height
+                    if (rest > 0) list.scrollListBy(rest)
+                }
+                ui.postDelayed(this, 120)
+            }
+        }
+        // 只有手指自己拉走了才停手：程序滚动的中间态也会回调 onScroll，按它判会把跟随提前关掉
+        list.setOnScrollListener(object : android.widget.AbsListView.OnScrollListener {
+            override fun onScrollStateChanged(v: android.widget.AbsListView?, state: Int) {
+                if (state == android.widget.AbsListView.OnScrollListener.SCROLL_STATE_IDLE) stickBottom = nearBottom()
+            }
+            override fun onScroll(v: android.widget.AbsListView?, first: Int, visible: Int, total: Int) = Unit
+        })
+        list.setOnTouchListener { _, e ->
+            if (e.actionMasked == android.view.MotionEvent.ACTION_DOWN && !nearBottom()) stickBottom = false
+            false
+        }
         render = ChatRender(this, maxViews = 8) { PetSettings.load(this) }
         findViewById<View>(R.id.chatBack).setOnClickListener { finish() }
         queueLine = findViewById(R.id.chatQueue)
@@ -137,14 +168,15 @@ class SessionActivity : Activity() {
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
             override fun afterTextChanged(s: android.text.Editable?) = syncButton()
         })
+        Outbox.addReplyListener(outboxReply)
+        Outbox.addFailedListener(outboxFailed)
         load()
         refreshStatus()
     }
 
     override fun onDestroy() {
-        // 人退出页面但这一轮还在跑：把这一句（用原 requestId）托给待发队列——
-        // 宿主按 id 去重不会重跑，队列补发成功后自己把回答捞回来落到对话记录里。
-        parkUnfinished()
+        Outbox.removeReplyListener(outboxReply)
+        Outbox.removeFailedListener(outboxFailed)
         ui.removeCallbacksAndMessages(null)
         runCatching { render?.release() }
         render = null
@@ -412,6 +444,10 @@ class SessionActivity : Activity() {
             ui.post {
                 if (sid != sessionId) return@post
                 running = busy
+                if (busy) sawRunning = true
+                val settled = sawRunning || System.currentTimeMillis() - sentAt > 25_000
+                // 这一轮结束：排队的那句该自己发出去了（没点排队条的情况）
+                if (!busy && sending && settled && Outbox.count(this) == 0) finishSending("")
                 goalLine.text = if (objective.isBlank()) "" else "目标 · " + objective
                 goalLine.visibility = if (objective.isBlank()) View.GONE else View.VISIBLE
             }
@@ -439,26 +475,13 @@ class SessionActivity : Activity() {
         hideKeyboard()
         errorLine = ""
         sending = true
+        sentAt = System.currentTimeMillis()
+        sawRunning = false
         syncButton()
         appendEcho(raw)
-        val sid = sessionId
-        val rid = java.util.UUID.randomUUID().toString()
-        inflightRid = rid
-        inflightText = raw
-        io.execute {
-            val r = client.dispatch(raw, sid, rid)
-            ui.post {
-                if (!r.ok) {
-                    inflightRid = ""
-                    // 没落地就先存进待发队列：退出去也照样补发，回执由后台接着收
-                    runCatching { Outbox.add(this, raw, sessionId = sid) }
-                    finishSending("没发出去，已放进待发队列")
-                } else {
-                    adapter.notifyDataSetChanged()
-                    pollUntilReply(System.currentTimeMillis() + 45_000)
-                }
-            }
-        }
+        // 交给待发队列：App 在前台它立刻发，退出/切后台它接着补发，回执由 reply 监听补回来。
+        // 以前在这儿开 45 s 长轮询，主人一退出就 io.shutdownNow()，回复永远到不了。
+        runCatching { Outbox.add(this, raw, sessionId = sessionId) }
     }
 
     private fun appendEcho(text: String) {
@@ -468,57 +491,26 @@ class SessionActivity : Activity() {
         scrollBottom(force = true)
     }
 
-    /** dispatch 之后：先等宿主的长轮询，再补拉一次最新一页；45 s 内没有回复就给一行可点的重试。 */
-    private fun pollUntilReply(deadline: Long) {
-        if (!sending) return
-        val sid = sessionId
-        io.execute {
-            val cursor = if (maxSeq > Int.MAX_VALUE) -1 else maxSeq.toInt()
-            client.poll(sid, cursor, 8_000)
-            val r = client.session(sid, 20)
-            val page = parse(r)
-            val more = r.json?.optBoolean("hasMore", false) == true
-            val next = r.json?.optLong("nextBefore", 0) ?: 0
-            ui.post {
-                if (sid != sessionId) {
-                    // 这一轮属于上一只了：把等待态收掉，别让新会话永远显示「发送中」
-                    sending = false
-                    syncButton()
-                    return@post
-                }
-                var replied = false
-                var added = false
-                // 加行之前先记下用户是不是贴着底：加了之后 lastVisiblePosition 会落后，
-                // 那会儿再问就永远「没贴底」，新回复也就不跟下来了。
-                val stick = nearBottom()
-                for (m in page) {
-                    if (m.seq in seen) continue
-                    seen.add(m.seq)
-                    rows.add(m)
-                    added = true
-                    if (m.role == "assistant") replied = true
-                }
-                maxSeq = maxOf(maxSeq, page.maxOfOrNull { it.seq } ?: 0)
-                hasMore = more
-                nextBefore = next
-                applyPeek(r)
-                // 没有新行就不 notify：整表重绑会把每只气泡里的 WebView 再挂一遍，那一下就是闪
-                if (added) adapter.notifyDataSetChanged()
-                refreshMore()
-                if (rows.isNotEmpty()) emptyBox.visibility = View.GONE
-                if (replied) {
-                    finishSending("")
-                    if (stick) scrollBottom(force = true)
-                    return@post
-                }
-                if (System.currentTimeMillis() > deadline) {
-                    finishSending("没收到回复，重试")
-                    if (stick) scrollBottom(force = true)
-                    return@post
-                }
-                ui.postDelayed({ pollUntilReply(deadline) }, 1200)
-            }
-        }
+    /** 后台捞回来的回答：只有本页还在等这一轮才插，免得别处的回执糊到这只会话上。 */
+    private fun appendReply(text: String) {
+        if (!sending || text.isBlank()) return
+        // 补发那条路偶尔会把同一句回答再送一次：这条回答已经在列表里就不再插一遍
+        if (rows.any { it.role == "assistant" && it.text.trim() == text.trim() }) return
+        val stick = nearBottom()
+        maxSeq += 1
+        rows.add(Msg(maxSeq, "assistant", text, ""))
+        emptyBox.visibility = View.GONE
+        adapter.notifyDataSetChanged()
+        finishSending("")
+        if (stick) scrollBottom(force = true)
+    }
+
+    /* ---------------- 待发队列回执：退出页面也收得到回复 ---------------- */
+
+    /** 后台把这一轮的回答捞回来了：插进列表并滚到底。 */
+    private val outboxReply: (String) -> Unit = { text -> runCatching { appendReply(text) } }
+    private val outboxFailed: (String, String, Boolean) -> Unit = { _, reason, _ ->
+        runCatching { finishSending(reason) }
     }
 
     private fun finishSending(error: String) {
@@ -535,6 +527,9 @@ class SessionActivity : Activity() {
         }
     }
 
+    /** 这一轮还在不在跑：本页发出去的那句，或者宿主说这只会话还在跑。 */
+    private fun turnBusy(): Boolean = sending || running
+
     /**
      * 发送位只有一个：这一轮还在跑并且输入框是空的，就摆方块（中断）；
      * 输入框一有字就换回发送，跟桌面端一样——想插话先打字，不想等了按方块。
@@ -545,7 +540,7 @@ class SessionActivity : Activity() {
         if (!::stopBtn.isInitialized) return
         stopBtn.visibility = if (wantStop) View.VISIBLE else View.GONE
         sendBtn.visibility = if (wantStop) View.GONE else View.VISIBLE
-        sendBtn.isEnabled = !sending || hasText
+        sendBtn.isEnabled = !turnBusy() || hasText
     }
 
     /** 排队条：这一轮跑完自己会发；等不及就点它。 */
@@ -557,6 +552,8 @@ class SessionActivity : Activity() {
         }
         queueLine.text = "排队 · " + queued
         queueLine.visibility = View.VISIBLE
+        // 多出来的这一行会把列表顶短，正贴着底就跟着再压一下
+        if (stickBottom) scrollBottom()
     }
 
     /** 点排队条 = 引导：直接插进正在跑的这一轮，不掐断、不等它停。 */
@@ -572,37 +569,19 @@ class SessionActivity : Activity() {
         if (!steering) {
             // 这一轮其实已经停了（比如刚按过中断）：就当成正常一轮发出去
             sending = true
+            sentAt = System.currentTimeMillis()
+            sawRunning = false
             syncButton()
         }
         io.execute {
             val r = client.dispatch(text, sid, steer = steering)
             ui.post {
                 if (!r.ok) {
+                    // 引导没送进去就落盘补发，回答照样靠 reply 监听补回来
                     runCatching { Outbox.add(this, text, sessionId = sid) }
                     finishSending("没发出去，已放进待发队列")
-                } else if (!steering) {
-                    adapter.notifyDataSetChanged()
-                    pollUntilReply(System.currentTimeMillis() + 45_000)
                 }
             }
-        }
-    }
-
-    /** 退出页面时把没落地的话交给后台：正在跑的按原 requestId 去重，排队的直接补发。 */
-    private fun parkUnfinished() {
-        val sid = sessionId
-        val text = inflightText
-        if (sending && text.isNotBlank() && sid.isNotBlank()) {
-            val rid = inflightRid
-            runCatching {
-                if (rid.isBlank()) Outbox.add(this, text, sessionId = sid)
-                else Outbox.add(this, text, requestId = rid, sessionId = sid)
-            }
-        }
-        val next = queued
-        queued = ""
-        if (next.isNotBlank() && sid.isNotBlank()) {
-            runCatching { Outbox.add(this, next, sessionId = sid) }
         }
     }
 
@@ -621,7 +600,10 @@ class SessionActivity : Activity() {
     private fun scrollBottom(force: Boolean = false) {
         if (rows.isEmpty()) return
         if (!force && !nearBottom()) return
-        list.post { list.setSelection(list.count - 1) }
+        stickBottom = true
+        list.setSelection(list.count - 1)
+        chaseUntil = System.currentTimeMillis() + 6_000
+        chaseBottom?.let { ui.removeCallbacks(it); ui.post(it) }
     }
 
     /** 离底不到两行就算贴底：键盘弹起/收起会差一两行，别因此判定「用户翻上去了」。 */
@@ -762,16 +744,11 @@ class SessionActivity : Activity() {
         if (sending) return
         errorLine = ""
         sending = true
+        sentAt = System.currentTimeMillis()
+        sawRunning = false
         syncButton()
-        adapter.notifyDataSetChanged()
-        val sid = sessionId
-        io.execute {
-            val r = client.dispatch(text, sid)
-            ui.post {
-                if (!r.ok) finishSending("没发出去，点这里重发")
-                else pollUntilReply(System.currentTimeMillis() + 45_000)
-            }
-        }
+        appendEcho(text)
+        runCatching { Outbox.add(this, text, sessionId = sessionId) }
     }
 
     /* ---------------- 按住说话 ---------------- */
@@ -855,12 +832,6 @@ class SessionActivity : Activity() {
         if (requestCode == REQ_MIC && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED && micDown) {
             startHold()
         }
-    }
-
-    override fun onStop() {
-        super.onStop()
-        // 只是切到后台也别把这一轮丢了：托给待发队列，回复会自己落进对话记录
-        parkUnfinished()
     }
 
     override fun onPause() {

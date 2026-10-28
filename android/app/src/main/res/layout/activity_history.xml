@@ -258,25 +258,6 @@
                 android:textColor="@color/pet_hint"
                 android:textSize="12sp" />
 
-            <TextView
-                android:id="@+id/chatSteer"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:background="?android:attr/selectableItemBackground"
-                android:padding="8dp"
-                android:text="引导"
-                android:textColor="@color/pet_accent"
-                android:textSize="13sp" />
-
-            <TextView
-                android:id="@+id/chatStop"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:background="?android:attr/selectableItemBackground"
-                android:padding="8dp"
-                android:text="中断"
-                android:textColor="@color/pet_accent"
-                android:textSize="13sp" />
         </LinearLayout>
 
         <!-- 还没轮到跑的那几句：一行一条，撤掉/调顺序都在这一行里 -->
