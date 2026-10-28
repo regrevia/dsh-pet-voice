@@ -1,12 +1,12 @@
 {
-  "versionCode": 186,
-  "versionName": "0.9.116",
-  "size": 30073398,
-  "sha256": "4207a29d628bbce7a0256056c495138262b84fb19585e938cacb6fb7ca0e46a2",
+  "versionCode": 188,
+  "versionName": "0.9.118",
+  "size": 30075142,
+  "sha256": "8a9950edef91642ac87471e6286c1cd83248ac5c5eddb1a929bf62b43fd13893",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.116/app-release.apk",
-  "notes": "面板里的摸头互动/语音/看会话/气泡开关，手机端严格照做：关掉就不动、不录音、不冒泡。",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.116/app-release.apk",
-  "publishedAt": "2026-10-28T12:44:44.683Z",
-  "promotedAt": "2026-10-28T12:44:47.537Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.118/app-release.apk",
+  "notes": "引导插进正在跑的这一轮（和桌面端 1:1）；队列条、引导按钮；历史懒加载",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.118/app-release.apk",
+  "publishedAt": "2026-10-28T12:59:47.677Z",
+  "promotedAt": "2026-10-28T12:59:50.484Z"
 }
