@@ -61,17 +61,21 @@ class PetClient(private val config: () -> PetConfig) {
             json?.optString("error").takeUnless { it.isNullOrBlank() } ?: "HTTP $code"
     }
 
-    fun state(): Result = get("state")
+    fun state(): Result = get("state", attempts = 2)
 
     /** 宿主播报队列（`POST /api/say` 入队的句子）：`since` < 0 只对齐光标，不回放历史。 */
-    fun say(since: Long): Result = get("say", mapOf("since" to since.toString()))
+    fun say(since: Long): Result = get("say", mapOf("since" to since.toString()), attempts = 2)
 
     /** 换绑前先把旧宿主上的这台设备解绑，别让旧电脑挂着一条假「已连接」。 */
     fun unbind(): Result = postJson("unbind", JSONObject().put("id", deviceId()))
 
 
-    fun get(path: String, query: Map<String, String> = emptyMap()): Result =
-        request(path, query, "GET", null, 10_000)
+    /**
+     * GET 是只读的，抖动时重放一次没有副作用（POST 靠 requestId 保幂等，不走这里）。
+     * [attempts] 默认 1；轮询/列表这类读接口传 2，网络切换那一两秒不至于白等一轮。
+     */
+    fun get(path: String, query: Map<String, String> = emptyMap(), attempts: Int = 1): Result =
+        request(path, query, "GET", null, 10_000, attempts = attempts)
 
     fun postJson(path: String, body: JSONObject): Result =
         request(path, emptyMap(), "POST", body.toString().toByteArray(Charsets.UTF_8), 10_000)
@@ -110,7 +114,7 @@ class PetClient(private val config: () -> PetConfig) {
 
     /** 单独问一只会话的头（标题、工作目录）；`limit=1` 只取一条转录，够轻。 */
     fun sessionInfo(id: String, limit: Int = 1): Result =
-        get("session", mapOf("id" to id, "limit" to limit.toString()))
+        get("session", mapOf("id" to id, "limit" to limit.toString()), attempts = 2)
 
     /** `fresh=true` 强制新开一只会话；不带 fresh 则复用宿主记住的那只。 */
     fun newSession(fresh: Boolean = false): Result =
@@ -136,7 +140,7 @@ class PetClient(private val config: () -> PetConfig) {
     )
 
     /** 会话列表 + 现在钉在哪只。 */
-    fun sessions(): Result = get("sessions")
+    fun sessions(): Result = get("sessions", attempts = 2)
 
     /** 助手 Markdown → HTML 片段；样式由客户端统一包（`ChatRender`）。 */
     fun render(text: String): Result = postJson("render", JSONObject().put("text", text))
@@ -144,14 +148,14 @@ class PetClient(private val config: () -> PetConfig) {
     fun cancel(sessionId: String): Result = postJson("cancel", JSONObject().put("sessionId", sessionId))
 
     /** 还没轮到跑的那几句（桌面端「待输入」）；每句带 id，手机可以撤掉或调顺序。 */
-    fun inbox(sessionId: String): Result = get("inbox", mapOf("sessionId" to sessionId))
+    fun inbox(sessionId: String): Result = get("inbox", mapOf("sessionId" to sessionId), attempts = 2)
 
     /** remove / up / down：改的就是桌面端同一份队列。 */
     fun inboxAction(sessionId: String, action: String, id: String): Result =
         postJson("inbox", JSONObject().put("sessionId", sessionId).put("action", action).put("id", id))
 
     /** 这只会话当前的目标，没有就空数组。 */
-    fun goals(sessionId: String): Result = get("goals", mapOf("sessionId" to sessionId))
+    fun goals(sessionId: String): Result = get("goals", mapOf("sessionId" to sessionId), attempts = 2)
 
     /** 宿主上的图片字节（`/api/file?path=`）：聊天里要直接看到电脑上的图。 */
     fun fileBytes(path: String): ByteArray? {

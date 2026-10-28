@@ -898,7 +898,8 @@ class MainActivity : Activity() {
     private fun checkUpdate(quiet: Boolean) {
         initUpdater()
         val u = updater ?: return
-        if (quiet && !u.shouldAutoCheck()) return
+        // 用户自己打开 App：10 分钟内查过就不重复打，超过就查——不然刚发的版要等 6 小时才看得见
+        if (quiet && !u.shouldAutoCheck(10 * 60_000L)) return
         u.markChecked()
         Thread {
             val info = try {

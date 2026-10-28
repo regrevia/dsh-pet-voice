@@ -199,10 +199,14 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
         ).also { lastCheck = "ok" }
     }
 
-    fun shouldAutoCheck(): Boolean {
+    /**
+     * 距上次检查够久才自动查。[windowMs] 默认 6 小时：后台轮询不必勤。
+     * 用户主动打开 App 时给更短的窗口（见 MainActivity），刚发版也能马上看到更新。
+     */
+    fun shouldAutoCheck(windowMs: Long = 6 * 3600_000L): Boolean {
         val prefs = ctx.getSharedPreferences("pet_prefs", Context.MODE_PRIVATE)
         val last = prefs.getLong(PREFS_LAST_CHECK, 0)
-        return System.currentTimeMillis() - last > 6 * 3600_000L
+        return System.currentTimeMillis() - last > windowMs
     }
 
     fun markChecked() {
