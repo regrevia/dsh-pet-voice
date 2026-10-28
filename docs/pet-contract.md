@@ -1,4 +1,4 @@
-# 手机端 ↔ `dsh-pet-voice` 接口契约（v1.8，2026-10-26；v1.8 面板「音色」接成默认音色（不再只存不用）、`/api/state` 下发 `pet.wakeName` 与 `settings.voice`、`/api/tts` 的 voice 优先级按实现改正；v1.7 加 `/api/upload`、`/api/file`（视频 + Range）、`/api/diag`、dispatch `attachments`/`requestId`/`queued`/`origin`、错误码总表、面板配置生效时机；v1.6 工具行改成桌面那种「标签 · 详情」一行（协议不变）；v1.5 对话页去掉分割线；v1.4 旁听材料改走隐藏提示词、`/api/session` 加 `peek`；v1.3 加 dispatch 旁听材料；v1.2 加 `/api/render`、朗读剥离、人设/长度/气泡配置）
+# 手机端 ↔ `dsh-pet-voice` 接口契约（v1.9，2026-10-28；v1.9 图片附件改成宿主侧 `image` 内容块、`[图片] <路径>` 只在取字节失败时兜底；v1.8 面板「音色」接成默认音色（不再只存不用）、`/api/state` 下发 `pet.wakeName` 与 `settings.voice`、`/api/tts` 的 voice 优先级按实现改正；v1.7 加 `/api/upload`、`/api/file`（视频 + Range）、`/api/diag`、dispatch `attachments`/`requestId`/`queued`/`origin`、错误码总表、面板配置生效时机；v1.6 工具行改成桌面那种「标签 · 详情」一行（协议不变）；v1.5 对话页去掉分割线；v1.4 旁听材料改走隐藏提示词、`/api/session` 加 `peek`；v1.3 加 dispatch 旁听材料；v1.2 加 `/api/render`、朗读剥离、人设/长度/气泡配置）
 
 这份文档是**唯一**的跨端约定。背景：`dsh-pet-voice` 要作为独立插件脱离出来，插件与手机 App
 各自演进——所以只允许按本文档约定的 HTTP 接口互相说话，**App 不得依赖插件内部实现**
@@ -228,6 +228,10 @@
 - 派发正文 = 用户原话 + 每附件一行，格式固定 `[图片] <绝对路径>` / `[视频] <绝对路径>`；
   多段之间空行分隔。类型只看扩展名：`mp4` / `mov` / `m4v` → 视频，其余 → 图片。
 - 附件行**只给模型看**，不上屏：手机气泡里仍只有用户原话。
+- 图片（v1.9）**不再只给路径**：宿主用 `attachments.saveImages()` 把字节塞成真正的 `image`
+  内容块（`{type:"image", attachment:{attachmentId, mediaType, width, height, bytes, name}}`），
+  桌面端看到的就是图片附件本身；只有取字节失败才退回上面的 `[图片] <路径>` 文字。
+  App 侧对应把气泡里的 `![图片](路径)` / 裸路径剥掉，只留缩略图（`stripImageRefs()`）。
 - 视频不做抽帧、不转码：宿主只把路径写进提示词，模型要看内容自己调工具读。
 
 #### origin、queued 与「掐上一轮」（v1.7 写清）
