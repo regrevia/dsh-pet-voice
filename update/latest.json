@@ -1,12 +1,12 @@
 {
-  "versionCode": 171,
-  "versionName": "0.9.101",
-  "size": 30043410,
-  "sha256": "9259a32d24a63a2e9efad786871aab1fffd4ed9e4144075cfcb3d4cb7f2cf5a6",
-  "file": "jingling-0.9.101.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.101/jingling-0.9.101.apk",
-  "notes": "点一下不再变小：气泡让位只下移不缩放；动作衔接淡化拉到 520/640ms 并提前起淡；手机网络日志把播报轮询折叠成每 40 次一行；等电脑端收尾的上限 180s→360s；手机发的图片进桌面会话改为 markdown 图片。",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.101/jingling-0.9.101.apk",
-  "publishedAt": "2026-10-28T08:15:47.903Z",
-  "promotedAt": "2026-10-28T08:15:50.284Z"
+  "versionCode": 175,
+  "versionName": "0.9.105",
+  "size": 30047050,
+  "sha256": "63c23d78bebae3d3cef11e495e7f9b887a13e20f364fefa27dcfa7b7ec3e7a21",
+  "file": "app-release.apk",
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.105/app-release.apk",
+  "notes": "气泡不再挤压角色：窗口随气泡上沿临时加高 30dp，人物位置与大小完全不动（舞台矩阵缩放 1.0000、让位 0px）；动作分档尺寸改为按人物本体视觉面积归一，并按身高封顶 360px，跳起/侧身这类细长动作不再被放大到顶出画面。",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.105/app-release.apk",
+  "publishedAt": "2026-10-28T09:14:39.951Z",
+  "promotedAt": "2026-10-28T09:14:42.308Z"
 }
