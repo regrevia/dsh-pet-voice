@@ -100,6 +100,17 @@ function progressLineFor(startedAt, saidThisTurn, now) {
   return '还在跑，再等等'
 }
 
+/**
+ * 回执该不该说：要联动和气泡都开、这句得指向一条 30 分钟内碰过的会话、还要有内容。
+ * 拆成纯函数是为了能单测——门控写错的话表现是「没反应」，最难看出来。
+ */
+export function linkSayAllowed({ cfg, key, line, touchedAt, now, watchMs = 30 * 60_000 }) {
+  if (!cfg?.link || !cfg?.bubble) return false
+  if (!key || !String(line ?? '').trim()) return false
+  if (!touchedAt || now - touchedAt > watchMs) return false
+  return true
+}
+
 /** 单测用 DSH_PET_VOICE_PET_SESSION 指到临时文件，别动用户真正的专属会话绑定。 */
 const petSessionFile = () => process.env.DSH_PET_VOICE_PET_SESSION || PET_SESSION_PATH
 
@@ -2294,7 +2305,7 @@ export const __ttsInternals = {
   VOICES: TTS_VOICES,
 }
 
-export const __linkInternals = { progressLineFor, PROGRESS_AFTER_MS }
+export const __linkInternals = { linkSayAllowed, progressLineFor, PROGRESS_AFTER_MS }
 
 export const __uploadInternals = {
   extFor,
@@ -4591,17 +4602,19 @@ export function apply(ctx, config) {
   }
 
   /**
+   * 回执该不该说：要联动和气泡都开、这句得指向一条 30 分钟内碰过的会话、还要有内容。
+   * 拆成纯函数是为了能单测——门控写错的话表现是「没反应」，最难看出来。
+   */
+  /**
    * 手机上刚发生的一件事（排队 / 引导 / 中断）用一句话回执：只在主人开着联动、气泡、
    * 且这条会话确实是手机碰过的才说，冷却与 [linkLineFor] 共用一份 [linkSaid]。
    */
   function linkSay(sessionId, line, tag) {
     try {
       const cfg = getPanelConfig()
-      if (!cfg?.link || !cfg?.bubble) return
       const key = bareSessionId(String(sessionId ?? ''))
-      if (!key || !line) return
       const touchedAt = Math.max(phoneTouched.get(key) ?? 0, Number(readPhoneTouch()[key] ?? 0))
-      if (!touchedAt || Date.now() - touchedAt > LINK_WATCH_MS) return
+      if (!linkSayAllowed({ cfg, key, line, touchedAt, now: Date.now() })) return
       // 回执与「跑完了」不是一类话：排队/引导/中断本来就是连着发生的，用短冷却，
       // 别让 120s 的长冷却把紧接着的「记下了」「好，停了」吞掉。
       const quick = (SHARED.linkQuick ||= new Map())

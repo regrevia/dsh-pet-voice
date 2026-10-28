@@ -116,7 +116,6 @@ class MainActivity : Activity() {
         updateState = findViewById(R.id.updateState)
 
         wakeCheck.setOnCheckedChangeListener { _, checked ->
-            wakeHint.visibility = if (checked) View.VISIBLE else View.GONE
             if (checked) toast("耗电会增加")
         }
 
@@ -406,8 +405,13 @@ class MainActivity : Activity() {
         val cfg = PetSettings.load(this)
         if (hostInput.text.isNullOrBlank()) hostInput.setText(cfg.baseUrl)
         presetSpinner.setSelection(presetKeys.indexOf(cfg.preset).coerceAtLeast(0))
-        wakeCheck.isChecked = cfg.wakeEnabled
-        wakeHint.visibility = if (cfg.wakeEnabled) View.VISIBLE else View.GONE
+        // 常听唤醒的总开关在电脑面板里：面板关了这里就别装成能单独打开，
+        // 否则用户在手机上勾上、回到桌面又被关掉，只会以为「叫了没反应」。
+        val panelWake = PetSettings.feature(this, "wake")
+        wakeCheck.isEnabled = panelWake
+        wakeCheck.isChecked = panelWake && cfg.wakeEnabled
+        wakeHint.text = if (panelWake) "" else "电脑端已关 · 在电脑面板打开后跟随"
+        wakeHint.visibility = if (panelWake) View.GONE else View.VISIBLE
         autoStartCheck.isChecked = cfg.autoStart
         // 气泡开关只有桌面面板那一份是真的：这里只照着显示，不让两边各存一套
         bubbleCheck.isEnabled = false
