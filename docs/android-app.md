@@ -1406,3 +1406,45 @@ fade 的 `else` 分支加了永久、廉价、warn 级的 `[cut]` 探针。95 s 
 `/api/state.turns` 是宿主正在跑的回合（键为裸 uuid）。对话页每次核对状态时按钉住的会话查，
 命中且不是本机自己发起的一轮，就把标题行显示成「会话名 · 正在回复」；有回合在跑时状态核对
 从 20 s 收紧到 3 s，跑完自动回到 20 s。本机发起的一轮不重复显示（顶部进度条已经在说话）。
+
+### 23.15 目标行与待输入队列（0.9.110）
+
+**A. 数据从哪来**
+
+目标与队列都是宿主的会话投影，不在 `/api/state` 里，所以给 `/api/session` 的响应补了两个字段：
+
+- `goal`：`{id, objective, status, revision, roundsStarted, maxGoalRounds, updatedAt}`，
+  取自会话投影的 `goal.current.goal`；`status` = `active | paused | blocked | complete`。
+  没有目标时是 `null`，不是缺字段——App 只判 `null`。
+- `inbox`：`[{kind, text, at}]`，取自同一份投影的 `inbox` 行（`next-turn` / `next-step` 两类）。
+  没有排队就是 `[]`。
+
+**B. 目标操作**
+
+`POST /api/goal`，body `{sessionId, action, id, revision}`，`action` = `pause | resume | complete`。
+实现走宿主自己的 goals 接口（`agent.ctx.get('goals')`），先 `sessionController.resolveAgent(sessionId)`
+拿活着的 agent；`revision` 原样回传做并发保护，桌面刚改过就会返回 `ok:false`。
+
+返回 `{ok:true, goal:{…}}`；会话没打开返回 409、宿主没有该接口返回 503、参数不全返回 400。
+
+**C. 界面**
+
+- 有目标才出现一行窄卡：状态（目标进行中 / 已暂停 / 受阻 / 已完成）+ 目标正文（最多两行）。
+- 右侧动作跟桌面一致：进行中给「暂停」（跑过轮次时写「第 N/M 轮 · 暂停」），暂停/受阻给「继续」，
+  已完成不给按钮。点下去先置灰成「暂停中…」，成功后立刻重新同步，失败把宿主最新状态拉回来。
+- 队列在目标卡第二行，只在真有排队时显示：「待输入 · 正文」，超过两条折成「等 N 条」。
+- 两块都跟着已有的状态核对走（20 s / 有回合 3 s），没有额外的定时器。
+
+**D. 实测**
+
+- 建目标 → 桌面 `GET /api/session` 里 `goal.status=active`、手机显示「目标进行中」+「暂停」。
+- 手机点「继续」（此前 API 暂停到 `revision:2`）→ 宿主回到 `status:"active"`, `revision:3`，
+  手机标题刷新成「目标进行中」。
+- `POST /api/goal` 标记完成后宿主 `revision:4`，手机显示「目标已完成」且不再给按钮。
+
+**E. 已知边界**
+
+- 手机端派发的消息不写投影的 `inbox` 行：宿主把第二句直接交给正在跑的回合（实测两句都在，
+  `seq 4584/4585`），所以这条队列行对手机自己发的消息一般是空的。桌面编排器里排的队才会出现。
+- 目标删除（桌面上的 🗑）没有对应的宿主远程接口，这轮没做。
+

@@ -2024,9 +2024,87 @@ function goalsOfSession(sessionId) {
         id: String(goal.id),
         objective: String(goal.objective ?? ''),
         status: String(goal.phase ?? goal.status ?? 'active'),
+        revision: Number(goal.revision ?? 0) || 0,
+        roundsStarted: Number(meta.goal?.current?.roundsStarted ?? 0) || 0,
+        maxGoalRounds: Number(goal.maxGoalRounds ?? 0) || 0,
         updatedAt: toMs(meta.goal?.updatedAt) || meta.updatedAt || 0,
       },
     ],
+  }
+}
+
+/**
+ * 还没轮到它跑的那几句（桌面端「待输入队列」）。
+ * 宿主把它存在投影缓存的 `inbox` 行里：`next-turn` 是下一轮的用户话，`next-step` 是插话。
+ */
+function inboxOfSession(sessionId) {
+  const id = String(sessionId ?? '').trim()
+  if (!id) return []
+  const file = projectCachePath(id)
+  if (!file) return []
+  let rows = {}
+  try {
+    rows = JSON.parse(readFileSync(file, 'utf8'))?.record?.rows ?? {}
+  } catch {
+    return []
+  }
+  const out = []
+  for (const [kind, list] of Object.entries(rows.inbox?.val ?? {})) {
+    if (!Array.isArray(list)) continue
+    for (const item of list) {
+      const text = (Array.isArray(item?.content) ? item.content : [])
+        .filter((part) => part?.type === 'text')
+        .map((part) => String(part.text ?? ''))
+        .join('\n')
+        .trim()
+      if (text) out.push({ kind, text, at: toMs(item?.at) || 0 })
+    }
+  }
+  return out
+}
+
+/**
+ * 目标操作：暂停 / 继续 / 标记完成。桌面端点的是同一套宿主接口，这里只是给手机让路。
+ * revision 是并发保护——手机上的版本号过时了就拒绝，避免把桌面刚改的状态覆盖掉。
+ */
+async function goalActionRoute(ctx, body) {
+  const sessionId = String(body?.sessionId ?? '').trim()
+  const action = String(body?.action ?? '').trim()
+  const id = String(body?.id ?? '').trim()
+  const revision = Number(body?.revision ?? 0) || 0
+  if (!sessionId || !['pause', 'resume', 'complete'].includes(action) || !id) {
+    return { status: 400, body: { ok: false, error: '参数不对' } }
+  }
+  const controller = ctx.get?.('sessionController')
+  if (typeof controller?.resolveAgent !== 'function') {
+    return { status: 503, body: { ok: false, error: '宿主没给出会话接口' } }
+  }
+  try {
+    const resolved = await controller.resolveAgent(sessionId)
+    const agent = resolved?.agent
+    if (!agent) return { status: 409, body: { ok: false, error: '会话没打开' } }
+    const goals = agent.ctx?.get?.('goals') ?? ctx.get?.('goals')
+    const run = goals?.[action]
+    if (typeof run !== 'function') return { status: 503, body: { ok: false, error: '宿主没有目标接口' } }
+    const view = run.call(goals, agent, { id, revision })
+    netLog('goal-action', { sessionId, action })
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        goal: view
+          ? {
+              id: String(view.id),
+              objective: String(view.objective ?? ''),
+              status: String(view.phase ?? 'active'),
+              revision: Number(view.revision ?? 0) || 0,
+              roundsStarted: Number(view.roundsStarted ?? 0) || 0,
+            }
+          : null,
+      },
+    }
+  } catch (error) {
+    return { status: 409, body: { ok: false, error: String(error?.message ?? error) } }
   }
 }
 
@@ -5522,7 +5600,12 @@ export function apply(ctx, config) {
             before: url.searchParams.get('before') ?? '',
           })
           if (!payload) return sendJson(res, 404, { ok: false, error: '会话不存在' })
-          return sendJson(res, 200, payload)
+          const sid = url.searchParams.get('id') ?? ''
+          return sendJson(res, 200, {
+            ...payload,
+            goal: goalsOfSession(sid).goals[0] ?? null,
+            inbox: inboxOfSession(sid),
+          })
         } catch (error) {
           LOG('会话转录读取失败：', error?.message ?? error)
           return sendJson(res, 500, { ok: false, error: '读取会话失败' })
@@ -5537,6 +5620,12 @@ export function apply(ctx, config) {
           // 目标只是锦上添花：读不到就空数组，别让 App 因此报错。
           return sendJson(res, 200, { ok: true, goals: [] })
         }
+      }
+
+      if (route === 'goal' && method === 'POST') {
+        const body = await readJson(req)
+        const out = await goalActionRoute(ctx, body)
+        return sendJson(res, out.status, out.body)
       }
 
       if (route === 'new' && method === 'POST') {

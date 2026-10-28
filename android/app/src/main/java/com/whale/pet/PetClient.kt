@@ -188,6 +188,17 @@ class PetClient(private val config: () -> PetConfig) {
         return get("session", q)
     }
 
+    /** 目标操作：暂停 / 继续 / 标记完成。走的是桌面端同一套宿主接口。 */
+    fun goalAction(sessionId: String, action: String, id: String, revision: Int): Result =
+        postJson(
+            "goal",
+            JSONObject()
+                .put("sessionId", sessionId)
+                .put("action", action)
+                .put("id", id)
+                .put("revision", revision),
+        )
+
     /** 切项目：把专属会话钉到目标项目上。 */
     fun switchWorkspace(workspaceId: String): Result =
         postJson("switch", JSONObject().put("workspaceId", workspaceId))

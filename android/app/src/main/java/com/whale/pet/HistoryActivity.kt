@@ -102,6 +102,17 @@ class HistoryActivity : Activity() {
     private lateinit var peekLabel: TextView
     private lateinit var attachBtn: android.widget.ImageView
 
+    // 目标和待输入队列：和桌面端一样看得见，也能直接暂停 / 继续
+    private lateinit var goalBar: View
+    private lateinit var goalState: TextView
+    private lateinit var goalText: TextView
+    private lateinit var goalAction: TextView
+    private lateinit var goalQueue: TextView
+    @Volatile private var goalId = ""
+    @Volatile private var goalRevision = 0
+    @Volatile private var goalPhase = ""
+    @Volatile private var goalPending = false
+
     private lateinit var pickerScrim: View
     private lateinit var pickerSheet: View
     private lateinit var pickerBack: android.widget.ImageView
@@ -245,6 +256,13 @@ class HistoryActivity : Activity() {
         sessionLabel = findViewById(R.id.historySession)
         peekLabel = findViewById(R.id.historyPeek)
         attachBtn = findViewById(R.id.chatAttach)
+
+        goalBar = findViewById(R.id.historyGoalBar)
+        goalState = findViewById(R.id.goalState)
+        goalText = findViewById(R.id.goalText)
+        goalAction = findViewById(R.id.goalAction)
+        goalQueue = findViewById(R.id.goalQueue)
+        goalAction.setOnClickListener { toggleGoal() }
 
         pickerScrim = findViewById(R.id.pickerScrim)
         pickerSheet = findViewById(R.id.pickerSheet)
@@ -519,6 +537,88 @@ class HistoryActivity : Activity() {
     }
 
     /**
+     * 目标行：有目标才出现，没目标就整块收起（不占地方、不说空话）。
+     * 右边那个动作跟桌面端一致——在跑的给「暂停」，停下的给「继续」。
+     */
+    private fun renderGoal(detail: JSONObject) {
+        val goal = detail.optJSONObject("goal")
+        if (goal == null || goal.optString("id").isBlank()) {
+            goalPending = false
+            goalId = ""
+            goalPhase = ""
+            goalBar.visibility = View.GONE
+            return
+        }
+        goalPending = false
+        val id = goal.optString("id")
+        val phase = goal.optString("status").ifBlank { "active" }
+        goalId = id
+        goalPhase = phase
+        goalRevision = goal.optInt("revision", 0)
+        val objective = goal.optString("objective").trim()
+        goalText.text = objective.ifBlank { "目标" }
+        goalState.text = when (phase) {
+            "active" -> "目标进行中"
+            "paused" -> "目标已暂停"
+            "blocked" -> "目标受阻"
+            "complete" -> "目标已完成"
+            else -> "目标"
+        }
+        val rounds = goal.optInt("roundsStarted", 0)
+        val cap = goal.optInt("maxGoalRounds", 0)
+        if (phase == "active" && rounds > 0 && cap > 0) {
+            goalAction.text = "第 $rounds/$cap 轮 · 暂停"
+        } else {
+            goalAction.text = if (phase == "complete") "" else if (phase == "active") "暂停" else "继续"
+        }
+        goalAction.visibility = if (goalAction.text.isBlank()) View.GONE else View.VISIBLE
+        val inbox = detail.optJSONArray("inbox")
+        val queued = (0 until (inbox?.length() ?: 0))
+            .mapNotNull { inbox?.optJSONObject(it)?.optString("text")?.trim() }
+            .filter { it.isNotBlank() }
+        goalQueue.visibility = if (queued.isEmpty()) View.GONE else View.VISIBLE
+        goalQueue.text = queued.take(2).joinToString("\n") { "待输入 · $it" }.let {
+            if (queued.size > 2) "$it\n等 ${queued.size} 条" else it
+        }
+        goalBar.visibility = View.VISIBLE
+    }
+
+    /** 点目标行右侧的按钮：在跑就暂停，停下了就继续。执行完立刻跟宿主对一次。 */
+    private fun toggleGoal() {
+        val id = goalId
+        if (id.isBlank() || goalPending) return
+        val action = if (goalPhase == "active") "pause" else "resume"
+        if (goalPhase == "complete") return
+        goalPending = true
+        goalAction.text = if (action == "pause") "暂停中…" else "继续中…"
+        val sid = PetSettings.chatSession(this)
+        val rev = goalRevision
+        Thread({
+            val res = try {
+                PetClient { PetSettings.load(this) }.goalAction(sid, action, id, rev)
+            } catch (_: Exception) { null }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                val body = res?.json
+                if (body?.optBoolean("ok") != true) {
+                    // 版本对不上（桌面刚改过）也算正常：把最新状态拉回来，按钮就能再点
+                    toast(body?.optString("error").orEmpty().ifBlank { "没改成，稍后再试" })
+                    goalPending = false
+                    syncSession()
+                    return@runOnUiThread
+                }
+                val view = body.optJSONObject("goal")
+                if (view != null) {
+                    goalPhase = view.optString("status").ifBlank { goalPhase }
+                    goalRevision = view.optInt("revision", goalRevision)
+                }
+                goalPending = false
+                syncSession()
+            }
+        }, "pet-goal-action").apply { isDaemon = true }.start()
+    }
+
+    /**
      * 跟宿主核一次「屏幕上这只对话到底是哪只」。
      *
      * App 发消息会带上自己钉的会话 id，所以落点由这边说了算；但钉的那可能在电脑上被
@@ -534,10 +634,16 @@ class HistoryActivity : Activity() {
         val client = PetClient { PetSettings.load(this) }
         Thread({
             val res = try { client.state() } catch (_: Exception) { null }
+            // 目标与待输入队列挂在会话详情上：一次请求就能把两块都拿到
+            val sid = PetSettings.chatSession(this)
+            val detail = if (sid.isNotBlank()) {
+                try { client.session(sid, 1) } catch (_: Exception) { null }
+            } else null
             runOnUiThread {
                 syncing = false
                 if (!isFinishing && !isDestroyed) {
                     res?.json?.let { adoptHostState(it) }
+                    detail?.json?.let { renderGoal(it) }
                     after?.invoke()
                 }
             }
