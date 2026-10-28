@@ -146,9 +146,9 @@ class FloatingPetService : Service() {
     /**
      * 宿主播报队列的拉取间隔；一次最多上屏几条（多了会把气泡挤成走马灯）。
      * 这个间隔就是「宿主 POST 之后最多干等多久才上屏」：0.9.74 用 1500ms（实测平均 659ms、
-     * 最差 1247ms），0.9.75 收到 700ms 把干等上限砍掉一半。
+     * 最差 1247ms），0.9.75 收到 700ms（253/687ms），0.9.76 再收到 300ms。
      */
-    private val SAY_POLL_MS = 700L
+    private val SAY_POLL_MS = 300L
     private val SAY_MAX_PER_POLL = 3
 
     /**
