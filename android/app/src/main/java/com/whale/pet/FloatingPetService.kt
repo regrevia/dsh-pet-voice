@@ -73,6 +73,8 @@ class FloatingPetService : Service() {
     private val sayQueue = ArrayDeque<String>()
     private var sayBusyUntil = 0L
     private var sayPump: Runnable? = null
+    /** 上一句因为「队列满」被挡回去的原文；同一句只记一次日志。 */
+    private var sayFullLogged: String? = null
 
     /* ---------------- 显示方式：只在桌面 / 一直显示 ---------------- */
     /** home 模式下正在轮询前台应用（每 1200ms 一次）。 */
@@ -781,9 +783,15 @@ class FloatingPetService : Service() {
         }
         if (sayQueue.size >= SAY_QUEUE_MAX) {
             // 队列满就让它留在宿主队列里：游标不前推，下一轮还能取到这句。
-            Log.i("PetSay", "气球队列满 ${SAY_QUEUE_MAX} 句，这句留到下一轮")
+            // 同一句每轮都会被重新取到（这正是「不推游标」的代价），所以日志只说一次，
+            // 否则队列真满的那几秒里会刷出一模一样的十几行。
+            if (sayFullLogged != body) {
+                sayFullLogged = body
+                Log.i("PetSay", "气球队列满 ${SAY_QUEUE_MAX} 句，这句留到下一轮")
+            }
             return false
         }
+        sayFullLogged = null
         sayQueue.addLast(body)
         pumpSay()
         return true
@@ -945,13 +953,17 @@ class FloatingPetService : Service() {
                     // 微信式按住说话：DOWN 就开录，不等 VAD 判定、也不等 700ms 尾静音
                     val now = SystemClock.elapsedRealtime()
                     if (now - lastPreemptAt < 900L) {
-                        // 连点第二下起只给回执：不打断、不新建一轮、也不排进队列
+                        // 连点第二下起只给回执：不打断、不新建一轮、也不排进队列。
+                        // 窗口按「上一根手指」顺延：连点十几下时不能每隔 900ms 又开一次麦，
+                        // 否则那一小段会被当成误触再弹一次「按住说话」。手停下来 900ms 才重新放行。
                         Log.i(
                             "PetTap",
                             "连点收口：${now - lastPreemptAt}ms 内第二下只回执 turn=$turnActive speaking=$speaking tts=${tts.busy}",
                         )
                         receiptOnly = true
-                        say("等等，还在回")
+                        lastPreemptAt = now
+                        // 空闲时连点没有「还在回」这回事，别弹一句不成立的台词
+                        if (turnActive || speaking || tts.busy) say("等等，还在回")
                         return true
                     }
                     // 记在放行之后、与有没有在回无关：空闲时连点两下同样是「第二下只回执」，
