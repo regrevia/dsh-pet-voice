@@ -1,12 +1,12 @@
 {
-  "versionCode": 201,
-  "versionName": "0.9.131",
-  "size": 30091526,
-  "sha256": "d09e63fb6cd90ea89446cd578d3b06bdf921636fed303cc7baf851edac066155",
+  "versionCode": 202,
+  "versionName": "0.9.132",
+  "size": 30092386,
+  "sha256": "778df88b84fbee302fb9d7dce8124b11b1e7196dd80a809aafb54ac8aafc39c1",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.131/app-release.apk",
-  "notes": "浮窗重启不再重念旧播报；换装不再闪屏；长回复语音不再被截断；退出 App 后也能收到并念出回复；轮次中发送位变中断方块、排队项点击即引导",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.131/app-release.apk",
-  "publishedAt": "2026-10-28T16:55:38.234Z",
-  "promotedAt": "2026-10-28T16:55:41.434Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.132/app-release.apk",
+  "notes": "手机端：宿主注入的压缩摘要碎块不再上屏；只有图的气泡不再留空胶囊；发图走「先上传→缩略图→再发」，桌面端看到的是真图片附件",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.132/app-release.apk",
+  "publishedAt": "2026-10-28T17:31:51.028Z",
+  "promotedAt": "2026-10-28T17:31:54.150Z"
 }
