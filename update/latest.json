@@ -1,12 +1,12 @@
 {
-  "versionCode": 175,
-  "versionName": "0.9.105",
-  "size": 30047050,
-  "sha256": "63c23d78bebae3d3cef11e495e7f9b887a13e20f364fefa27dcfa7b7ec3e7a21",
+  "versionCode": 178,
+  "versionName": "0.9.108",
+  "size": 30061402,
+  "sha256": "c6ed7e1d6d02275cefd042f47a65393f1f2120c7744042e378ccaccbba699ad4",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.105/app-release.apk",
-  "notes": "气泡不再挤压角色：窗口随气泡上沿临时加高 30dp，人物位置与大小完全不动（舞台矩阵缩放 1.0000、让位 0px）；动作分档尺寸改为按人物本体视觉面积归一，并按身高封顶 360px，跳起/侧身这类细长动作不再被放大到顶出画面。",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.105/app-release.apk",
-  "publishedAt": "2026-10-28T09:14:39.951Z",
-  "promotedAt": "2026-10-28T09:14:42.308Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.108/app-release.apk",
+  "notes": "弱网不再丢话：发不出去的那句落盘，联网自动补发（同一条 requestId，宿主去重 24h）；补发后把这轮回答捞回手机；只有我问没有回答时进页面自动补回。网络日志改由 Application 接上，对话页也留得住现场。",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.108/app-release.apk",
+  "publishedAt": "2026-10-28T10:33:06.891Z",
+  "promotedAt": "2026-10-28T10:33:09.638Z"
 }
