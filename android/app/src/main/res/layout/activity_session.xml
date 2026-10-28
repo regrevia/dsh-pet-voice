@@ -109,6 +109,26 @@
                 android:visibility="gone" />
         </FrameLayout>
 
+        <TextView
+            android:id="@+id/chatQueue"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="20dp"
+            android:layout_marginEnd="20dp"
+            android:layout_marginBottom="2dp"
+            android:background="@drawable/bg_input"
+            android:clickable="true"
+            android:focusable="true"
+            android:maxLines="2"
+            android:ellipsize="end"
+            android:paddingStart="12dp"
+            android:paddingTop="6dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="6dp"
+            android:textColor="@color/pet_hint"
+            android:textSize="12.5sp"
+            android:visibility="gone" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -160,6 +180,18 @@
                 android:padding="12dp"
                 android:src="@drawable/ic_send"
                 android:tint="@color/pet_bg" />
+
+            <ImageView
+                android:id="@+id/chatStop"
+                android:layout_width="46dp"
+                android:layout_height="46dp"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_btn_primary"
+                android:contentDescription="中断"
+                android:padding="12dp"
+                android:src="@drawable/ic_stop"
+                android:tint="@color/pet_bg"
+                android:visibility="gone" />
         </LinearLayout>
     </LinearLayout>
 </FrameLayout>

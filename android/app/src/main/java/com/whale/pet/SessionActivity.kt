@@ -18,6 +18,7 @@ import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.widget.BaseAdapter
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.ListView
 import android.widget.TextView
 import org.json.JSONObject
@@ -50,6 +51,9 @@ class SessionActivity : Activity() {
     private var maxSeq: Long = 0
     private var loading = false
     private var sending = false
+    /** 这一轮发给宿主的 requestId：人退出页面时拿它补进待发队列，宿主按它去重，不会多跑一轮。 */
+    private var inflightRid = ""
+    private var inflightText = ""
     private var running = false
     private var queued = ""
     private var errorLine: String = ""
@@ -62,6 +66,9 @@ class SessionActivity : Activity() {
     private lateinit var more: TextView
     private lateinit var input: EditText
     private lateinit var micBtn: TextView
+    private lateinit var queueLine: TextView
+    private lateinit var sendBtn: ImageView
+    private lateinit var stopBtn: ImageView
     private lateinit var adapter: MsgAdapter
     private var render: ChatRender? = null
 
@@ -119,12 +126,25 @@ class SessionActivity : Activity() {
         list.adapter = adapter
         render = ChatRender(this, maxViews = 8) { PetSettings.load(this) }
         findViewById<View>(R.id.chatBack).setOnClickListener { finish() }
-        findViewById<View>(R.id.chatSend).setOnClickListener { send() }
+        queueLine = findViewById(R.id.chatQueue)
+        sendBtn = findViewById(R.id.chatSend)
+        stopBtn = findViewById(R.id.chatStop)
+        sendBtn.setOnClickListener { send() }
+        stopBtn.setOnClickListener { interrupt() }
+        queueLine.setOnClickListener { steerQueued() }
+        input.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+            override fun afterTextChanged(s: android.text.Editable?) = syncButton()
+        })
         load()
         refreshStatus()
     }
 
     override fun onDestroy() {
+        // 人退出页面但这一轮还在跑：把这一句（用原 requestId）托给待发队列——
+        // 宿主按 id 去重不会重跑，队列补发成功后自己把回答捞回来落到对话记录里。
+        parkUnfinished()
         ui.removeCallbacksAndMessages(null)
         runCatching { render?.release() }
         render = null
@@ -168,6 +188,7 @@ class SessionActivity : Activity() {
         maxSeq = 0
         errorLine = ""
         queued = ""
+        showQueue()
         running = false
         adapter.notifyDataSetChanged()
         load()
@@ -406,11 +427,11 @@ class SessionActivity : Activity() {
     private fun send() {
         val raw = input.text.toString().trim()
         if (raw.isBlank() || sessionId.isBlank()) return
-        // 正在跑：先排队，这一轮完了立刻发（跟电脑端一样，不用等它停）
+        // 上一轮还在跑：这句话进排队条，不打断它；想马上进去就点那条（等于桌面的引导）
         if (sending) {
             queued = raw
             input.setText("")
-            input.hint = "已排队，这一轮结束就发"
+            showQueue()
             return
         }
         input.setText("")
@@ -418,14 +439,20 @@ class SessionActivity : Activity() {
         hideKeyboard()
         errorLine = ""
         sending = true
-        findViewById<android.widget.ImageView>(R.id.chatSend).isEnabled = false
+        syncButton()
         appendEcho(raw)
         val sid = sessionId
+        val rid = java.util.UUID.randomUUID().toString()
+        inflightRid = rid
+        inflightText = raw
         io.execute {
-            val r = client.dispatch(raw, sid)
+            val r = client.dispatch(raw, sid, rid)
             ui.post {
                 if (!r.ok) {
-                    finishSending("没发出去，点这里重发")
+                    inflightRid = ""
+                    // 没落地就先存进待发队列：退出去也照样补发，回执由后台接着收
+                    runCatching { Outbox.add(this, raw, sessionId = sid) }
+                    finishSending("没发出去，已放进待发队列")
                 } else {
                     adapter.notifyDataSetChanged()
                     pollUntilReply(System.currentTimeMillis() + 45_000)
@@ -456,7 +483,7 @@ class SessionActivity : Activity() {
                 if (sid != sessionId) {
                     // 这一轮属于上一只了：把等待态收掉，别让新会话永远显示「发送中」
                     sending = false
-                    findViewById<android.widget.ImageView>(R.id.chatSend).isEnabled = true
+                    syncButton()
                     return@post
                 }
                 var replied = false
@@ -497,15 +524,97 @@ class SessionActivity : Activity() {
     private fun finishSending(error: String) {
         sending = false
         errorLine = error
-        findViewById<android.widget.ImageView>(R.id.chatSend).isEnabled = true
+        syncButton()
         adapter.notifyDataSetChanged()
         if (queued.isNotBlank()) {
             val next = queued
             queued = ""
-            input.hint = "发消息"
+            showQueue()
             input.setText(next)
             ui.postDelayed({ send() }, 120)
         }
+    }
+
+    /**
+     * 发送位只有一个：这一轮还在跑并且输入框是空的，就摆方块（中断）；
+     * 输入框一有字就换回发送，跟桌面端一样——想插话先打字，不想等了按方块。
+     */
+    private fun syncButton() {
+        val hasText = input.text.toString().isNotBlank()
+        val wantStop = sending && !hasText
+        if (!::stopBtn.isInitialized) return
+        stopBtn.visibility = if (wantStop) View.VISIBLE else View.GONE
+        sendBtn.visibility = if (wantStop) View.GONE else View.VISIBLE
+        sendBtn.isEnabled = !sending || hasText
+    }
+
+    /** 排队条：这一轮跑完自己会发；等不及就点它。 */
+    private fun showQueue() {
+        if (!::queueLine.isInitialized) return
+        if (queued.isBlank()) {
+            queueLine.visibility = View.GONE
+            return
+        }
+        queueLine.text = "排队 · " + queued
+        queueLine.visibility = View.VISIBLE
+    }
+
+    /** 点排队条 = 引导：直接插进正在跑的这一轮，不掐断、不等它停。 */
+    private fun steerQueued() {
+        val text = queued
+        if (text.isBlank() || sessionId.isBlank()) return
+        val steering = sending
+        queued = ""
+        showQueue()
+        errorLine = ""
+        appendEcho(text)
+        val sid = sessionId
+        if (!steering) {
+            // 这一轮其实已经停了（比如刚按过中断）：就当成正常一轮发出去
+            sending = true
+            syncButton()
+        }
+        io.execute {
+            val r = client.dispatch(text, sid, steer = steering)
+            ui.post {
+                if (!r.ok) {
+                    runCatching { Outbox.add(this, text, sessionId = sid) }
+                    finishSending("没发出去，已放进待发队列")
+                } else if (!steering) {
+                    adapter.notifyDataSetChanged()
+                    pollUntilReply(System.currentTimeMillis() + 45_000)
+                }
+            }
+        }
+    }
+
+    /** 退出页面时把没落地的话交给后台：正在跑的按原 requestId 去重，排队的直接补发。 */
+    private fun parkUnfinished() {
+        val sid = sessionId
+        val text = inflightText
+        if (sending && text.isNotBlank() && sid.isNotBlank()) {
+            val rid = inflightRid
+            runCatching {
+                if (rid.isBlank()) Outbox.add(this, text, sessionId = sid)
+                else Outbox.add(this, text, requestId = rid, sessionId = sid)
+            }
+        }
+        val next = queued
+        queued = ""
+        if (next.isNotBlank() && sid.isNotBlank()) {
+            runCatching { Outbox.add(this, next, sessionId = sid) }
+        }
+    }
+
+    /** 方块 = 中断这一轮。 */
+    private fun interrupt() {
+        if (!sending) return
+        sending = false
+        errorLine = ""
+        syncButton()
+        adapter.notifyDataSetChanged()
+        val sid = sessionId
+        io.execute { runCatching { client.cancel(sid) } }
     }
 
     /** 贴底：只在本来就贴着底时跟一下；用户翻上去看历史就别抢滚动。 */
@@ -653,7 +762,7 @@ class SessionActivity : Activity() {
         if (sending) return
         errorLine = ""
         sending = true
-        findViewById<android.widget.ImageView>(R.id.chatSend).isEnabled = false
+        syncButton()
         adapter.notifyDataSetChanged()
         val sid = sessionId
         io.execute {
@@ -746,6 +855,12 @@ class SessionActivity : Activity() {
         if (requestCode == REQ_MIC && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED && micDown) {
             startHold()
         }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // 只是切到后台也别把这一轮丢了：托给待发队列，回复会自己落进对话记录
+        parkUnfinished()
     }
 
     override fun onPause() {
