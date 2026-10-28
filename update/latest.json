@@ -1,12 +1,12 @@
 {
-  "versionCode": 185,
-  "versionName": "0.9.115",
-  "size": 30072894,
-  "sha256": "01cc6643649b871b0983da8153b25534edd636b7461fb3bbe4bb64118a3a6b98",
+  "versionCode": 186,
+  "versionName": "0.9.116",
+  "size": 30073398,
+  "sha256": "4207a29d628bbce7a0256056c495138262b84fb19585e938cacb6fb7ca0e46a2",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.115/app-release.apk",
-  "notes": "回复中再发一句直接当引导插进这一轮；中断的回合末尾留一行可点的重发。",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.115/app-release.apk",
-  "publishedAt": "2026-10-28T12:36:37.208Z",
-  "promotedAt": "2026-10-28T12:36:39.801Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.116/app-release.apk",
+  "notes": "面板里的摸头互动/语音/看会话/气泡开关，手机端严格照做：关掉就不动、不录音、不冒泡。",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.116/app-release.apk",
+  "publishedAt": "2026-10-28T12:44:44.683Z",
+  "promotedAt": "2026-10-28T12:44:47.537Z"
 }
