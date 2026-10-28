@@ -1,12 +1,12 @@
 {
-  "versionCode": 194,
-  "versionName": "0.9.124",
-  "size": 30082134,
-  "sha256": "2bf9279e506c3c15cbb96c026770aa913874b4354d93387ab2ea9394f6c60ec3",
+  "versionCode": 195,
+  "versionName": "0.9.125",
+  "size": 30082782,
+  "sha256": "49b20f8faf2be77c938bcedf0c40103800792f94fd1a474fc3aa9a24001e3224",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.124/app-release.apk",
-  "notes": "唤醒开关只认电脑面板：面板关掉后手机设置页置灰跟随",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.124/app-release.apk",
-  "publishedAt": "2026-10-28T14:53:49.395Z",
-  "promotedAt": "2026-10-28T14:53:52.131Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.125/app-release.apk",
+  "notes": "被杀后闹钟自愈：进程被系统清理，75 秒内自己回来，悬浮窗、通知、待发队列都恢复",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.125/app-release.apk",
+  "publishedAt": "2026-10-28T15:09:25.736Z",
+  "promotedAt": "2026-10-28T15:09:28.749Z"
 }
