@@ -1,12 +1,12 @@
 {
-  "versionCode": 169,
-  "versionName": "0.9.99",
-  "size": 30042906,
-  "sha256": "a42eb93de74e6d127d6a78d1cdecf3ff9ad39ed69fbe4cd2513435252de86bb5",
-  "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.99/app-release.apk",
-  "notes": "动作交接的虚化拉长到 340/420ms 并提前起淡，曲线换成更缓的 smootherstep；几何改用人物主体框对齐，23 段素材脚底落点统一到 444，点击时不再上下滑/显小。",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.99/app-release.apk",
-  "publishedAt": "2026-10-28T07:55:33.131Z",
-  "promotedAt": "2026-10-28T07:55:35.254Z"
+  "versionCode": 171,
+  "versionName": "0.9.101",
+  "size": 30043410,
+  "sha256": "9259a32d24a63a2e9efad786871aab1fffd4ed9e4144075cfcb3d4cb7f2cf5a6",
+  "file": "jingling-0.9.101.apk",
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.101/jingling-0.9.101.apk",
+  "notes": "点一下不再变小：气泡让位只下移不缩放；动作衔接淡化拉到 520/640ms 并提前起淡；手机网络日志把播报轮询折叠成每 40 次一行；等电脑端收尾的上限 180s→360s；手机发的图片进桌面会话改为 markdown 图片。",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.101/jingling-0.9.101.apk",
+  "publishedAt": "2026-10-28T08:15:47.903Z",
+  "promotedAt": "2026-10-28T08:15:50.284Z"
 }
