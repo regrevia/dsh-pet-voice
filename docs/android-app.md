@@ -1819,3 +1819,20 @@ App 这边：运行条写「引导中」，这一轮照常计时（不按「排�
 **实测（0.9.126 / vc196，链式版）**：起服务后 `dumpsys alarm` 只有一条 `action.REVIVE`（`window=0 exactAllowReason=policy_permission`，`origWhen=+51s`）；60 s 后被叫醒一次、`keepAliveArmed` 挡住重挂，同一时间点出现下一条 `origWhen=+14m32s` 的精确闹钟——恢复后链条自动往后接 15 分钟，进程没死时不会每 15 分钟被无条件重置。
 
 **边界**：用户按通知「退出」走 `quitAll()`，那里先 `cancelKeepAlive()` 再停服务，不会自己又爬起来；开机自启仍走 `BOOT_COMPLETED` 那条老路。小米的「自启动/省电策略」仍可能整体压制，闹钟窗口也就到十几分钟这个量级，不承诺秒级。
+
+## 23.31 队列条不再被目标挡住；计时窗口只在真的查到之后推进（0.9.128 / 0.9.129）
+
+两处都是「看得见」和「查得到」的问题，不涉及协议：
+
+- **队列条独立渲染**（0.9.128）：`renderGoal()` 以前先判目标、没有目标就整段 `return`，而待输入队列的渲染写在这个 `return`
+  后面——电脑那边排了三句、这一轮又没开目标时，手机上一条也看不见、撤不掉。现在先 `renderQueueOf(detail)` 再判目标；
+  没有目标只收目标条，队列条照常出现。
+- **空闲轮询 20 s → 8 s**（0.9.128）：`HOST_WATCH_MS` 从 20 s 收到 8 s（有轮次在跑还是 3 s）。原来电脑上排进一句，
+  手机最慢要等 20 s 才看见；本地网络一次 `state`+`session` 请求是毫秒级，这个频率对续航没有可测影响。
+- **查更新成功后计时**（0.9.129）：以前 `markChecked()` 在发请求之前，断网那次也算「查过了」，于是一台网络不稳的手机
+  要白等一整个窗口（后台 6 h、进 App 10 min）才轮到下一次。现在只有 `check()` 真拿到版本信息才推进时间戳，失败下一次
+  进程起来/下一次进 App 会立刻重试。
+
+**实测启动（0.9.129 / vc199，本机 15ca9736）**：`am force-stop` 后 `am start -W .MainActivity` =
+`LaunchState: COLD / TotalTime 232 ms / WaitTime 237 ms`；紧接 `am start -W .HistoryActivity` =
+`WARM / TotalTime 72 ms / WaitTime 78 ms`。冷启动已在 250 ms 内，首屏不再有可感知等待。
