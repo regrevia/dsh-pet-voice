@@ -137,7 +137,16 @@ object PetHistory {
             for (item in page) {
                 val q = item.seq
                 if (q <= 0L) continue
-                if (kept.any { it.optLong("q", 0L) == q }) continue
+                // 宿主那边的正文可能后来才补全（例如手机发的图，宿主回填成 `[图片] 路径`）：
+                // 老行会一直挡着新正文，所以本地没附件时用宿主版覆盖。
+                val known = kept.firstOrNull { it.optLong("q", 0L) == q }
+                if (known != null) {
+                    val localAtts = known.optJSONArray("a")?.length() ?: 0
+                    if (localAtts == 0 && item.text.isNotBlank() && item.text != known.optString("t")) {
+                        runCatching { known.put("t", item.text) }
+                    }
+                    continue
+                }
                 if (fresh.any { it.optLong("q", 0L) == q }) continue
                 // 本地刚发那条：角色、正文相同，补序号即可（省一次插行，也不丢附件）
                 val mine = kept.indexOfLast {

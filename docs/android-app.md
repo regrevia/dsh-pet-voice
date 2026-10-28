@@ -1902,6 +1902,46 @@ App 这边：运行条写「引导中」，这一轮照常计时（不按「排�
 **实测（0.9.132，2026-10-29）**：
 - `dig +short pet.regrevia.com pet.regrevia.cn` → 两条都是 `42.193.189.240`。
 - 服务器 `ss -ltnp`：`caddy` 只听 `*:80`，`sshd` 守着 `127.0.0.1:8443`；443 没有监听。
-- 公网 `curl http://42.193.189.240/pet-voice/api/state` 无 token → `401`；带 token → `{"ok":true,"pluginVersion":"0.1.32","tokenHint":"56fd5ad1",…}`。
+- 公网 `curl http://42.193.189.240/pet-voice/api/state` 无 token → `401`；带 token → `{"ok":true,"pluginVersion":"0.1.34","tokenHint":"56fd5ad1",…}`。
 - 旧机器 `ssh ubuntu@134.175.47.91` 复核：`ss` 无 80/443/8443，`pgrep cloudflared|nginx|caddy` 无输出。
 - `bash scripts/pv-public.sh status` → `8443 反代 在跑（宿主自带）`、`ssh -R 在跑（→ root@42.193.189.240 的 8443）`、`公网 HTTP 401`。
+
+## 23.36 手机发的图在电脑端变成真图片附件（图片块形状错了，0.9.133 / 插件 0.1.33–0.1.34）
+
+- 症状：手机上选图发出，宿主转录里只留一行 `![图片](/Users/…/.pet-uploads/xxx.jpg)` 文字，桌面端看到的是路径不是图片；日志里 `{"ev":"img-block-fail","error":"prompt rejected"}`。
+- 根因：插件发的是**转录里的** `ImageBlock` 形状
+  `{type:"image", attachment:{attachmentId, mediaType, width, height, bytes, name}}`，而宿主 `ISession.prompt()` 只认
+  `PromptContentPart = {type:'text',text} | {type:'image', mediaType, data /*规范 base64*/, name?} | {type:'file', receiptId}`。
+  引用（ref）在提示词里无效，宿主直接拒收整句。
+- 修法：`buildAttachmentBlocks()` 改成读盘字节 → `{type:'image', mediaType, data: base64, name}`，不再调
+  `ctx.get('attachments')` / `saveImages()`；落库和 `attachmentId` 由宿主自己做。只有读不出字节/非图片扩展名才退回
+  `[图片] <路径>` 文字，并记 `attach-fail` / `attach-skip`。
+
+**实测（2026-10-29，插件 0.1.33）**：
+- `/api/upload` → `{"ok":true,"path":"…/pet-test-20261029-015238-36be17.jpg","bytes":1669,"kind":"image"}`；
+  `/api/dispatch` → `{"ok":true,"accepted":true,"attachments":1,"queued":false}`。
+- `/api/diag` 事件串 `attach-block` → `dispatch` → `dispatch-result status 200`，**没有** `img-block-fail`。
+- 转录里出现真正的图片附件：
+  `{"type":"user/message", … "content":[{"type":"text","text":"看图"},{"type":"image","attachment":{"attachmentId":"sha256:08efd9f6…","mediaType":"image/jpeg","width":320,"height":200,"bytes":1669,"name":"pet-test-…jpg"}}]}`；
+  手机自己发的图（`chat-1793209930923-0-…jpg`，sha256 `08170aec…`，1600×1068）同样落成图片附件。
+
+## 23.37 宿主回显的图手机上也能看（0.9.133 / 插件 0.1.34）
+
+- 上一版修完电脑端，手机上反而「我发的图不见了」：插件只从消息里取文字段，纯图消息正文是空串，App 的
+  `loadHostPage()` 又把空正文的行直接跳过，于是整条消失。
+- 插件端（0.1.34）：
+  - `imagePartsOf()` 从 `image` 块里记下 `attachmentId` / `mediaType` / `name`，纯图消息不再丢；
+    但「有文字且全被判成注入段」的消息连图一起丢（不是主人写的）。
+  - `materializeImageAttachment()` 按 `attachmentId` 去 `<~/.dsh>/attachments/v1/objects/<ab>/<sha>` 读头 12 字节认魔数
+    （jpg/png/gif/webp），复制到 `<~/.dsh>/pet-voice/imgcache/<sha>.<ext>`（宿主对象没有扩展名，`/api/file` 按扩展名放行）。
+  - `decorateImageEntries()` 给一页消息追加 `![图片](<绝对路径>)`，复制一份再改，转录 memo 不动。
+- App 端（0.9.133）：
+  - `PetHistory.mergeHost()` 以前遇到同 seq 的行一律跳过，本地那条「只有文字」的旧行会永远挡住宿主补全的正文；
+    现在本地没附件时用宿主正文覆盖（`localAtts == 0 && text != 已知正文`）。
+- 实测（0.9.133 debug 装真机，重启 App 后进「对话」）：
+  - `/api/session?id=session-863211a4-…&limit=6` 回来的用户消息已经带行：
+    seq 2107 → `![图片](/Users/apple/.dsh/pet-voice/imgcache/08170aec….jpg)`（纯图那条），
+    seq 2118 → `看图\n\n![图片](/Users/apple/.dsh/pet-voice/imgcache/08efd9f6….jpg)`。
+  - `/api/file?path=…/08efd9f6….jpg` → `200 image/jpeg 1669`，落盘 `file` 认成 `JPEG … 320x200`。
+  - 真机截图：`看图` 气泡下面就是那张 320×200 蓝色图（修之前同一个位置显示的是上一张截图，因为旧行挡着、缩略图沿用了上一条的图）。
+  - 注意：本机装的是 debug 签名包（`adb install -r` 装 release 包会报签名不一致），release 包只用于发布与更新。

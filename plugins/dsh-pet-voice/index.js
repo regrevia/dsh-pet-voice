@@ -1716,6 +1716,31 @@ function partsTextOfType(parts, type) {
 }
 
 /**
+ * 一条消息里的图片段：只留宿主给的身份和元数据。
+ *
+ * 电脑端现在把手机图片发成真正的 image 块，转录里只剩
+ * `{type:'image', attachment:{attachmentId:'sha256:…'}}`，路径没了。
+ * 手机上要显示这张图，就得拿 attachmentId 回宿主的对象库里捞字节（见
+ * `materializeImageAttachment`）。
+ */
+function imagePartsOf(parts) {
+  const out = []
+  if (!Array.isArray(parts)) return out
+  for (const part of parts) {
+    if (part?.type !== 'image') continue
+    const attachment = part.attachment ?? part.image ?? null
+    const id = String(attachment?.attachmentId ?? attachment?.id ?? part.attachmentId ?? '')
+    if (!id) continue
+    out.push({
+      id,
+      mediaType: String(attachment?.mediaType ?? part.mediaType ?? ''),
+      name: String(attachment?.name ?? part.name ?? ''),
+    })
+  }
+  return out
+}
+
+/**
  * 转录事件 → App 能渲染的消息条目（seq 升序）。
  * 工具调用和它的结果按 callId 合并成一条：手机上一张「工具卡片」比两条半截消息好读。
  */
@@ -1736,10 +1761,18 @@ function entriesOfTranscript(text) {
     const time = toMs(event?.time)
     const data = event?.data ?? {}
     if (type === 'user/message') {
+      const rawParts = data.content ?? data.message?.content
       // 注入段可能和主人原话同处一条消息（`问题正文\n\nAuto schedule: …`）：按段剔，别把整句一起丢。
-      const body = stripPeekText(ownerSaidText(data.content ?? data.message?.content))
-      if (body && !isInjectedUserText(body)) {
-        entries.push({ seq, role: 'user', text: clipText(body, MESSAGE_TEXT_LIMIT), time })
+      const body = stripPeekText(ownerSaidText(rawParts))
+      const images = imagePartsOf(rawParts)
+      const said = body && !isInjectedUserText(body) ? clipText(body, MESSAGE_TEXT_LIMIT) : ''
+      // 有字但全被当注入（压缩摘要/系统提醒）的，连图一起丢：整条都不是主人写的。
+      const injectedOnly = !said && Boolean(partsText(rawParts))
+      // 只发了图、没打字的那些消息以前整条被丢掉：手机上「我发的图不见了」。
+      if ((said || images.length) && !injectedOnly) {
+        const entry = { seq, role: 'user', text: said, time }
+        if (images.length) entry.images = images
+        entries.push(entry)
       }
     } else if (type === 'assistant/message') {
       const message = data.message ?? data
@@ -1772,6 +1805,97 @@ function entriesOfTranscript(text) {
     // system/message 是宿主注入的系统提示词，App 不展示，也不值得占响应体积。
   }
   return entries
+}
+
+/** 宿主附件对象库：`<~/.dsh>/attachments/v1/objects/<ab>/<sha256>`（没有扩展名，靠魔数认类型）。 */
+const ATTACH_OBJECTS_DIR = join(homedir(), '.dsh', 'attachments', 'v1', 'objects')
+const ATTACH_IMAGE_CACHE_DIR = join(homedir(), '.dsh', 'pet-voice', 'imgcache')
+const IMAGE_EXT_BY_MAGIC = [
+  { ext: 'jpg', head: [0xff, 0xd8, 0xff] },
+  { ext: 'png', head: [0x89, 0x50, 0x4e, 0x47] },
+  { ext: 'gif', head: [0x47, 0x49, 0x46, 0x38] },
+]
+const imageCacheMemo = new Map()
+
+function attachmentObjectPath(sha) {
+  return join(ATTACH_OBJECTS_DIR, sha.slice(0, 2), sha)
+}
+
+/** 读对象库头 12 字节认图片类型（宿主对象没有扩展名，只能看魔数）。 */
+function imageExtOfObject(sha) {
+  const candidate = attachmentObjectPath(sha)
+  if (!existsSync(candidate)) return ''
+  try {
+    const fd = openSync(candidate, 'r')
+    const head = Buffer.alloc(12)
+    let n = 0
+    try {
+      n = readSync(fd, head, 0, 12, 0)
+    } finally {
+      closeSync(fd)
+    }
+    if (n < 4) return ''
+    if (head.toString('latin1', 0, 4) === 'RIFF' && head.toString('latin1', 8, 12) === 'WEBP') return 'webp'
+    for (const row of IMAGE_EXT_BY_MAGIC) {
+      if (row.head.every((byte, i) => head[i] === byte)) return row.ext
+    }
+    return ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * attachmentId（`sha256:…`）→ 带扩展名的本地绝对路径，App 直接用 `/api/file` 取。
+ *
+ * 宿主的对象库只有裸 sha 文件名，`/api/file` 按扩展名放行，所以这里按魔数认出
+ * 类型后在 `~/.dsh/pet-voice/imgcache/` 留一份副本，返回它的路径。
+ * 认不出类型/文件不在就返空：宁愿少一张图，也不要给 App 一条必然 404 的路径。
+ */
+function materializeImageAttachment(id) {
+  const sha = String(id ?? '').replace(/^sha256:/, '').trim().toLowerCase()
+  if (!/^[0-9a-f]{40,64}$/.test(sha)) return ''
+  if (imageCacheMemo.has(sha)) return imageCacheMemo.get(sha)
+  let path = ''
+  try {
+    const ext = imageExtOfObject(sha)
+    if (ext) {
+      const out = join(ATTACH_IMAGE_CACHE_DIR, `${sha}.${ext}`)
+      if (!existsSync(out)) {
+        mkdirSync(ATTACH_IMAGE_CACHE_DIR, { recursive: true })
+        writeFileSync(out, readFileSync(attachmentObjectPath(sha)))
+      }
+      path = out
+    }
+  } catch (error) {
+    LOG('图片附件落缓存失败：', error?.message ?? error)
+    path = ''
+  }
+  imageCacheMemo.set(sha, path)
+  return path
+}
+
+/**
+ * 给一页消息补上图片：image 块换成 App 认得的 `![图片](<绝对路径>)` 行。
+ * 复制一份再改，转录 memo 里的原始条目不动。
+ */
+function decorateImageEntries(entries) {
+  if (!Array.isArray(entries)) return entries
+  let touched = false
+  const out = entries.map((entry) => {
+    const images = entry?.images
+    if (!Array.isArray(images) || !images.length) return entry
+    touched = true
+    const lines = []
+    for (const image of images) {
+      const path = materializeImageAttachment(image.id)
+      if (path) lines.push(`![图片](${path})`)
+    }
+    const text = [String(entry.text ?? ''), ...lines].filter(Boolean).join('\n\n')
+    const { images: _drop, ...rest } = entry
+    return { ...rest, text }
+  })
+  return touched ? out : entries
 }
 
 /** limit 参数：缺省 20，非法值回默认，最大 50。 */
@@ -2042,7 +2166,7 @@ function sessionDetail(query) {
   return {
     ok: true,
     session: { id, title: head.title, cwd: head.cwd },
-    messages: page,
+    messages: decorateImageEntries(page),
     hasMore,
     ...(hasMore && page.length ? { nextBefore: page[0].seq } : {}),
     ...(peek ? { peek } : {}),
@@ -2247,6 +2371,9 @@ export const __browseInternals = {
   sessionDetail,
   goalsOfSession,
   entriesOfTranscript,
+  imagePartsOf,
+  decorateImageEntries,
+  materializeImageAttachment,
   stripPeekText,
   isInjectedUserText,
 }
@@ -2561,36 +2688,49 @@ function imageMediaTypeFor(path) {
 }
 
 /**
- * 附件上行走宿主的附件存储：图片变成真正的 image 块（桌面端显示成图片附件，
- * 和电脑端拖图进来一个样），视频/存不进去的图回退成路径行。
+ * 附件上行走宿主的附件准入：图片以 base64 image 块塞进 prompt，
+ * 宿主的 `attachments.admitPromptContent()` 自己落盘、压缩、记账，
+ * 桌面端气泡里就是真正的图片附件（和电脑端拖图进来一个样）。
  *
- * 以前只拼一行 `![图片](/abs/path)`：手机上看得见，电脑端只是一段 markdown 文本，
- * 主人原话是「手机发的图片到桌面端还是不能显示成图片附件」。
- * 返回 {images:[ImageBlock], leftover:[path]}；宿主没有附件服务时全走 leftover。
+ * 早先试过先 `saveImages()` 拿 ref 再发 `{type:'image', attachment:ref}`：
+ * 那个形状是**历史记录**里的 ImageBlock，不是 prompt 入参，宿主一律
+ * `prompt rejected`，于是手机上看得见、电脑端只剩一行 markdown 路径。
+ * prompt 入参的契约是 `{type:'image', mediaType, data:<canonical base64>, name?}`
+ * （PromptContentPart），自己别再算一遍。
+ *
+ * 视频与非图片回退成路径行；单张超限/读不动也只退那一张。
+ * 返回 {images:[PromptContentPart], leftover:[path]}。
  */
 async function buildAttachmentBlocks(ctx, paths = [], readers = {}) {
   const list = Array.isArray(paths) ? paths.filter(Boolean).map(String) : []
   if (!list.length) return { images: [], leftover: [] }
-  const svc = ctx.get?.('attachments')
   const read = readers.readFileSync ?? readFileSync
   const base = readers.basename ?? ((p) => String(p).split(/[\\/]/).pop() || 'image')
   const images = []
   const leftover = []
   for (const path of list) {
     const mediaType = attachmentMark(path) === '[图片]' ? imageMediaTypeFor(path) : ''
-    if (!svc?.saveImages || !mediaType) {
+    if (!mediaType) {
+      netLog('attach-skip', { why: 'mediaType', ext: extname(path) })
       leftover.push(path)
       continue
     }
     try {
       const data = read(path)
-      const [ref] = await svc.saveImages([{ data, mediaType, name: base(path) }])
-      // 宿主各版本 ref 的 id 字段名不完全一致：认得出是哪一张就够，别为了字段名把图退回去。
-      const known = Boolean(ref && (ref.attachmentId || ref.id || ref.ref?.id))
-      if (known) images.push({ type: 'image', attachment: ref })
-      else leftover.push(path)
+      if (!data || !data.length) {
+        leftover.push(path)
+        continue
+      }
+      netLog('attach-block', { bytes: data.length, mediaType })
+      images.push({
+        type: 'image',
+        mediaType,
+        data: Buffer.from(data).toString('base64'),
+        name: base(path),
+      })
     } catch (error) {
-      LOG('附件存进宿主失败：', error?.message ?? error)
+      LOG('附件读不进 image 块：', error?.message ?? error)
+      netLog('attach-fail', { error: String(error?.message ?? error).slice(0, 120) })
       leftover.push(path)
     }
   }
@@ -3815,6 +3955,7 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
   if (blocks.images.length) {
     settledPrompt = prompt.catch(async (error) => {
       LOG('图片块派发失败，退回路径：', error?.message ?? error)
+      netLog('img-block-fail', { error: String(error?.message ?? error).slice(0, 200) })
       deps.emit?.(sessionId, 'error', { message: '图片没进会话，已按路径发' })
       const retryText = composeDispatchText(text, attachmentPaths)
       return controller.prompt(

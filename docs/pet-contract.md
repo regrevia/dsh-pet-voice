@@ -1,4 +1,4 @@
-# 手机端 ↔ `dsh-pet-voice` 接口契约（v1.9，2026-10-28；v1.9 图片附件改成宿主侧 `image` 内容块、`[图片] <路径>` 只在取字节失败时兜底；v1.8 面板「音色」接成默认音色（不再只存不用）、`/api/state` 下发 `pet.wakeName` 与 `settings.voice`、`/api/tts` 的 voice 优先级按实现改正；v1.7 加 `/api/upload`、`/api/file`（视频 + Range）、`/api/diag`、dispatch `attachments`/`requestId`/`queued`/`origin`、错误码总表、面板配置生效时机；v1.6 工具行改成桌面那种「标签 · 详情」一行（协议不变）；v1.5 对话页去掉分割线；v1.4 旁听材料改走隐藏提示词、`/api/session` 加 `peek`；v1.3 加 dispatch 旁听材料；v1.2 加 `/api/render`、朗读剥离、人设/长度/气泡配置）
+# 手机端 ↔ `dsh-pet-voice` 接口契约（v1.10，2026-10-29；v1.10 图片改成宿主 `PromptContentPart` 的 base64 `data` 形状、`/api/session` 回显 `![图片](路径)` 让手机能看图；v1.9 曾误用 `ImageBlock` 引用会被宿主 `prompt rejected`；v1.8 面板「音色」接成默认音色（不再只存不用）、`/api/state` 下发 `pet.wakeName` 与 `settings.voice`、`/api/tts` 的 voice 优先级按实现改正；v1.7 加 `/api/upload`、`/api/file`（视频 + Range）、`/api/diag`、dispatch `attachments`/`requestId`/`queued`/`origin`、错误码总表、面板配置生效时机；v1.6 工具行改成桌面那种「标签 · 详情」一行（协议不变）；v1.5 对话页去掉分割线；v1.4 旁听材料改走隐藏提示词、`/api/session` 加 `peek`；v1.3 加 dispatch 旁听材料；v1.2 加 `/api/render`、朗读剥离、人设/长度/气泡配置）
 
 这份文档是**唯一**的跨端约定。背景：`dsh-pet-voice` 要作为独立插件脱离出来，插件与手机 App
 各自演进——所以只允许按本文档约定的 HTTP 接口互相说话，**App 不得依赖插件内部实现**
@@ -82,7 +82,7 @@
 ```jsonc
 {
   "ok": true,
-  "pluginVersion": "1.7.0",       // App 用它判断插件够不够新
+  "pluginVersion": "0.1.34",       // App 用它判断插件够不够新
   "tokenHint": "a1b2c3d4",        // string，token 前 8 位，不含完整 token
   "linkHint": "在电脑上执行 cat ... 可查看完整配对链接里的 token", // string，给用户看的提示
   "projects": [                   // Workspace[]，可能为空数组
@@ -221,17 +221,29 @@
 - `503 {"ok":false,"error":"宿主缺少 sessionController"}` / `专属会话不可用` —— **绝不回退到「界面当前会话」**
 - `401 {"ok":false,"error":"unauthorized"}`
 
-#### 附件（v1.7：图片 + 视频）
+#### 附件（v1.10：图片走提示词图片块）
 
 - 上限 **6 个**，超了直接 400，**不截断、不静默丢弃**。
 - 每个路径必须是**绝对路径**且**当次存在**；任一条不合格，整句在受理前就 400（不会「发一半」）。
 - 派发正文 = 用户原话 + 每附件一行，格式固定 `[图片] <绝对路径>` / `[视频] <绝对路径>`；
   多段之间空行分隔。类型只看扩展名：`mp4` / `mov` / `m4v` → 视频，其余 → 图片。
 - 附件行**只给模型看**，不上屏：手机气泡里仍只有用户原话。
-- 图片（v1.9）**不再只给路径**：宿主用 `attachments.saveImages()` 把字节塞成真正的 `image`
-  内容块（`{type:"image", attachment:{attachmentId, mediaType, width, height, bytes, name}}`），
-  桌面端看到的就是图片附件本身；只有取字节失败才退回上面的 `[图片] <路径>` 文字。
-  App 侧对应把气泡里的 `![图片](路径)` / 裸路径剥掉，只留缩略图（`stripImageRefs()`）。
+- 图片（v1.10）**发的是真正的提示词图片块**，不是文件引用：
+
+  ```json
+  {"type":"image","mediaType":"image/jpeg","data":"<base64 原图字节>","name":"photo.jpg"}
+  ```
+
+  这是宿主 `PromptContentPart` 的 image 形状（`data` 必须是规范 base64）。**不能用**
+  `{type:"image", attachment:{attachmentId:…}}`：那是转录里的 `ImageBlock`，不是提示词内容块，
+  宿主会直接 `prompt rejected`（插件记 `img-block-fail`）。宿主自己负责
+  `admitPromptContent()` 落库并生成 `attachmentId`，插件不碰 `attachments.saveImages()`。
+- 只有取字节失败/不是图片扩展名才退回 `[图片] <路径>` 文字（插件记 `attach-fail` / `attach-skip`）。
+- **宿主回显**：`/api/session` 里带图的消息，插件按 `attachmentId` 从
+  `<~/.dsh>/attachments/v1/objects/<ab>/<sha>` 认魔数取出字节，复制成
+  `<~/.dsh>/pet-voice/imgcache/<sha>.<ext>`（`/api/file` 按扩展名放行），正文追加一行
+  `![图片](<绝对路径>)`。只发了图没打字的用户消息因此不再被丢；
+  App 侧再把 `![图片](路径)` / 裸路径剥掉只留缩略图（`stripImageRefs()`）。
 - 视频不做抽帧、不转码：宿主只把路径写进提示词，模型要看内容自己调工具读。
 
 #### origin、queued 与「掐上一轮」（v1.7 写清）
