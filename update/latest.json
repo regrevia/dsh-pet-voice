@@ -1,12 +1,12 @@
 {
-  "versionCode": 167,
-  "versionName": "0.9.97",
-  "size": 30042274,
-  "sha256": "0b5c932e1c099a54ed3dcb7d74d7a58457c921314f047619ad5bde973e83706b",
+  "versionCode": 168,
+  "versionName": "0.9.98",
+  "size": 30042538,
+  "sha256": "18d8039ea9314c8996e35d3ce51cd6e1030b7a33f0519bad4589a3d6624edffc",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.97/app-release.apk",
-  "notes": "连点分级：1 轻点 / 2 更开心 / 3 生气 / 4 得意 / 5 吓一跳 / 6 起甩尾·跳·转圈·欢呼轮流且不重复；待机连招新增时段池与三段轮换，链首不再多播一次 idle；统一缩放 1.000，气泡让位改为 0.26s 缓动，窗口几何始终 594x462。",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.97/app-release.apk",
-  "publishedAt": "2026-10-28T06:59:27.859Z",
-  "promotedAt": "2026-10-28T06:59:30.293Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.98/app-release.apk",
+  "notes": "视频层从 2 个扩到 3 个：连点不再丢失动画步骤（12 连点 12 条渐变，零硬切）；常驻解码 3 路，CPU 约 0.54 核。",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.98/app-release.apk",
+  "publishedAt": "2026-10-28T07:19:07.159Z",
+  "promotedAt": "2026-10-28T07:19:09.418Z"
 }
