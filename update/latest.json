@@ -1,12 +1,12 @@
 {
-  "versionCode": 193,
-  "versionName": "0.9.123",
-  "size": 30082174,
-  "sha256": "3173937a41cb80526fb301a03bab39d29549dbabd3dea14bc36914ee221219e1",
+  "versionCode": 194,
+  "versionName": "0.9.124",
+  "size": 30082134,
+  "sha256": "2bf9279e506c3c15cbb96c026770aa913874b4354d93387ab2ea9394f6c60ec3",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.123/app-release.apk",
-  "notes": "0.9.123：面板新增「叫名字唤醒」「说完继续说」两个开关，App 15 秒内跟桌面端开关同步（关掉立即停麦/只问答一轮）",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.123/app-release.apk",
-  "publishedAt": "2026-10-28T14:39:14.848Z",
-  "promotedAt": "2026-10-28T14:39:17.889Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.124/app-release.apk",
+  "notes": "唤醒开关只认电脑面板：面板关掉后手机设置页置灰跟随",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.124/app-release.apk",
+  "publishedAt": "2026-10-28T14:53:49.395Z",
+  "promotedAt": "2026-10-28T14:53:52.131Z"
 }
