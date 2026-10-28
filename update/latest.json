@@ -1,12 +1,12 @@
 {
-  "versionCode": 203,
-  "versionName": "0.9.133",
-  "size": 30092506,
-  "sha256": "8eefd2125608e4d5f91f764822df22566ebc3e072f0dfa663dd3102e81e29498",
+  "versionCode": 204,
+  "versionName": "0.9.134",
+  "size": 30092830,
+  "sha256": "73ae7ac607dc89f9b043c521b92f9d0b3885f1d3a570686af1356f63987e7d7f",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.133/app-release.apk",
-  "notes": "0.9.133：手机发的图在电脑端是真图片附件；宿主回显的图手机上也能看",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.133/app-release.apk",
-  "publishedAt": "2026-10-28T18:02:00.078Z",
-  "promotedAt": "2026-10-28T18:02:04.124Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.134/app-release.apk",
+  "notes": "0.9.134：宿主补回的旧消息按序号归位，图片消息不再乱序",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.134/app-release.apk",
+  "publishedAt": "2026-10-28T18:07:06.989Z",
+  "promotedAt": "2026-10-28T18:07:10.556Z"
 }
