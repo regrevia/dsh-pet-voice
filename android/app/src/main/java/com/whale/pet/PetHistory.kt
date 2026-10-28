@@ -169,8 +169,14 @@ object PetHistory {
                 persist(context, kept)
                 return 0
             }
+            // 补回来的老行可能比已知的还旧（分页往前补、或宿主回填纯图消息）：
+            // 一律按宿主序号排，本地还没对上序号的那几条（q=0）留在最后。
             val out = ArrayList<JSONObject>(kept.size + fresh.size)
             if (older) { out.addAll(fresh); out.addAll(kept) } else { out.addAll(kept); out.addAll(fresh) }
+            out.sortWith(
+                compareBy<JSONObject> { it.optLong("q", 0L) == 0L }
+                    .thenBy { if (it.optLong("q", 0L) == 0L) it.optLong("ts", 0L) else it.optLong("q", 0L) },
+            )
             val trimmed = if (out.size > MAX) ArrayList(out.subList(out.size - MAX, out.size)) else out
             persist(context, trimmed)
             return fresh.size
