@@ -900,13 +900,14 @@ class MainActivity : Activity() {
         val u = updater ?: return
         // 用户自己打开 App：10 分钟内查过就不重复打，超过就查——不然刚发的版要等 6 小时才看得见
         if (quiet && !u.shouldAutoCheck(10 * 60_000L)) return
-        u.markChecked()
         Thread {
             val info = try {
                 u.check()
             } catch (e: Exception) {
                 null
             }
+            // 查成功才记时间：这一次是断网/超时的话，下次进 App 还得再问，不然要白等一个窗口
+            if (info != null) u.markChecked()
             runOnUiThread {
                 pendingUpdate = info
                 val row = findViewById<LinearLayout>(R.id.updateRow)

@@ -1708,12 +1708,14 @@ class FloatingPetService : Service() {
         val um = UpdateManager(this, client)
         if (!um.shouldAutoCheck()) return
         Thread({
-            um.markChecked()
             val info = try {
                 um.check()
             } catch (_: Exception) {
                 null
             }
+            // 只有查成功才推进节流时间：失败了下一次进程起来还会再试，
+            // 不然一台长期断网的手机可能一天只查一次、看到更新要等半天
+            if (info != null) um.markChecked()
             if (info == null) return@Thread
             Log.i("PetUpdate", "发现新版本 ${info.versionName}(${info.versionCode})")
             val apk = try {
