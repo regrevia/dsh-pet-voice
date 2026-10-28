@@ -176,8 +176,7 @@
                 android:paddingTop="6dp"
                 android:paddingBottom="12dp"
                 android:scrollbars="none"
-                android:stackFromBottom="true"
-                android:transcriptMode="alwaysScroll" />
+                android:stackFromBottom="true" />
 
             <TextView
                 android:id="@+id/historyEmpty"
@@ -202,6 +201,22 @@
                 android:text="···"
                 android:textColor="@color/pet_hint"
                 android:textSize="18sp"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/chatToBottom"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="bottom|center_horizontal"
+                android:layout_marginBottom="10dp"
+                android:background="@drawable/bg_goal_bar"
+                android:paddingStart="14dp"
+                android:paddingTop="7dp"
+                android:paddingEnd="14dp"
+                android:paddingBottom="7dp"
+                android:text="回到底部"
+                android:textColor="@color/pet_accent"
+                android:textSize="12sp"
                 android:visibility="gone" />
         </FrameLayout>
 
@@ -267,15 +282,19 @@
             <EditText
                 android:id="@+id/chatInput"
                 android:layout_width="0dp"
-                android:layout_height="46dp"
+                android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:background="@drawable/bg_input"
+                android:gravity="center_vertical|start"
                 android:hint="发消息"
                 android:imeOptions="actionSend"
-                android:inputType="text"
-                android:maxLines="1"
+                android:inputType="textCapSentences|textMultiLine"
+                android:maxLines="4"
+                android:minHeight="46dp"
                 android:paddingStart="14dp"
+                android:paddingTop="12dp"
                 android:paddingEnd="14dp"
+                android:paddingBottom="12dp"
                 android:textColor="@color/pet_text"
                 android:textColorHint="@color/pet_hint"
                 android:textSize="14sp" />

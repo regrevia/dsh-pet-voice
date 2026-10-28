@@ -88,6 +88,7 @@ class HistoryActivity : Activity() {
     private lateinit var list: ListView
     private lateinit var empty: TextView
     private lateinit var typing: TextView
+    private lateinit var toBottom: TextView
     private lateinit var runBar: View
     private lateinit var runText: TextView
     private lateinit var runStop: TextView
@@ -159,6 +160,11 @@ class HistoryActivity : Activity() {
     private var historyLimit = HISTORY_PAGE
     /** 加页时别贴底：翻上去看的是旧的，回到底部会把人踢回去。 */
     private var keepScroll = false
+    /** 用户是不是还贴着底：自己往上翻的时候别被新回复拽回去。 */
+    private var nearBottom = true
+    /** 翻上去看历史时的锚点：新回复进来后按它把画面放回原处。 */
+    private var anchorPos = -1
+    private var anchorTop = 0
     private var trayScroll: View? = null
     private var tray: LinearLayout? = null
     private var videoLayer: View? = null
@@ -243,6 +249,7 @@ class HistoryActivity : Activity() {
         }
         empty = findViewById(R.id.historyEmpty)
         typing = findViewById(R.id.chatTyping)
+        toBottom = findViewById(R.id.chatToBottom)
         runBar = findViewById(R.id.chatRun)
         runText = findViewById(R.id.chatRunText)
         runStop = findViewById(R.id.chatStop)
@@ -280,11 +287,46 @@ class HistoryActivity : Activity() {
         // 新回复、历史翻页都会重排列表，每次数据变化都重新贴底
         adapter.registerDataSetObserver(object : android.database.DataSetObserver() {
             override fun onChanged() {
-                if (!keepScroll) scrollToBottom()
+                if (keepScroll) return
+                if (nearBottom) {
+                    scrollToBottom()
+                } else if (anchorPos >= 0) {
+                    // 用户在看上面的历史：新回复只进列表，不动他的位置
+                    list.setSelectionFromTop(anchorPos, anchorTop)
+                    toBottom.visibility = View.VISIBLE
+                }
             }
         })
         // 条目点击交给列表自己派发：挂在子视图上的监听在复用行里靠不住
         list.setOnItemClickListener { _, _, pos, _ -> adapter.tap(pos) }
+        list.setOnItemLongClickListener { _, _, pos, _ ->
+            onRowLongPress(pos)
+            true
+        }
+        // 贴着底就跟着新回复走；翻上去看历史时就停住，底部给一个「回到底部」
+        list.setOnScrollListener(object : android.widget.AbsListView.OnScrollListener {
+            override fun onScrollStateChanged(v: android.widget.AbsListView?, state: Int) {}
+            override fun onScroll(
+                v: android.widget.AbsListView?,
+                first: Int,
+                visible: Int,
+                total: Int,
+            ) {
+                val atBottom = first + visible >= total - 1 || total == 0
+                if (atBottom) {
+                    anchorPos = -1
+                } else if (nearBottom) {
+                    // 刚从底部翻上来：记住这一刻的位置，后面新回复不许把它顶走
+                    anchorPos = first
+                    anchorTop = list.getChildAt(0)?.top ?: 0
+                }
+                if (atBottom != nearBottom) {
+                    nearBottom = atBottom
+                    toBottom.visibility = if (atBottom) View.GONE else View.VISIBLE
+                }
+            }
+        })
+        toBottom.setOnClickListener { scrollToBottom(force = true) }
         pickerList.adapter = pickerAdapter
         list.dividerHeight = 0
 
@@ -306,6 +348,16 @@ class HistoryActivity : Activity() {
         runStop.setOnClickListener { stopTurn() }
         input.setOnEditorActionListener { _, actionId, ev ->
             if (actionId == EditorInfo.IME_ACTION_SEND || (ev?.keyCode == KeyEvent.KEYCODE_ENTER && ev.action == KeyEvent.ACTION_DOWN)) {
+                sendChat()
+                true
+            } else {
+                false
+            }
+        }
+
+        // 多行输入下回车默认是换行，这里把裸回车收回成「发送」；Shift+回车留给他们换行
+        input.setOnKeyListener { _, code, e ->
+            if (code == KeyEvent.KEYCODE_ENTER && e.action == KeyEvent.ACTION_DOWN && !e.isShiftPressed) {
                 sendChat()
                 true
             } else {
@@ -862,8 +914,15 @@ class HistoryActivity : Activity() {
         ui.post { list.setSelectionFromTop((first + added).coerceAtLeast(0), top) }
     }
 
-    private fun scrollToBottom() {
+    private fun scrollToBottom(force: Boolean = false) {
         if (adapter.count == 0) return
+        // 用户翻到上面看历史时，新来的回复不该把他拽回底部（桌面端也是这个手感）
+        if (!force && !nearBottom) {
+            toBottom.visibility = View.VISIBLE
+            return
+        }
+        nearBottom = true
+        toBottom.visibility = View.GONE
         // 行高会在随后几秒里变几次（富文本换掉 TextView、气泡折行），
         // 所以不是贴一次就完，要让位几次，最终停在真正的底部
         list.removeCallbacks(pinJump)
@@ -957,6 +1016,46 @@ class HistoryActivity : Activity() {
         }
         input.setText("")
         send(text)
+    }
+
+    /**
+     * 长按一条消息：复制、或者把这条再说一遍。
+     *
+     * 助手那条没有原文，就取它上面最近的一句自己说的话重发——跟桌面端「重试」是一个意思。
+     */
+    private fun onRowLongPress(pos: Int) {
+        val row = adapter.rows.getOrNull(pos) ?: return
+        val text = when (row) {
+            is ChatRow.Me -> row.text
+            is ChatRow.Pet -> row.text
+            is ChatRow.Live -> row.text
+            else -> return
+        }
+        if (text.isBlank()) return
+        val again = if (row is ChatRow.Me) row.text else userTextBefore(pos)
+        val labels = if (again.isBlank()) arrayOf("复制") else arrayOf("复制", "重发")
+        android.app.AlertDialog.Builder(this)
+            .setItems(labels) { _, which ->
+                if (which == 0) {
+                    getSystemService(ClipboardManager::class.java)
+                        .setPrimaryClip(ClipData.newPlainText("鲸灵", text))
+                    toast("已复制")
+                } else if (turn != null) {
+                    toast("这一轮还没结束")
+                } else {
+                    send(again, shownAs = again)
+                }
+            }
+            .show()
+    }
+
+    /** 往上找最近一句自己说的话（附件一起带上，重发才不会丢图）。 */
+    private fun userTextBefore(pos: Int): String {
+        for (i in pos - 1 downTo 0) {
+            val r = adapter.rows.getOrNull(i)
+            if (r is ChatRow.Me && r.text.isNotBlank()) return r.text
+        }
+        return ""
     }
 
     private fun resendLast() {
