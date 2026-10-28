@@ -1,12 +1,12 @@
 {
-  "versionCode": 199,
-  "versionName": "0.9.129",
-  "size": 30087166,
-  "sha256": "4a9c5fc58cf127a2df5398e9aae550d073516e52d4b4c58ef47035aa19b7a635",
+  "versionCode": 200,
+  "versionName": "0.9.130",
+  "size": 30091386,
+  "sha256": "fcf628766e55bea2b0c1ad5b7e15f9fbec5c75b9f02919137f186427eedb5418",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.129/app-release.apk",
-  "notes": "查更新只有在真查到（拿到版本信息）后才计时：断网那一次不占掉窗口，下次进 App 会马上再查",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.129/app-release.apk",
-  "publishedAt": "2026-10-28T15:47:43.315Z",
-  "promotedAt": "2026-10-28T15:47:46.459Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.130/app-release.apk",
+  "notes": "换装不再闪屏；长回复语音不再被截断；退出 App 后也能收到并念出回复；发送位在轮次中变中断方块、排队项点击即引导",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.130/app-release.apk",
+  "publishedAt": "2026-10-28T16:46:11.815Z",
+  "promotedAt": "2026-10-28T16:46:14.950Z"
 }
