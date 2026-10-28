@@ -1,12 +1,12 @@
 {
-  "versionCode": 190,
-  "versionName": "0.9.120",
-  "size": 30076810,
-  "sha256": "b2f7b111f907d987229b283c1cfcf4ed52992526d1d2a58d2df30864730fe141",
+  "versionCode": 192,
+  "versionName": "0.9.122",
+  "size": 30081530,
+  "sha256": "3bb0a9c26f9f1ed4b43d61bd25f32b49cfb15615d8048ff2155fe34aeaedfa6e",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.120/app-release.apk",
-  "notes": "0.9.120：补发被宿主拒收时气泡说一句；引导重试沿用同一 requestId，网络抖动不会落成两条；插件 0.1.24 修好播报游标对齐（积压的播报不再被跳过）",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.120/app-release.apk",
-  "publishedAt": "2026-10-28T13:36:57.434Z",
-  "promotedAt": "2026-10-28T13:37:00.333Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.122/app-release.apk",
+  "notes": "0.9.122：语音连续出声修好——一轮多句按序全响，句间空档 0–53 ms（预接 0 ms）；修复流式首句占着调度不放、后几句同时抢播放器的问题",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.122/app-release.apk",
+  "publishedAt": "2026-10-28T14:30:29.006Z",
+  "promotedAt": "2026-10-28T14:30:32.150Z"
 }
