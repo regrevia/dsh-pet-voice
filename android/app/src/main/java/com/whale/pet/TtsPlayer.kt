@@ -63,6 +63,15 @@ class TtsPlayer(
      */
     private var fillerRef: MediaPlayer? = null
 
+    /** 已经准备好、等着接在当前句后面的实例（`setNextMediaPlayer` 用）。 */
+    private var gaplessNext: MediaPlayer? = null
+    /** [gaplessNext] 对应的句子序号。 */
+    private var gaplessNextSeq = -1L
+    /** 已经由「预接」起播、等调度来还位的 seq：`speakNow` 看见就直接跳过，别放第二遍。 */
+    private val gaplessStarted = HashSet<Long>()
+    /** 上一句真正放完的时刻：句间空档据此量，不靠猜。 */
+    private var lastEndAt = 0L
+
     @Volatile
     var speaking: Boolean = false
         private set
@@ -101,12 +110,19 @@ class TtsPlayer(
             }
 
             override fun onSpeak(seq: Long, text: String, preset: String, enqueuedAt: Long) {
+                NetLog.record("TTS", 0, 0, "轮到 seq=$seq「${text.take(10)}」")
                 speakNow(seq, text, preset, enqueuedAt)
             }
 
             override fun onFailed(seq: Long, reason: String) {
+                NetLog.record("TTS", 0, 0, "跳过 seq=$seq：${reason.take(40)}")
                 Log.w("PetTts", "跳过一句（seq=$seq）：$reason")
                 onError("语音合成失败：$reason")
+            }
+
+            override fun onReady() {
+                // 下一句刚下好：当前句还在响就立刻预接，别等它放完再建实例
+                if (speaking || current != null) armNext(epoch)
             }
 
             override fun onIdle() {
@@ -303,10 +319,14 @@ class TtsPlayer(
     private fun streamDownload(seq: Long, text: String, preset: String, tempTag: Long, myEpoch: Int) {
         val buf = StreamBuf()
         liveStream = buf
+        NetLog.record("TTS", 0, 0, "开流 seq=$seq「${text.take(10)}」")
         val startedAt = SystemClock.elapsedRealtime()
         val notified = java.util.concurrent.atomic.AtomicBoolean(false)
+        // 这一句是不是已经交给流式播放器：交出去之后队列的槽位/or 声音都由播放器收尾，
+        // 这里再报「下载完成」会把下一句提前放出来，和还在响的这句重叠。
+        val owned = java.util.concurrent.atomic.AtomicBoolean(false)
         val finish = { ok: Boolean, why: String ->
-            if (notified.compareAndSet(false, true)) {
+            if (notified.compareAndSet(false, true) && !owned.get()) {
                 main.post { queue.onDownloadDone(seq, ok, why) }
             }
         }
@@ -323,7 +343,7 @@ class TtsPlayer(
                 out = tmp.outputStream()
                 main.post {
                     if (myEpoch == epoch && !buf.isDone()) {
-                        attachStream(seq, buf, myEpoch, startedAt)
+                        owned.set(attachStream(seq, buf, myEpoch, startedAt))
                     } else {
                         buf.abort("已打断")
                     }
@@ -359,6 +379,7 @@ class TtsPlayer(
             } catch (e: Exception) {
                 why = e.message ?: e.javaClass.simpleName
                 buf.abort(why)
+                NetLog.record("TTS", 0, 0, "开流出错 seq=$seq：$why")
                 Log.w("PetTts", "流式 TTS 失败 seq=$seq：$why")
             } finally {
                 try {
@@ -378,12 +399,15 @@ class TtsPlayer(
         }
     }
 
-    /** 流已连上：挂一个 MediaPlayer 读共享缓冲，边到边播。 */
-    private fun attachStream(seq: Long, buf: StreamBuf, myEpoch: Int, startedAt: Long) {
-        if (epoch != myEpoch || current != null || speaking) {
-            buf.abort("播放器被占用")
-            return
-        }
+    /**
+     * 流已连上：挂一个 MediaPlayer 读共享缓冲，边到边播。
+     *
+     * 返回 true = 这一句归流式播放管了（队列的槽位和声音占用都在这里交接），
+     * 返回 false = 播放器被占/没接上，调用方继续把字节收完落盘，走正常的排队出声。
+     * 这里绝不能 buf.abort：那会让这条流只下到一半就丢，句子既没播也没文件。
+     */
+    private fun attachStream(seq: Long, buf: StreamBuf, myEpoch: Int, startedAt: Long): Boolean {
+        if (epoch != myEpoch || current != null || speaking) return false
         try {
             val mp = MediaPlayer()
             mp.setAudioAttributes(
@@ -398,11 +422,16 @@ class TtsPlayer(
                     releaseQuietly(it)
                     if (current === it) current = null
                     setSpeaking(false)
-                    streamedPlayed.remove(seq)
+                    main.post { queue.onPlayDone(seq) }
                     return@setOnPreparedListener
                 }
                 Log.i(TurnLatency.TAG, "流式首声 ${SystemClock.elapsedRealtime() - startedAt}ms（连上→出声）")
+                NetLog.record("TTS", 0, SystemClock.elapsedRealtime() - startedAt, "流式首声 seq=$seq")
                 setSpeaking(true)
+                if (lastEndAt > 0L) {
+                    val gap = SystemClock.elapsedRealtime() - lastEndAt
+                    if (gap in 1..5000) NetLog.record("TTS", 0, gap, "句间空档（流式）")
+                }
                 try {
                     it.start()
                 } catch (e: Exception) {
@@ -413,41 +442,49 @@ class TtsPlayer(
                 }
             }
             mp.setOnCompletionListener {
+                lastEndAt = SystemClock.elapsedRealtime()
                 releaseQuietly(it)
                 if (current === it) current = null
                 setSpeaking(false)
-                // 先记账再还调度：onSpeak 会立刻回调过来，speakNow 靠这个集合认出「已经放过了」
-                streamedPlayed.add(seq)
-                main.post {
-                    if (!queue.onDownloadDone(seq, true)) streamedPlayed.remove(seq)
-                }
+                NetLog.record("TTS", 0, 0, "播完 seq=$seq（流式）")
+                // 流式这一句不走下载回调：它在 adoptStream 里就已经占住声音，这里只还声音
+                main.post { queue.onPlayDone(seq) }
             }
             mp.setOnErrorListener { p, what, extra ->
                 releaseQuietly(p)
                 if (current === p) current = null
                 setSpeaking(false)
                 Log.w("PetTts", "流式播放失败 seq=$seq what=$what extra=$extra ${buf.reason}")
-                streamedPlayed.remove(seq)
                 onError("播放失败（what=$what extra=$extra）")
                 queue.onPlayFailed(seq, "播放失败")
                 true
             }
+            if (!queue.adoptStream(seq)) {
+                releaseQuietly(mp)
+                return false
+            }
             current = mp
             mp.prepareAsync()
+            return true
         } catch (e: Exception) {
-            buf.abort(e.message ?: e.javaClass.simpleName)
+            // 已 adopt 的句子必须由这里收尾，否则队列永远以为还有人在响
+            current = null
+            queue.onPlayFailed(seq, e.message ?: e.javaClass.simpleName)
             onError("播放失败：${e.message ?: e.javaClass.simpleName}")
+            return true
         }
     }
 
     private fun download(seq: Long, text: String, preset: String, tempTag: Long) {
         val myEpoch = epoch
         // 边下边播只在「轮到这一句、且现在没人在响」时值得：其余句子老实下完整段，
-        // 轮到它时文件已经在盘上（命中缓存比流式省事）。
-        if (current == null && !speaking) {
+        // 轮到它时文件已经在盘上（命中缓存比流式省事）。队头判断不能省：并发槽位里
+        // 第二句也满足「没人在响」时抢到播放器，会先出声、把第一句的流丢在半路。
+        if (current == null && !speaking && queue.isHead(seq)) {
             streamDownload(seq, text, preset, tempTag, myEpoch)
             return
         }
+        NetLog.record("TTS", 0, 0, "下文件 seq=$seq「${text.take(10)}」")
         runIo({ main.post { queue.onDownloadDone(seq, false, "已停止") } }) {
             val dest = cacheFile(text, preset)
             val tmp = File(dest.parentFile, dest.name + "." + tempTag + ".part")
@@ -527,6 +564,8 @@ class TtsPlayer(
             queue.onPlayDone(seq)
             return
         }
+        // 这一句已经由「预接」起播了：调度只是走到这儿，别把实例再起一遍
+        if (gaplessStarted.remove(seq)) return
         val file = cacheFile(text, preset)
         if (!file.exists() || file.length() < 512L) {
             // 文件被淘汰或上一轮删掉了：跳过，别让整条队列停在这里
@@ -575,6 +614,90 @@ class TtsPlayer(
     }
 
     /**
+     * 在当前句还在响的时候，把下一句的播放器准备好并 `setNextMediaPlayer` 接上。
+     *
+     * 为什么要预接：正常路径是「播完 → 回调调度 → 新建 MediaPlayer → prepareAsync → start」，
+     * 中间隔着几次跨线程往返，实测就是句间那几十到一百多毫秒的空档。预接把这段提前到
+     * 当前句还在响的时候做完，收尾瞬间直接切过去，听起来是一句接一句，不是一顿一顿。
+     *
+     * 失败一律静默放弃：预接没成功只是退回原来的串行路径，不能影响这一句本身。
+     */
+    private fun armNext(myEpoch: Int) {
+        val next = try {
+            queue.peekNextReady()
+        } catch (_: Exception) {
+            null
+        } ?: return
+        if (next.seq == gaplessNextSeq) return
+        val file = try {
+            cacheFile(next.text, next.preset)
+        } catch (_: Exception) {
+            return
+        }
+        if (!file.exists() || file.length() < 512L) return
+        try {
+            val mp = MediaPlayer()
+            mp.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build(),
+            )
+            mp.setDataSource(file.absolutePath)
+            mp.setOnPreparedListener { p ->
+                try {
+                    if (epoch != myEpoch || current == null || current?.isPlaying != true) {
+                        releaseQuietly(p)
+                        return@setOnPreparedListener
+                    }
+                    current?.setNextMediaPlayer(p)
+                    gaplessNext = p
+                    gaplessNextSeq = next.seq
+                    // 这一路会在当前句放完时自己接手，不会再走 onPrepared：等它真的响起来，
+                    // 再把「它后面那句」预接上，句间才不会隔一句就掉回串行。
+                    main.postDelayed({
+                        try {
+                            if (epoch == myEpoch && current === p && p.isPlaying) armNext(myEpoch)
+                        } catch (_: Exception) {
+                        }
+                    }, 200L)
+                } catch (_: Exception) {
+                    releaseQuietly(p)
+                    if (gaplessNext === p) {
+                        gaplessNext = null
+                        gaplessNextSeq = -1L
+                    }
+                }
+            }
+            mp.setOnCompletionListener { p ->
+                lastEndAt = SystemClock.elapsedRealtime()
+                releaseQuietly(p)
+                if (current === p) current = null
+                if (gaplessNext === p) {
+                    gaplessNext = null
+                    gaplessNextSeq = -1L
+                }
+                setSpeaking(false)
+                queue.onPlayDone(next.seq)
+            }
+            mp.setOnErrorListener { p, _, _ ->
+                releaseQuietly(p)
+                if (current === p) current = null
+                if (gaplessNext === p) {
+                    gaplessNext = null
+                    gaplessNextSeq = -1L
+                }
+                setSpeaking(false)
+                queue.onPlayFailed(next.seq, "预接播放失败")
+                true
+            }
+            mp.prepareAsync()
+        } catch (_: Exception) {
+            /* 预接失败：退回串行路径 */
+        }
+    }
+
+    /**
      * 单个 MediaPlayer 串行出声。[seq] < 0 表示填充句（不在调度队列里，播完不回调队列）。
      * 完成/失败一律先把实例清干净、再交还调度，下一句在同一个回调里起播，句间无缝。
      */
@@ -612,6 +735,10 @@ class TtsPlayer(
                     Log.i("PetLatency", "TTS 可播 ${SystemClock.elapsedRealtime() - enqueuedAt}ms（入队→出声，含排队）")
                 }
                 setSpeaking(true)
+                if (!filler && lastEndAt > 0L) {
+                    val gap = SystemClock.elapsedRealtime() - lastEndAt
+                    if (gap in 1..5000) NetLog.record("TTS", 0, gap, "句间空档（串行 seq=$seq）")
+                }
                 try {
                     it.start()
                 } catch (e: Exception) {
@@ -619,19 +746,42 @@ class TtsPlayer(
                     if (current === it) current = null
                     setSpeaking(false)
                     if (!filler) queue.onPlayFailed(seq, e.message ?: e.javaClass.simpleName)
+                    return@setOnPreparedListener
                 }
+                if (!filler) armNext(myEpoch)
             }
             mp.setOnCompletionListener {
+                lastEndAt = SystemClock.elapsedRealtime()
                 releaseQuietly(it)
                 if (current === it) current = null
                 if (fillerRef === it) fillerRef = null
-                setSpeaking(false)
+                val armed = gaplessNext
+                val armedSeq = gaplessNextSeq
+                gaplessNext = null
+                gaplessNextSeq = -1L
+                if (!filler && armed != null && armedSeq >= 0L) {
+                    // 已经用 setNextMediaPlayer 接上了：实例直接接管，别让 speaking 掉下去
+                    current = armed
+                    gaplessStarted.add(armedSeq)
+                    NetLog.record("TTS", 0, 0L, "句间空档 0ms（预接）")
+                    // 接上的这路是提前 prepare 好的，不会再有 onPrepared 回调，预接要在这里续下去；
+                    // 不等一下则 isPlaying 还没转 true，armNext 会以为没人响而放弃。
+                    main.postDelayed({
+                        if (epoch == myEpoch && current === armed) armNext(myEpoch)
+                    }, 150L)
+                } else {
+                    if (armed != null) releaseQuietly(armed)
+                    setSpeaking(false)
+                }
                 if (!filler) queue.onPlayDone(seq)
             }
             mp.setOnErrorListener { p, what, extra ->
                 releaseQuietly(p)
                 if (current === p) current = null
                 if (fillerRef === p) fillerRef = null
+                releaseQuietly(gaplessNext)
+                gaplessNext = null
+                gaplessNextSeq = -1L
                 setSpeaking(false)
                 onError("播放失败（what=$what extra=$extra）")
                 if (!filler) queue.onPlayFailed(seq, "播放失败")
@@ -655,6 +805,10 @@ class TtsPlayer(
         releaseQuietly(current)
         current = null
         fillerRef = null
+        releaseQuietly(gaplessNext)
+        gaplessNext = null
+        gaplessNextSeq = -1L
+        gaplessStarted.clear()
         setSpeaking(false)
     }
 

@@ -304,6 +304,8 @@ object PetSettings {
             if (features.has(hostKey)) features.optBoolean(hostKey, def) else feature(context, key)
         val line = "interact=${if (one("interact")) 1 else 0}," +
             "voice=${if (one("voice")) 1 else 0}," +
+            "wake=${if (one("wake")) 1 else 0}," +
+            "continuous=${if (one("continuous")) 1 else 0}," +
             "link=${if (one("link")) 1 else 0}," +
             "bubble=${if (one("bubble")) 1 else 0}"
         if (line == prefs(context).getString(K_FEAT, "")) return

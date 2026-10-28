@@ -147,4 +147,38 @@ class TtsQueueTest {
         assertEquals(1, r.failed.size)
         assertEquals(a, r.failed[0].first)
     }
+
+    /**
+     * 边下边播这一句不许当成「下载完成」：以前复用回调，读完字节就放出下一句，
+     * 而这一句其实还在响，两句叠在一起谁也没出声。
+     */
+    @Test
+    fun adoptedStreamHoldsSoundUntilPlayDone() {
+        val r = Recorder()
+        val q = queue(r)
+        val a = q.enqueue("流式这句。", "p", 1L, cached = false)
+        val b = q.enqueue("下一句。", "p", 2L, cached = false)
+        assertTrue(q.busy())
+
+        assertTrue(q.adoptStream(a))
+        // 槽位还了（下一句能下），但声音还被这句占着
+        assertEquals(1, q.downloading())
+        assertTrue(q.onDownloadDone(b, ok = true))
+        assertTrue(r.speaks.isEmpty())
+
+        q.onPlayDone(a)
+        assertEquals(listOf(b), r.speaks)
+    }
+
+    /** 打断后旧轮的流才接上：不许认领，否则新轮永远等不到出声。 */
+    @Test
+    fun adoptStreamRejectsStaleTurn() {
+        val r = Recorder()
+        val q = queue(r)
+        q.enqueue("旧一句。", "p", 1L, cached = false)
+        q.stopAll()
+        assertFalse(q.adoptStream(1L))
+        // 旧轮的下载槽位还在途，不许被这一认领顶成「正在响」
+        assertTrue(r.speaks.isEmpty())
+    }
 }

@@ -613,7 +613,7 @@ class FloatingPetService : Service() {
     private fun syncHostState() {
         if (!cfg.ready) return
         val now = SystemClock.elapsedRealtime()
-        if (now - hostStateAt < 30_000L) return
+        if (now - hostStateAt < 8_000L) return
         hostStateAt = now
         val snapshot = cfg
         Thread({
@@ -626,6 +626,14 @@ class FloatingPetService : Service() {
             r?.json?.let { PetSettings.saveFeatures(this, it.optJSONObject("features")) }
             main.post {
                 if (destroyed) return@post
+                // 面板刚把唤醒/连续对话关掉：30 s 内就得停，不能等下一次配置变更
+                if (!PetSettings.feature(this, "wake") || !PetSettings.feature(this, "voice")) {
+                    wake.stop()
+                    if (continuous) stopContinuous("面板关了唤醒")
+                } else if (cfg.wakeEnabled) {
+                    maybeStartWake()
+                }
+                if (continuous && !PetSettings.feature(this, "continuous")) stopContinuous("面板关了连续对话")
                 if (name.isEmpty()) {
                     hostStateAt = 0L
                     if (r == null || !r.ok) Log.i("PetWake", "读宿主称呼失败 code=${r?.code ?: -1}")
@@ -711,7 +719,7 @@ class FloatingPetService : Service() {
     }
 
     /**
-     * 面板上改称呼后不该等用户点一下才生效：常驻时每分钟读一次 state
+     * 面板上改称呼/开关后不该等用户点一下才生效：常驻时 15 s 读一次 state
      * （syncHostState 自带宽 30s 闸），失败下一分钟自然重试。
      */
     private fun startHostStateTick() {
@@ -720,7 +728,7 @@ class FloatingPetService : Service() {
             override fun run() {
                 if (destroyed) return
                 syncHostState()
-                main.postDelayed(this, 60_000L)
+                main.postDelayed(this, 15_000L)
             }
         }
         hostTick = r
@@ -733,7 +741,7 @@ class FloatingPetService : Service() {
         Log.i("PetWake", "宿主称呼=$name 唤醒词=${wakeWords().joinToString("|")}")
         eval("window.PetBridge&&PetBridge.setWho(${JSONObject.quote(who())})")
         // 唤醒词集合变了：正在常听就重启引擎，否则新称呼叫不动
-        if (cfg.wakeEnabled) {
+        if (cfg.wakeEnabled && PetSettings.feature(this, "wake")) {
             wake.stop()
             main.postDelayed({ if (!destroyed) maybeStartWake() }, 400)
         }
@@ -1386,7 +1394,8 @@ class FloatingPetService : Service() {
             return
         }
         // 按住说话是一次性的：松手就发，发完回待机，不自动续听（续听会让用户以为又开麦了）
-        continuous = !hold
+        // 面板关了「说完继续说」就只做一次问答：按住说话的行为不能被这个开关改变
+        continuous = !hold && PetSettings.feature(this, "continuous")
         pttHolding = hold
         emptyRounds = 0
         autoRounds = 0
@@ -1657,14 +1666,14 @@ class FloatingPetService : Service() {
 
     private fun onWake(hit: WakeHit) {
         if (destroyed) return
-        if (!cfg.wakeEnabled) return
+        if (!cfg.wakeEnabled || !PetSettings.feature(this, "wake")) return
         if (turnActive || pttActive || speaking || tts.busy) {
             Log.i("PetTap", "唤醒：上一轮没结束，忽略 turn=$turnActive ptt=$pttActive speaking=$speaking tts=${tts.busy}")
             return
         }
         wake.stop() // 呼出后立刻停引擎：别把自己 TTS 的声音当唤醒词（回声自激）
         updateNotification("听到「${hit.word}」")
-        continuous = true
+        continuous = PetSettings.feature(this, "continuous")
         emptyRounds = 0
         autoRounds = 0
         autoListenSince = 0L
@@ -1917,6 +1926,10 @@ class FloatingPetService : Service() {
             scheduleResume(150)
             return
         }
+        if (continuous && !PetSettings.feature(this, "continuous")) {
+            stopContinuous("面板关了连续对话")
+            return
+        }
         if (continuous && cfg.ready) {
             if (autoRounds >= MAX_AUTO_ROUNDS) {
                 // 连着自动聊满上限就收手：再往下就是自己跟自己说话了
@@ -2125,7 +2138,9 @@ class FloatingPetService : Service() {
             return
         }
         // 语音总开关关掉时「常听」也不许开麦：那是同一份麦克风
-        if (!cfg.wakeEnabled || !cfg.ready || !PetSettings.feature(this, "voice")) {
+        if (!cfg.wakeEnabled || !cfg.ready || !PetSettings.feature(this, "voice") ||
+            !PetSettings.feature(this, "wake")
+        ) {
             wake.stop()
             return
         }

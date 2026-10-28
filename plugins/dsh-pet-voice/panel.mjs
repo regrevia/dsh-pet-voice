@@ -53,6 +53,8 @@ const DEFAULT_CONFIG = {
   // 手机上那部分非刚需能力：关掉就真的不发、不读、不冒泡，App 以这里为准
   interact: true,
   voiceOn: true,
+  wakeOn: true,
+  continuousOn: true,
   link: true,
 }
 
@@ -342,6 +344,8 @@ function readPanelConfig() {
       : DEFAULT_CONFIG.newReasoning,
     interact: raw?.interact === undefined ? DEFAULT_CONFIG.interact : raw.interact !== false,
     voiceOn: raw?.voiceOn === undefined ? DEFAULT_CONFIG.voiceOn : raw.voiceOn !== false,
+    wakeOn: raw?.wakeOn === undefined ? DEFAULT_CONFIG.wakeOn : raw.wakeOn !== false,
+    continuousOn: raw?.continuousOn === undefined ? DEFAULT_CONFIG.continuousOn : raw.continuousOn !== false,
     link: raw?.link === undefined ? DEFAULT_CONFIG.link : raw.link !== false,
   }
 }
@@ -395,6 +399,8 @@ export function setPanelConfig(patch) {
   if (input.bubble !== undefined) next.bubble = input.bubble !== false
   if (input.interact !== undefined) next.interact = input.interact !== false
   if (input.voiceOn !== undefined) next.voiceOn = input.voiceOn !== false
+  if (input.wakeOn !== undefined) next.wakeOn = input.wakeOn !== false
+  if (input.continuousOn !== undefined) next.continuousOn = input.continuousOn !== false
   if (input.link !== undefined) next.link = input.link !== false
   if (input.transport !== undefined) {
     const transport = String(input.transport ?? '').trim()
@@ -494,6 +500,8 @@ export function panelState({ origin, pairing } = {}) {
     bubble: config.bubble,
     interact: config.interact,
     voiceOn: config.voiceOn,
+    wakeOn: config.wakeOn,
+    continuousOn: config.continuousOn,
     link: config.link,
     transport: config.transport,
     ttsProvider: config.ttsProvider,

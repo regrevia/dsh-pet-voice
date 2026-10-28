@@ -28,6 +28,9 @@ internal class TtsQueue(private val maxAhead: Int = 2) {
         /** 这一句跳过了（合成/落盘/播放失败），继续后面的句子。 */
         fun onFailed(seq: Long, reason: String)
 
+        /** 有句子下好了（进 ready）。播放器据此在当前句还在响时把下一句预接上。 */
+        fun onReady() {}
+
         /** 从「还有活」变成「彻底没事」的时刻，连续对话据此重新开麦。 */
         fun onIdle()
     }
@@ -75,6 +78,7 @@ internal class TtsQueue(private val maxAhead: Int = 2) {
     fun enqueue(text: String, preset: String, enqueuedAt: Long, cached: Boolean): Long {
         val seq = seqGen++
         val task = Task(seq, text, preset, enqueuedAt, keyOf(text, preset), epoch)
+        NetLog.record("TTS", 0, 0, "入队 seq=$seq 「${text.take(12)}」")
         if (cached) ready[seq] = task else pending.addLast(task)
         pump()
         speakIfTurn()
@@ -101,10 +105,28 @@ internal class TtsQueue(private val maxAhead: Int = 2) {
             waiters.remove(task.key)?.forEach { w -> if (w.epoch == epoch) fail(w, reason.ifBlank { "语音合成失败" }) }
             if (alive) fail(task, reason.ifBlank { "语音合成失败" })
         }
+        if (alive && ok && ready.isNotEmpty()) listener?.onReady()
         pump()
         speakIfTurn()
         notifyIdle()
         return alive
+    }
+
+    /**
+     * 边下边播接上了：这一句直接进入「正在响」，不经过 ready。
+     *
+     * 流式播放不经过 onDownloadDone（那个回调是「文件下好了，可以排队出声」的意思）。
+     * 以前流式复用它，读完字节就当下载完，队列立刻放出下一句，而这一句其实还在响——
+     * 结果三四句一起挤进播放器，谁也没出声。槽位在这里还，声音占用在这里记。
+     */
+    fun adoptStream(seq: Long): Boolean {
+        val task = inflight[seq] ?: return false
+        if (task.epoch != epoch) return false
+        inflight.remove(seq)
+        waiters.remove(task.key)?.forEach { w -> if (w.epoch == epoch) ready[w.seq] = w }
+        playing = seq
+        pump()
+        return true
     }
 
     /** 一句播完（含被打断/停止）：让出声音，轮到下一句。 */
@@ -143,6 +165,34 @@ internal class TtsQueue(private val maxAhead: Int = 2) {
 
     /** 还在下载的句数：诊断用，也证明 busy 覆盖了「下载中」。 */
     fun downloading(): Int = inflight.size
+
+    /**
+     * 这一句是不是「马上就该响」的队头（按 seq，最小的还活着的句子）。
+     *
+     * 播放器只在队头那句上做「边下边播」：两句同时进并发槽位时，如果都去抢播放器，
+     * 第二句可能先连上先出声——顺序就反了，而且第一句的流被抢走后没人再放它。
+     */
+    fun isHead(seq: Long): Boolean {
+        var head = Long.MAX_VALUE
+        pending.firstOrNull()?.let { head = minOf(head, it.seq) }
+        ready.keys.firstOrNull()?.let { head = minOf(head, it) }
+        inflight.keys.minOrNull()?.let { head = minOf(head, it) }
+        if (playing >= 0L) head = minOf(head, playing)
+        return seq == head
+    }
+
+    /** 一句「已经下好、只等出声」的句子：播放器用它提前准备下一路播放器，接出无缝的一句。 */
+    class Ready(val seq: Long, val text: String, val preset: String)
+
+    /**
+     * 队头那句如果已经下好，返回它（**不摘除、不出声**）：播放器据此在当前句还在响时就
+     * `setNextMediaPlayer` 把下一句接上，省掉「播完再建实例再 prepare」那几十~一百多毫秒空档。
+     */
+    fun peekNextReady(): Ready? {
+        val seq = ready.keys.firstOrNull() ?: return null
+        val task = ready[seq] ?: return null
+        return Ready(task.seq, task.text, task.preset)
+    }
 
     /* ---------------- 调度 ---------------- */
 

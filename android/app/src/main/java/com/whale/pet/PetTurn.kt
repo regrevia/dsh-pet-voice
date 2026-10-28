@@ -8,6 +8,7 @@ import org.json.JSONObject
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /** 电脑上那一轮还在跑时宿主回的 queued 帧：这句在排队，不是在思考。 */
 const val PET_QUEUED_TEXT = "电脑上还在跑，已排队"
@@ -118,6 +119,8 @@ class PetTurn(
 
     /** 是否已经为「别的会话的帧被丢掉」记过一次日志。 */
     private val foreignDropped = AtomicBoolean(false)
+    private val droppedFrames = AtomicInteger(0)
+    private val keptFrames = AtomicInteger(0)
 
     /** 派发前对齐到的帧序号；SSE 一帧没到也靠它把这一轮的帧补回来。 */
     @Volatile
@@ -599,13 +602,19 @@ class PetTurn(
         // 顺序要紧：**先按会话过滤，再按 seq 去重**——反过来的话，别的会话的 seq=7
         // 会先把本会话还没到的 seq=7 记成「已收」，本会话那一帧就被当成重复丢掉。
         if (event != "hello" && event != "say" && expectedSession.isNotBlank() && evSession != expectedSession) {
-            // 只在第一次落一条：会话绑错时这里会持续吞帧，没有这条日志就看不出「为什么没回复」
-            if (foreignDropped.compareAndSet(false, true)) {
-                NetLog.record("GET /api/stream", 0, 0, "丢弃 ${evSession.take(8)} 的帧，本轮=${expectedSession.take(8)}")
-                dbg("drop foreign session=${evSession.take(8)} want=${expectedSession.take(8)}")
+            // 会话绑错时会持续吞帧，没有这条日志就看不出「为什么没回复」：
+            // 记全两个 id（截前 8 位两串都长成 session-，看不出差在哪），并且按计数每 20 帧再记一次。
+            val n = droppedFrames.incrementAndGet()
+            if (foreignDropped.compareAndSet(false, true) || n % 20 == 0) {
+                NetLog.record(
+                    "GET /api/stream", 0, 0,
+                    "丢弃第 ${n} 帧 ${evSession.take(60)}，本轮=${expectedSession.take(60)}",
+                )
+                dbg("drop foreign session=$evSession want=$expectedSession n=$n")
             }
             return
         }
+        keptFrames.incrementAndGet()
         // 还没派发时不知道目标会话：广播流里别人的 start/end/final 一律不算
         if (expectedSession.isBlank() && event != "hello" && event != "delta") return
         // 同一帧可能从 SSE 和轮询各来一次：带 seq 就按「会话+seq」去重
@@ -621,7 +630,11 @@ class PetTurn(
                 helloLatch.countDown()
             }
 
-            "start" -> post { cb.onStatus("思考中…") }
+            "start" -> {
+                keptFrames.set(0)
+                droppedFrames.set(0)
+                post { cb.onStatus("思考中…") }
+            }
 
             // 电脑上那一轮还没跑完，这句进了队列：不是「我们在思考」，别显示成思考中。
             "queued" -> post { cb.onStatus(PET_QUEUED_TEXT) }
@@ -681,6 +694,7 @@ class PetTurn(
             }
 
             "end" -> {
+                NetLog.record("GET /api/stream", 0, 0, "本轮收帧 ${keptFrames.get()} 帧，丢 ${droppedFrames.get()} 帧")
                 // 这一轮真正的终止信号。宿主保证 final 先于 end，但隧道可能把两个事件拆到不同
                 // 批次：end 到了、final 还在路上时给同样长的宽限；等不到就把已收到的增量收尾。
                 if (endSeen.get()) return

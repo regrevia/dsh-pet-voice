@@ -204,7 +204,7 @@ window.__ModuleLoader__.load({
       newReasoning: s.newReasoning ?? '',
       bubble: s.bubble !== false,
       interact: s.interact !== false,
-      voiceOn: s.voiceOn !== false,
+      voiceOn: s.voiceOn !== false, wakeOn: s.wakeOn !== false, continuousOn: s.continuousOn !== false,
       link: s.link !== false,
     })
 
@@ -843,6 +843,42 @@ window.__ModuleLoader__.load({
                 },
               },
               h('span', { style: S.knob(draft.voiceOn) }),
+            ),
+          ),
+          h(
+            'div',
+            { style: { ...S.row, ...S.rowBorder, justifyContent: 'space-between' } },
+            h('span', { style: S.label }, '叫名字唤醒'),
+            h(
+              'button',
+              {
+                style: S.switch(draft.wakeOn),
+                'aria-label': '叫名字唤醒',
+                onClick: () => {
+                  const next = !draft.wakeOn
+                  field('wakeOn')(next)
+                  save({ wakeOn: next })
+                },
+              },
+              h('span', { style: S.knob(draft.wakeOn) }),
+            ),
+          ),
+          h(
+            'div',
+            { style: { ...S.row, ...S.rowBorder, justifyContent: 'space-between' } },
+            h('span', { style: S.label }, '说完继续说'),
+            h(
+              'button',
+              {
+                style: S.switch(draft.continuousOn),
+                'aria-label': '说完继续说',
+                onClick: () => {
+                  const next = !draft.continuousOn
+                  field('continuousOn')(next)
+                  save({ continuousOn: next })
+                },
+              },
+              h('span', { style: S.knob(draft.continuousOn) }),
             ),
           ),
         ),

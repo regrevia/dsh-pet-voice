@@ -5561,7 +5561,7 @@ export function apply(ctx, config) {
       // 手机上那几件非刚需的活，开关在桌面端面板里；App 只照这个值做，不自己留一份
       features: (() => {
         const cfg = getPanelConfig()
-        return { interact: cfg.interact, voice: cfg.voiceOn, link: cfg.link, bubble: cfg.bubble }
+        return { interact: cfg.interact, voice: cfg.voiceOn, wake: cfg.wakeOn, continuous: cfg.continuousOn, link: cfg.link, bubble: cfg.bubble }
       })(),
       ttsReady: ttsReady(normalizeTtsProvider(getPanelConfig().ttsProvider)),
       localVoices: normalizeTtsProvider(getPanelConfig().ttsProvider) === 'local' ? localVoices() : [],
@@ -5865,6 +5865,8 @@ export function apply(ctx, config) {
             return {
               interact: config.interact !== false,
               voice: config.voiceOn !== false,
+              wake: config.wakeOn !== false,
+              continuous: config.continuousOn !== false,
               link: config.link !== false,
               bubble: config.bubble !== false,
             }

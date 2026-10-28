@@ -1411,7 +1411,11 @@ class HistoryActivity : Activity() {
                 override fun onSentence(sentence: String) {
                     if (token != turnToken) return
                     // 面板关了语音：只出字不出声
-                    if (!PetSettings.feature(this@HistoryActivity, "voice")) return
+                    if (!PetSettings.feature(this@HistoryActivity, "voice")) {
+                        NetLog.record("TTS", 0, 0, "面板关了语音，这句不出声")
+                        return
+                    }
+                    NetLog.record("TTS", 0, 0, "再排一句「${sentence.take(14)}」")
                     val cfg = PetSettings.load(this@HistoryActivity)
                     val player = tts ?: TtsPlayer(this@HistoryActivity, client, { cfg }, {}, {}).also { tts = it }
                     player.enqueue(sentence)
