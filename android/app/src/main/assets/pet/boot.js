@@ -272,6 +272,46 @@ window.PetBridge = {
     if (s) whoEl.textContent = s
     return whoEl.textContent
   },
+  /**
+   * 气泡让位量的唯一计算处。
+   *
+   * 气泡出现时原生会把窗口往上加高 30dp（留白），气泡跟着窗口顶上去了，
+   * 人物按「没加高时」的窗口居中 —— 于是头顶和气泡下沿自然错开，不用再挪人。
+   * 但加高是异步的：留白刚下发时窗口还没重新布局，这一帧量到的还是旧尺寸。
+   * 所以窗口每次尺寸变化后（anim-pet.js 的 fit）都要再算一次，别把旧尺寸写死。
+   */
+  letWay (force) {
+    if (!force && !document.body.classList.contains('has-bubble')) return
+    const stageH = window.innerHeight
+    if (!(stageH > 0)) return
+    // 气泡底边：top 2 + 高 72 + 4px 缝（72 与 #bubble 的 height 一致，两处要一起改）
+    const bubBottom = 78
+    const box = window.__petBodyBox ? window.__petBodyBox() : null
+    let shiftPx = Math.round((box && box.h > 0 ? box.h : stageH) * 0.14)
+    if (box && box.h > 0 && box.bottom > box.top) {
+      // 让位只做一件事：把人物下移到头顶露在气泡下沿之外，永不缩放。
+      // 缩放就是「点一下变小」的观感来源；下移过头则脚被窗口切掉，画面上就是「不完整」。
+      // 上限 = 脚下到窗口底真正还剩多少（box 是人物墨迹框，不是整块画布）。
+      // 以前这里多给了 2% 当「透明留白」，实测那 2% 已经吃进肉里：脚会掉出窗口 4px。
+      // 现在只留 1px 亚像素余量，宁可头顶被气泡压住几像素，也不能裁到脚。
+      const headClear = Math.max(0, bubBottom - box.top + 2)
+      const slack = Math.max(0, box.h - box.bottom - 1)
+      shiftPx = Math.round(Math.min(headClear, slack))
+      console.warn('[bubble] 让位算 ' + shiftPx + 'px 头顶=' + box.top.toFixed(1) +
+        ' 脚底=' + box.bottom.toFixed(1) + ' 主体高=' + box.h.toFixed(1) +
+        ' 窗口=' + stageH + ' 留白=' + (box.pad || 0) +
+        ' 需求=' + headClear.toFixed(1) + ' 余量=' + slack.toFixed(1))
+    }
+    document.documentElement.style.setProperty('--shift', shiftPx + 'px')
+    document.documentElement.style.setProperty('--shrink', '1')
+    // 只在真的变了时才打一行（窗口尺寸换了才会有），平时一条不多；
+    // 用 warn 是因为宿主只把 warn/error 转进 logcat（PetJs），info 看不到。
+    const key = shiftPx + ''
+    if (key !== sayGeomKey) {
+      sayGeomKey = key
+      console.warn('[bubble] 让位 ' + shiftPx + 'px')
+    }
+  },
   say (text) {
     const s = String(text || '').trim()
     if (!s) { bubble.classList.remove('show'); document.body.classList.remove('has-bubble'); return false }
@@ -279,35 +319,7 @@ window.PetBridge = {
     // 先算好让位再让气泡出现：--shift / --shrink 必须在 has-bubble 生效前就位。
     // 顺序反了的话，第一次说话会先按 CSS 兜底值缩放一帧、再跳到量出来的值，
     // 看起来就是「点一下先缩一下、又缩一下」。stageH 没布局好（0）时保持上一次的值。
-    const stageH = window.innerHeight
-    if (stageH > 0) {
-      // 气泡底边：top 2 + 高 68 + 4px 缝（68 与 #bubble 的 height 一致，两处要一起改）
-      const bubBottom = 74
-      const box = window.__petBodyBox ? window.__petBodyBox() : null
-      let shiftPx = Math.round(stageH * 0.14)
-      if (box && box.h > 0 && box.bottom > box.top) {
-        // 让位的目标只有一个：头顶露在气泡下沿之外、脚不跑出窗口。
-        // 需要把人物缩掉的最大比例 = (窗口高 - 气泡底) / 人物高 ——
-        // 216 窗口下是 (216-74)/146.8 ≈ 0.967，也就是只缩 3%，肉眼看不出来。
-        // 旧算法按 (窗口高 - 让位高) / 窗口高 缩到 0.667：说一句话人就突然小一圈，
-        // 那是「输出气泡的时候突然变小很多」的根源。
-        // 让位只下移、不缩放：缩放就是「点一下变小」的观感来源。
-        // 下移量 = 头顶到气泡下沿的距离；上限取帧底透明留白的余量（CH-TARGET_BOTTOM
-        // 换算成舞台像素后再多给 2%，保证只吃留白、不真裁到脚）。
-        const headClear = Math.max(0, bubBottom - box.top + 2)
-        const slack = Math.max(0, box.h - box.bottom) + box.h * 0.02
-        shiftPx = Math.round(Math.min(headClear, slack))
-      }
-      document.documentElement.style.setProperty('--shift', shiftPx + 'px')
-      document.documentElement.style.setProperty('--shrink', '1')
-      // 只在这两个值真的变了时才打一行（窗口尺寸换了才会有），平时一条不多；
-      // 用 warn 是因为宿主只把 warn/error 转进 logcat（PetJs），info 看不到。
-      const key = shiftPx + ''
-      if (key !== sayGeomKey) {
-        sayGeomKey = key
-        console.warn('[bubble] 让位 ' + shiftPx + 'px')
-      }
-    }
+    this.letWay(true)
     bubble.classList.add('show')
     document.body.classList.add('has-bubble')
     // 让位实测：气泡可见期间舞台的合成矩阵必须是纯平移（缩放 = 1），
@@ -353,5 +365,11 @@ window.PetBridge = {
 
 // 页面就绪信号：原生据此判断 WebView 可以开始驱动了
 window.PetBridge.setAutoPlay(true)
+
+// 窗口尺寸变了要重算让位：气泡出现时宿主先把窗口加高，几毫秒后这里才收到浏览器 resize，
+// 早算的那一次量到的是旧尺寸（头顶还在气泡底下）。这里只补算，气泡没显示时不动。
+window.__petLetWay = function () {
+  try { window.PetBridge.letWay() } catch (e) {}
+}
 window.__PET_READY__ = true
 freezeWhenIdle()

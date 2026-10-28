@@ -41,6 +41,11 @@ object AppForeground {
 class PetApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        // 诊断用的网络事件流必须先从 Application 接上：只挂在设置页的话，
+        // 从对话页/悬浮窗进来的请求一条都不会落盘，真出问题就只剩「没反应」。
+        runCatching { NetLog.attach(this) }
+        // 待发队列要在任何界面之前就活起来：上次没发出去的那句，联网就自动补发
+        runCatching { Outbox.start(this) }
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) = AppForeground.enter()
             override fun onActivityStopped(activity: Activity) = AppForeground.exit()

@@ -324,6 +324,8 @@ const SHARED = (globalThis[Symbol.for('dsh.pet-voice.shared')] ||= {
   textSeen: new Map(),
 })
 const DISPATCH_SEEN = SHARED.dispatchSeen
+const DISPATCH_DEDUPE_MS = 24 * 60 * 60 * 1000
+const DISPATCH_SEEN_MAX = 2000
 // 老客户端（build 132）不带 requestId，连点两下就发两句：第一句 200 起轮、第二句 202 排队，
 // 手机上看是「同一个问题问了两遍/后一句卡住」。没 rid 时按「会话+原句」在 2.5s 内认一次重发。
 const TEXT_SEEN = (SHARED.textSeen ||= new Map())  // 热重载会沿用旧 SHARED 对象，新字段必须兜底
@@ -3391,14 +3393,20 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
   const rid = String(body?.requestId ?? '').trim()
   netLog('dispatch', { sessionId, sid: bareSessionId(sessionId).slice(0, 8), chars: text.length, attachments: attachmentPaths.length, rid: rid.slice(0, 12) })
   if (rid) {
+    // 去重窗口要覆盖「手机离线很久后补发」：待发队列可能几小时后才把同一句送到，
+    // 窗口太短就会补发成第二轮、电脑上答两遍。24 小时足够，且按条数封顶不会涨内存。
     const hit = DISPATCH_SEEN.get(rid)
-    if (hit && Date.now() - hit.at < 120_000) {
+    if (hit && Date.now() - hit.at < DISPATCH_DEDUPE_MS) {
       netLog('dispatch-dedupe', { sessionId: hit.sessionId })
       return { status: 200, body: { ok: true, accepted: true, sessionId: hit.sessionId, usedSessionId: hit.sessionId, deduped: true, attachments: attachmentPaths.length } }
     }
     DISPATCH_SEEN.set(rid, { at: Date.now(), sessionId })
     for (const [key, value] of DISPATCH_SEEN) {
-      if (Date.now() - value.at > 120_000) DISPATCH_SEEN.delete(key)
+      if (Date.now() - value.at > DISPATCH_DEDUPE_MS) DISPATCH_SEEN.delete(key)
+    }
+    while (DISPATCH_SEEN.size > DISPATCH_SEEN_MAX) {
+      const oldest = DISPATCH_SEEN.keys().next().value
+      DISPATCH_SEEN.delete(oldest)
     }
   } else if (text) {
     const key = `${sessionId}|${text}`

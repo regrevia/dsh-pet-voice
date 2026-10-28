@@ -82,6 +82,8 @@ class FloatingPetService : Service() {
     private var sayPump: Runnable? = null
     /** 上一句因为「队列满」被挡回去的原文；同一句只记一次日志。 */
     private var sayFullLogged: String? = null
+    /** 当前已加高的气泡留白（设备像素）。窗口高度 = 常态高度 + 它，窗口顶 = 常态顶 - 它。 */
+    private var bubblePadPx = 0
 
     /* ---------------- 显示方式：只在桌面 / 一直显示 ---------------- */
     /** home 模式下正在轮询前台应用（每 1200ms 一次）。 */
@@ -149,6 +151,8 @@ class FloatingPetService : Service() {
 
     /** 同一句提示的最小间隔：够用户看完一轮，又不至于连点两下就憋着不说。 */
     private val HINT_MIN_GAP = 2000L
+    /** 气泡留白：气泡显示时把窗口往上加高这么多 dp，这块高度只给气泡用。 */
+    private val BUBBLE_PAD_DP = 30
 
     /**
      * 宿主播报队列的拉取间隔；一次最多上屏几条（多了会把气泡挤成走马灯）。
@@ -258,8 +262,23 @@ class FloatingPetService : Service() {
         }
     }
 
+    // 存住引用才能在 onDestroy 摘掉：服务重启时匿名 lambda 摘不掉，会越攒越多重复播
+    private val outboxReply: (String) -> Unit = { reply ->
+        val head = reply.replace("\n", " ").trim()
+        if (head.isNotEmpty()) sayToBubble(head.take(60))
+    }
+    private val outboxDelivered: (String) -> Unit = { text ->
+        val head = text.replace("\n", " ").trim().take(18)
+        if (head.isNotEmpty()) sayToBubble("刚才那句已补发：$head")
+    }
+
     override fun onCreate() {
         super.onCreate()
+        // 待发队列补发成功：有浮窗就说一句，用户才知道那句真的到了
+        // 补发后捞回来的回答直接念出来：补发那一刻浮窗并没有在等回合
+        Outbox.addReplyListener(outboxReply)
+        Outbox.addDeliveredListener(outboxDelivered)
+        runCatching { Outbox.start(this) }
         alive = true
         inst = this
         cfg = PetSettings.load(this)
@@ -413,6 +432,8 @@ class FloatingPetService : Service() {
         destroyed = true
         alive = false
         if (inst === this) inst = null
+        Outbox.removeReplyListener(outboxReply)
+        Outbox.removeDeliveredListener(outboxDelivered)
         if (AppForeground.onChange != null) AppForeground.onChange = null
         stopContinuous("服务结束")
         stopSayPoll()
@@ -945,11 +966,13 @@ class FloatingPetService : Service() {
         val p = params ?: return
         val v = root ?: return
         val size = cfg.spriteSize.coerceIn(120, 200)
+        // 常态顶（没加气泡留白时的窗口顶）：留白只往上长，宠物在屏幕上的位置不能跟着动
+        val baseTop = p.y + bubblePadPx
         p.width = dp(size)
-        p.height = dp(size + 48)
+        p.height = dp(size + 48) + bubblePadPx
         val dm = resources.displayMetrics
         p.x = p.x.coerceIn(0, (dm.widthPixels - p.width).coerceAtLeast(0))
-        p.y = p.y.coerceIn(0, (dm.heightPixels - p.height).coerceAtLeast(0))
+        p.y = (baseTop - bubblePadPx).coerceIn(0, (dm.heightPixels - p.height).coerceAtLeast(0))
         try {
             wm.updateViewLayout(v, p)
         } catch (_: Exception) {
@@ -1184,7 +1207,43 @@ class FloatingPetService : Service() {
     }
 
     private fun say(text: String) {
-        eval("window.PetBridge&&PetBridge.say(${JSONObject.quote(text)})")
+        // 两句都要按序落在 WebView 线程上：先让出气泡的位置，再让气泡出现。
+        // 以前是让小人整体下移来躲气泡，人一动就「被挤下去 / 被裁掉一截」；
+        // 现在人不动，长出来的那一块全在气泡那一侧，且只在气泡显示的几秒里存在。
+        main.post {
+            applyBubblePad(text.isNotBlank())
+            eval("window.PetBridge&&PetBridge.say(${JSONObject.quote(text)})")
+        }
+    }
+
+    /**
+     * 气泡留白开关。加高窗口必须先告诉页面留了多少（页面把人物锚在留白之外），
+     * 再改 LayoutParams，中间那一帧才不会是「人物先跳一下」。
+     * 靠近屏幕上沿时按实际剩余空间截断，屏幕上不会出现负坐标。
+     */
+    private fun applyBubblePad(show: Boolean) {
+        val p = params ?: return
+        val v = root ?: return
+        val d = resources.displayMetrics.density.coerceAtLeast(0.1f)
+        val want = if (show) (BUBBLE_PAD_DP * d).toInt() else 0
+        if (want == bubblePadPx) return
+        val baseTop = (p.y + bubblePadPx).coerceAtLeast(0)
+        val baseHeight = (p.height - bubblePadPx).coerceAtLeast(dp(48))
+        val add = minOf(want, baseTop)
+        web?.evaluateJavascript(
+            "window.__petPad&&window.__petPad(" +
+                String.format(java.util.Locale.US, "%.2f", add / d) + ")",
+            null
+        )
+        bubblePadPx = add
+        p.y = (baseTop - add).coerceAtLeast(0)
+        p.height = baseHeight + add
+        try {
+            wm.updateViewLayout(v, p)
+        } catch (_: Exception) {
+        }
+        Log.i("PetBubble", "[bubble] 窗口留白 " + Math.round(add / d) + "dp 高=" +
+            Math.round(p.height / d) + "dp 顶=" + p.y + "（常态顶 " + baseTop + "）")
     }
 
     /**
@@ -1764,7 +1823,7 @@ class FloatingPetService : Service() {
                 turnActive = false
                 if (!speaking && !tts.busy) flashHappy()
             }
-        }).also { it.start() }
+        }, appCtx = this).also { it.start() }
     }
 
     /** 指令回包只需要念一句（切项目/派发/停/没找到）；不占对话轮，念完自然回待机。 */

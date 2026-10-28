@@ -13,8 +13,10 @@
       touch-action: none;               /* 手势交给原生窗口处理 */
     }
     /* 竖构图形象（420x465）按宽度 contain 后会吃满整个窗口高度，气泡就没地方放了。
-       不靠「加高窗口」解决——overlay 窗口内区域会吃触摸，加高等于在屏幕上多一条按不到的死区。
-       改成：气泡出现时身体整体让位（top 下移，短视频层重排一次，走合成器，不重绘）。 */
+       解法：气泡出现时原生把窗口「往上」临时加高 30dp（只在气泡显示的那几秒），
+       页面按 __petPad 把人物锚在加高之前的窗口里 —— 人一像素不动，气泡也不用压头顶。
+       不能常驻加高：overlay 窗口内的区域会吃触摸，常驻加高等于在屏幕上留一条按不到的死区。
+       下面这段下移让位保留成兜底：窗口贴着屏幕上沿长不出来、或页面留白没生效时才用。 */
     #stage {
       position: fixed; inset: 0;
       pointer-events: none;             /* 视频层不吃触摸，点哪都是点小人 */
@@ -44,10 +46,10 @@
     /* 说话气泡：固定贴在窗口顶部，高度上限只做兜底（实际高度由 JS 量） */
     #bubble {
       position: fixed; left: 6px; right: 6px; top: 2px;
-      /* 固定卡片：任何长度的回复都占同一块 68px，窗口与舞台缩放都不跟着文字变。
-         68 = 3 行 × 17.4 + 上下 padding 12 + 边框 2，再多 1.8 余量：89 字截断后的三行放得下，
-         之前 62 只有 48 可用，第三行底部被 overflow:hidden 切掉 4px。 */
-      height: 68px;
+      /* 固定卡片：任何长度的回复都占同一块 72px，窗口与舞台缩放都不跟着文字变。
+         72 = 3 行 × 17.4 + 上下 padding 12 + 边框 2 + 5.8 余量：真机 68 时第三行句号还被
+         overflow:hidden 切掉（WebView 的行盒比 1.45 略高），放到 72 才真放得下三行。 */
+      height: 72px;
       max-height: none;
       box-sizing: border-box;
       padding: 6px 9px;
@@ -272,10 +274,37 @@ function createPet (container) {
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w; canvas.height = h
       console.warn('[fit] 画布 ' + w + 'x' + h + '（' + (container.clientWidth || CW) + 'x' + (container.clientHeight || CH) + ' css @' + dpr + '）')
+      // 气泡让位是按窗口尺寸算的：窗口变了（气泡留白 / 转屏）就得跟着重算
+      if (window.__petLetWay) setTimeout(window.__petLetWay, 0)
     }
   }
   fit()
   window.addEventListener('resize', fit)
+
+  /**
+   * 气泡留白（CSS px）。原生在气泡出现时把窗口「往上」加高这么多，这块高度只在气泡那一侧，
+   * 页面把人物按「没加高时的窗口」居中 —— 人一像素都不动，气泡也不用压着头顶。
+   * 悬浮窗内的区域会吃触摸，所以只在气泡显示的几秒里长，气泡一收就还原。
+   */
+  let padCss = 0
+  /** 把画布坐标换算成设备像素的锚点：k=缩放，ox/oy=内容左上角。留白只抬高 oy。 */
+  function metrics () {
+    if (!ctx || !usingCanvas) return null
+    const dpr = Math.min(2.5, window.devicePixelRatio || 1)
+    const pad = padCss * dpr
+    const k = Math.min(canvas.width / CW, (canvas.height - pad) / CH)
+    if (!(k > 0)) return null
+    return { k: k, ox: (canvas.width - CW * k) / 2, oy: (canvas.height - pad - CH * k) / 2 + pad }
+  }
+  /** 原生加高窗口之前先调它；重复设同一个值不做事，避免每句话都重排。 */
+  window.__petPad = function (px) {
+    const next = Math.max(0, Math.min(120, Math.round((Number(px) || 0) * 100) / 100))
+    if (next === padCss) return padCss
+    padCss = next
+    fit()
+    console.warn('[bubble] 页面留白 ' + padCss + 'px')
+    return padCss
+  }
 
   let curClip = 'idle'
   let activeVid = null
@@ -583,11 +612,11 @@ function createPet (container) {
 
   function av3Draw (ts) {
     if (!ctx || !usingCanvas || !active || destroyed) return
-    const k = Math.min(canvas.width / CW, canvas.height / CH)
-    if (!(k > 0)) return
+    const m = metrics()
+    if (!m) return
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-    ctx.setTransform(k, 0, 0, k, (canvas.width - CW * k) / 2, (canvas.height - CH * k) / 2)
+    ctx.setTransform(m.k, 0, 0, m.k, m.ox, m.oy)
     if (!v3.on) {
       // 加载中：旧形象最后一帧占位
       if (v3.snap) ctx.drawImage(v3.snap, 0, 0, CW, CH)
@@ -675,8 +704,9 @@ function createPet (container) {
     av.lastOpen = !!open
     av.lastBlink = !!blink
 
-    const k = Math.min(canvas.width / CW, canvas.height / CH)
-    if (!(k > 0)) return
+    const m = metrics()
+    if (!m) return
+    const k = m.k
     // 待机幅度按「肉眼能看出来」调：呼吸 1.6%+0.6%、浮动 5px、左右微晃 ±0.6°、横向漂移 2px。
     const breathe = Math.sin(ts / 1450) * 0.016 + Math.sin(ts / 2450) * 0.006
     const bob = Math.sin(ts / 780) * (speaking ? 3.4 : 5.0)
@@ -697,7 +727,7 @@ function createPet (container) {
 
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-    ctx.setTransform(k, 0, 0, k, (canvas.width - CW * k) / 2, (canvas.height - CH * k) / 2)
+    ctx.setTransform(m.k, 0, 0, m.k, m.ox, m.oy)
     const paint = (img, alpha) => {
       ctx.save()
       ctx.globalAlpha = alpha
@@ -723,25 +753,39 @@ function createPet (container) {
   }
 
   /**
-   * 某段素材在画布里的落位。缩放对所有人一视同仁：素材本来就是同一块 420×465 画布
-   * 渲出来的角色，按每段自己的 BODY 高度归一化（tap_proud 295 / dance 296 / idle 346）
-   * 等于把蹲下的姿势放大 17%，屏幕上就是「点一下先撑大再缩回」——
-   * 这才是「大小会突然变化」的根。统一用待机那一个缩放，只让位置跟姿势走。
+   * 每段素材的视觉缩放。素材分两批渲染：第二批（dance / sleep / tap_joy / tap_proud …
+   * 共 9 段）本身画得小 14~20%，跟待机一起用统一缩放，换动作时人物就是「突然小一圈」——
+   * 这正是「大小没固定」的来源。判据用「人物本体面积」而不是像素框高度：
+   * 面积对蹲下、举手、头顶星星这些都不敏感（星星不连在人物上，不算进连通面积），
+   * 值 = sqrt(idle 面积 / 该段面积)，线性尺寸比。夹在 0.95~1.22，个别极端帧不外扩。
    */
-  const SCALE = Math.min(1.3, Math.max(0.85, TARGET_H / BODY.idle[3]))
-  // 所有片段共用这一个缩放（= 待机片段的自然大小）：以前是每个片段各自
-  // TARGET_H/BODY[片段][3] 拉满，片段之间差 24%，换动作时肉眼就是「突然变大/变小」。
-  // 现在画布 1:1 画原始像素，角色大小恒定，只有姿势高低变化。
+  const SIZE = {
+    cheer: 1.00, curtsy: 1.02, dance: 1.16, drag: 0.97, idle: 1.00,
+    jump: 1.22, look_around: 1.01, sleep: 1.17, startle: 1.16, stretch: 1.16,
+    tail_slap: 1.14, talking: 1.02, tap: 1.00, tap_joy: 1.19, tap_pout: 1.03,
+    tap_proud: 1.20, tap_shy: 1.00, tap_tickle: 1.00, tap_wave: 1.17, thinking: 1.01,
+    wake_up: 1.01, whale_bubble: 1.16, yawn: 0.99
+  }
+  // 面积判据对「收臂/腾空」这种窄姿势会高估：jump 的投影面积只有 idle 的六成，
+  // 但身高一样，直接按面积放到 1.22 会把人拉成竹竿、头顶还冲出画布。再用身高封顶：
+  // 渲染后主体高不超过 360 画布像素（画布 465、主体目标高 346），只对个别极端段生效。
+  const scaleFor = (clip) => {
+    const s = SIZE[clip] || SIZE.idle
+    const b = BODY[clip]
+    return b ? Math.min(s, 360 / b[3]) : s
+  }
+  const SCALE = scaleFor('idle')
   function geoFor (clip) {
     const n = NORM[clip] || [0, 0, CW, CH]
     const b = BODY[clip] || n
+    const s = scaleFor(clip)
     const bcx = b[0] + b[2] / 2
     const bBot = b[1] + b[3]
-    const dw = n[2] * SCALE, dh = n[3] * SCALE
+    const dw = n[2] * s, dh = n[3] * s
     // 用「人物主体框」(BODY) 对齐，而不是整块内容框(NORM)：各片段的裁剪边距不一样，
     // 按内容框贴底会让脚底落在不同高度 —— 换动作时人物整体上下滑一下，看着就像「变小/掉一下」。
-    let dx = TARGET_CX - (bcx - n[0]) * SCALE
-    const dy = TARGET_BOTTOM - (bBot - n[1]) * SCALE
+    let dx = TARGET_CX - (bcx - n[0]) * s
+    const dy = TARGET_BOTTOM - (bBot - n[1]) * s
     // 气泡这类特效会伸出画布左右：整体挪回画布内，宁可偏一两像素也不裁掉
     if (dx < 0) dx = 0
     else if (dx > CW - dw) dx = Math.max(0, CW - dw)
@@ -773,27 +817,26 @@ function createPet (container) {
 
   function draw (v) {
     if (!ctx || !usingCanvas) return
-    const k = Math.min(canvas.width / CW, canvas.height / CH)
-    if (!(k > 0)) return
+    const m = metrics()
+    if (!m) return
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-    ctx.setTransform(k, 0, 0, k, (canvas.width - CW * k) / 2, (canvas.height - CH * k) / 2)
+    ctx.setTransform(m.k, 0, 0, m.k, m.ox, m.oy)
     const f = fadePrev
     if (f) {
       const t = Math.min(1, (nowMs() - f.t0) / (f.dur || 150))
       // smootherstep：两端比 smoothstep 更缓，起步和收尾都看不出「开始淡」那一刻
       const e = t * t * t * (t * (t * 6 - 15) + 10)
-      // 真正的交叉淡化：旧层 1-e、新层 e，画面不会整体变虚（背景透出来）也不会双影——
-      // 前提是两层用同一个缩放（SCALE 对所有片段一致），位移按 e 从旧落位滑到新落位。
-      // 双影 = 两层各按各的落位画；这里只差一次平移，淡化过去就是「换了个姿势」。
+      // 真正的交叉淡化：旧层 1-e、新层 e，画面不会整体变虚（背景透出来）也不会双影。
+      // 两段素材的视觉缩放不同（第二批本身画得小），所以尺寸也按 e 插值：两层在同一尺寸上
+      // 交叉，观感是一次平滑的「换姿势」，不会同时出现一大一小两个影子。
       const gt = geoAt(curClip)
       const gp = f.geo || geoAt(f.clip)
-      drawLayer(f.vid, f.clip, 1 - e, gp)
-      drawLayer(v, curClip, e, {
-        n: gt.n, dw: gt.dw, dh: gt.dh,
-        dx: gp.dx + (gt.dx - gp.dx) * e,
-        dy: gp.dy + (gt.dy - gp.dy) * e
-      })
+      const mix = (a, b) => a + (b - a) * e
+      const mw = mix(gp.dw, gt.dw), mh = mix(gp.dh, gt.dh)
+      const mx = mix(gp.dx, gt.dx), my = mix(gp.dy, gt.dy)
+      drawLayer(f.vid, f.clip, 1 - e, { n: gp.n || NORM[f.clip], dw: mw, dh: mh, dx: mx, dy: my })
+      drawLayer(v, curClip, e, { n: gt.n, dw: mw, dh: mh, dx: mx, dy: my })
       if (fadeSamples.length < 40) fadeSamples.push([Math.round((nowMs() - f.t0)), +e.toFixed(3), +(1 - e).toFixed(3)])
       if (t >= 1) {
         try { f.vid.pause() } catch (e) {}
@@ -1075,14 +1118,21 @@ function createPet (container) {
    * boot.js 用它算气泡让位：目标只是「头顶露出气泡下沿」，
    * 216 窗口下把小人下移约 30px 就够（只缩 3%），不需要缩掉三分之一。
    */
-  console.warn('[size] 统一缩放 ' + SCALE.toFixed(3) + '（基准 idle 身高 ' + BODY.idle[3] + 'px）')
+  const EFF = Object.keys(SIZE).map(scaleFor)
+  console.warn('[size] 视觉缩放 idle=' + SCALE.toFixed(2) + ' 跳变最大 ' +
+    Math.max.apply(null, EFF).toFixed(2) + '/' + Math.min.apply(null, EFF).toFixed(2) +
+    '（面积归一后再按身高封顶 360，非像素框）')
   window.__petBodyBox = () => {
     const W = container.clientWidth || CW
-    const H = container.clientHeight || CH
+    // h 只算「没加高时」的窗口：让位余量是拿窗口高度当硬上限算的，留白那块不能算进去
+    const H = (container.clientHeight || CH) - padCss
     const k = Math.min(W / CW, H / CH)
     if (!(k > 0)) return null
-    const oy = (H - CH * k) / 2
-    return { w: W, h: H, k: k, top: oy + BODY.idle[1] * k, bottom: oy + TARGET_BOTTOM * k }
+    const oy = (H - CH * k) / 2 + padCss
+    // 头顶跟着当前片段的缩放走：第二批素材放大后头顶更高，气泡让位要按真实头顶算
+    const b = BODY[curClip] || BODY.idle
+    const top = oy + (TARGET_BOTTOM - b[3] * scaleFor(curClip)) * k
+    return { w: W, h: H, k: k, pad: padCss, top: top, bottom: oy + TARGET_BOTTOM * k }
   }
 
   // 宿主探针读取的现场：走 canvas 还是降级 video、当前是哪段、上次交接采了几帧
@@ -1513,6 +1563,46 @@ window.PetBridge = {
     if (s) whoEl.textContent = s
     return whoEl.textContent
   },
+  /**
+   * 气泡让位量的唯一计算处。
+   *
+   * 气泡出现时原生会把窗口往上加高 30dp（留白），气泡跟着窗口顶上去了，
+   * 人物按「没加高时」的窗口居中 —— 于是头顶和气泡下沿自然错开，不用再挪人。
+   * 但加高是异步的：留白刚下发时窗口还没重新布局，这一帧量到的还是旧尺寸。
+   * 所以窗口每次尺寸变化后（anim-pet.js 的 fit）都要再算一次，别把旧尺寸写死。
+   */
+  letWay (force) {
+    if (!force && !document.body.classList.contains('has-bubble')) return
+    const stageH = window.innerHeight
+    if (!(stageH > 0)) return
+    // 气泡底边：top 2 + 高 72 + 4px 缝（72 与 #bubble 的 height 一致，两处要一起改）
+    const bubBottom = 78
+    const box = window.__petBodyBox ? window.__petBodyBox() : null
+    let shiftPx = Math.round((box && box.h > 0 ? box.h : stageH) * 0.14)
+    if (box && box.h > 0 && box.bottom > box.top) {
+      // 让位只做一件事：把人物下移到头顶露在气泡下沿之外，永不缩放。
+      // 缩放就是「点一下变小」的观感来源；下移过头则脚被窗口切掉，画面上就是「不完整」。
+      // 上限 = 脚下到窗口底真正还剩多少（box 是人物墨迹框，不是整块画布）。
+      // 以前这里多给了 2% 当「透明留白」，实测那 2% 已经吃进肉里：脚会掉出窗口 4px。
+      // 现在只留 1px 亚像素余量，宁可头顶被气泡压住几像素，也不能裁到脚。
+      const headClear = Math.max(0, bubBottom - box.top + 2)
+      const slack = Math.max(0, box.h - box.bottom - 1)
+      shiftPx = Math.round(Math.min(headClear, slack))
+      console.warn('[bubble] 让位算 ' + shiftPx + 'px 头顶=' + box.top.toFixed(1) +
+        ' 脚底=' + box.bottom.toFixed(1) + ' 主体高=' + box.h.toFixed(1) +
+        ' 窗口=' + stageH + ' 留白=' + (box.pad || 0) +
+        ' 需求=' + headClear.toFixed(1) + ' 余量=' + slack.toFixed(1))
+    }
+    document.documentElement.style.setProperty('--shift', shiftPx + 'px')
+    document.documentElement.style.setProperty('--shrink', '1')
+    // 只在真的变了时才打一行（窗口尺寸换了才会有），平时一条不多；
+    // 用 warn 是因为宿主只把 warn/error 转进 logcat（PetJs），info 看不到。
+    const key = shiftPx + ''
+    if (key !== sayGeomKey) {
+      sayGeomKey = key
+      console.warn('[bubble] 让位 ' + shiftPx + 'px')
+    }
+  },
   say (text) {
     const s = String(text || '').trim()
     if (!s) { bubble.classList.remove('show'); document.body.classList.remove('has-bubble'); return false }
@@ -1520,35 +1610,7 @@ window.PetBridge = {
     // 先算好让位再让气泡出现：--shift / --shrink 必须在 has-bubble 生效前就位。
     // 顺序反了的话，第一次说话会先按 CSS 兜底值缩放一帧、再跳到量出来的值，
     // 看起来就是「点一下先缩一下、又缩一下」。stageH 没布局好（0）时保持上一次的值。
-    const stageH = window.innerHeight
-    if (stageH > 0) {
-      // 气泡底边：top 2 + 高 68 + 4px 缝（68 与 #bubble 的 height 一致，两处要一起改）
-      const bubBottom = 74
-      const box = window.__petBodyBox ? window.__petBodyBox() : null
-      let shiftPx = Math.round(stageH * 0.14)
-      if (box && box.h > 0 && box.bottom > box.top) {
-        // 让位的目标只有一个：头顶露在气泡下沿之外、脚不跑出窗口。
-        // 需要把人物缩掉的最大比例 = (窗口高 - 气泡底) / 人物高 ——
-        // 216 窗口下是 (216-74)/146.8 ≈ 0.967，也就是只缩 3%，肉眼看不出来。
-        // 旧算法按 (窗口高 - 让位高) / 窗口高 缩到 0.667：说一句话人就突然小一圈，
-        // 那是「输出气泡的时候突然变小很多」的根源。
-        // 让位只下移、不缩放：缩放就是「点一下变小」的观感来源。
-        // 下移量 = 头顶到气泡下沿的距离；上限取帧底透明留白的余量（CH-TARGET_BOTTOM
-        // 换算成舞台像素后再多给 2%，保证只吃留白、不真裁到脚）。
-        const headClear = Math.max(0, bubBottom - box.top + 2)
-        const slack = Math.max(0, box.h - box.bottom) + box.h * 0.02
-        shiftPx = Math.round(Math.min(headClear, slack))
-      }
-      document.documentElement.style.setProperty('--shift', shiftPx + 'px')
-      document.documentElement.style.setProperty('--shrink', '1')
-      // 只在这两个值真的变了时才打一行（窗口尺寸换了才会有），平时一条不多；
-      // 用 warn 是因为宿主只把 warn/error 转进 logcat（PetJs），info 看不到。
-      const key = shiftPx + ''
-      if (key !== sayGeomKey) {
-        sayGeomKey = key
-        console.warn('[bubble] 让位 ' + shiftPx + 'px')
-      }
-    }
+    this.letWay(true)
     bubble.classList.add('show')
     document.body.classList.add('has-bubble')
     // 让位实测：气泡可见期间舞台的合成矩阵必须是纯平移（缩放 = 1），
@@ -1594,6 +1656,12 @@ window.PetBridge = {
 
 // 页面就绪信号：原生据此判断 WebView 可以开始驱动了
 window.PetBridge.setAutoPlay(true)
+
+// 窗口尺寸变了要重算让位：气泡出现时宿主先把窗口加高，几毫秒后这里才收到浏览器 resize，
+// 早算的那一次量到的是旧尺寸（头顶还在气泡底下）。这里只补算，气泡没显示时不动。
+window.__petLetWay = function () {
+  try { window.PetBridge.letWay() } catch (e) {}
+}
 window.__PET_READY__ = true
 freezeWhenIdle()
 

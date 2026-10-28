@@ -209,9 +209,16 @@ class HistoryActivity : Activity() {
         data class Detail(val text: String) : PickerRow()
     }
 
+    /** 待发队列把某句补发成功后，这儿把会话再拉一遍，用户能直接看到回复。 */
+    private val outboxDelivered: (String) -> Unit = { runCatching { reload() } }
+    // 补发成功把回答捞回来时也要刷一次：否则页面上「已补发」有了、正文要等下次进页面
+    private val outboxReply: (String) -> Unit = { runCatching { reload() } }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_history)
+        Outbox.addDeliveredListener(outboxDelivered)
+        Outbox.addReplyListener(outboxReply)
 
         list = findViewById(R.id.historyList)
         // 状态栏内边距自己加：fitsSystemWindows 会和键盘 resize 抢高度，底栏被挤掉过
@@ -365,10 +372,79 @@ class HistoryActivity : Activity() {
         refreshHeader()
         reload()
         syncSession()
+        // 进来先补一次「只有我问、没有回答」的缺口：上一轮可能因断网断在一半
+        repairMissingReply()
         // 页面开着的时候核一下这只还在不在、名字对不对（20 秒一次，够快也不费电）
         ui.removeCallbacks(hostWatch)
         ui.postDelayed(hostWatch, HOST_WATCH_MS)
     }
+
+    @Volatile private var repairing = false
+
+    /**
+     * 本地最后一条是我、而且已经过了还在跑的窗口，就去电脑上把这句的回答捞回来。
+     * 只补最后这一处缺口：整段历史来回对账既慢又容易插重。
+     */
+    private fun repairMissingReply() {
+        val items = PetHistory.recent(this, 4)
+        val last = items.lastOrNull() ?: return
+        if (!last.isMe) return
+        // 3 秒是给「刚按发送、回合才起步」留的窗；不到就晚点再看，别把这次机会直接丢掉
+        if (System.currentTimeMillis() - last.ts < 3_000L) {
+            ui.removeCallbacks(repairLater)
+            ui.postDelayed(repairLater, 3_500L)
+            return
+        }
+        if (repairing) return
+        repairing = true
+        val text = last.text
+        val sid = PetSettings.chatSession(this)
+        Thread({
+            try {
+                if (sid.isBlank()) return@Thread
+                val client = PetClient { PetSettings.load(this) }
+                val want = text.trim()
+                var reply = ""
+                // 那句是先发出去的，回答可能还在跑：等一会儿再看，最多 3 次
+                for (tryNo in 1..3) {
+                    val res = runCatching { client.session(sid, 12) }.getOrNull()
+                    if (res != null && res.ok) {
+                        val arr = res.json?.optJSONArray("messages")
+                        if (arr != null) {
+                            var seenMe = false
+                            for (i in 0 until arr.length()) {
+                                val o = arr.optJSONObject(i) ?: continue
+                                val role = o.optString("role")
+                                val t = o.optString("text").trim()
+                                if (role == "user") {
+                                    if (!seenMe && t.isNotEmpty() && (t == want || t.contains(want.take(24)))) seenMe = true
+                                    continue
+                                }
+                                if (seenMe && role == "assistant" && t.isNotBlank()) {
+                                    reply = t
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    if (reply.isNotBlank()) break
+                    if (tryNo < 3) runCatching { Thread.sleep(3_000L) }
+                }
+                if (reply.isBlank()) return@Thread
+                val exists = PetHistory.all(this).any { it.role == PetHistory.ROLE_PET && it.text == reply }
+                if (exists) return@Thread
+                PetHistory.append(this, PetHistory.ROLE_PET, reply)
+                NetLog.record("history", 200, 0, "补回缺的回答 ${reply.length} 字")
+                runCatching { android.util.Log.i("Repair", "补回缺的回答 ${reply.length} 字") }
+                ui.post { runCatching { reload() } }
+            } catch (_: Exception) {
+            } finally {
+                repairing = false
+            }
+        }, "pet-repair").start()
+    }
+
+    private val repairLater = Runnable { runCatching { repairMissingReply() } }
 
     private val hostWatch = object : Runnable {
         override fun run() {
@@ -390,6 +466,8 @@ class HistoryActivity : Activity() {
     }
 
     override fun onDestroy() {
+        Outbox.removeDeliveredListener(outboxDelivered)
+        Outbox.removeReplyListener(outboxReply)
         closeVideo()
         ui.removeCallbacks(hostWatch)
         ui.removeCallbacksAndMessages(null)
@@ -802,6 +880,7 @@ class HistoryActivity : Activity() {
             PetSettings.chatSession(this),
             onSession = { id -> onSessionResolved(id) },
             attachments = media.map { it.host }.filter { it.isNotBlank() },
+            appCtx = this,
         )
         turn = t
         t.start()
@@ -809,6 +888,8 @@ class HistoryActivity : Activity() {
 
     private fun finishTurn(error: String?) {
         ui.removeCallbacks(ticker)
+        // 先留住这一轮：终局要按「宿主到底收没收到」决定补发，turn 清早了就没处问了
+        val ended = turn
         turn = null
         // 这轮到此为止：代号换掉，后续迟到的帧/回调一律不认识
         turnToken = ++turnSeq
@@ -820,9 +901,15 @@ class HistoryActivity : Activity() {
         // 连不上电脑（多半是电脑换了端口、地址失效）和「这轮没出字」是两种病，
         // 前者重发多少次都没用，得先换地址：那一行的动作就直接给扫码。
         val offline = error != null && (error.contains("连不上") || error.contains("超时") || error.contains("断开"))
+        // 已落进待发队列：这句没丢，别给「重试」按钮（再点一次就是第二轮），只告诉用户它会自己发
+        val queued = error != null && error.contains("已排队")
         when {
+            queued -> showRetry("已排队，联网后自动发出", null)
             error == null && finalText.isNotBlank() -> PetHistory.append(this, PetHistory.ROLE_PET, finalText)
             // 一轮走完了却一个字都没有：不能就这么静默收工，用户只会以为 App 坏了
+            // 断网/开流失败走完一轮、宿主其实一个字都没收到：直接落盘补发，别再让人手动重试
+            !userStopped && error?.contains("404") != true && error?.contains("会话已失效") != true &&
+                ended != null && ended.requeueIfLost() -> showRetry("已排队，联网后自动发出", null)
             error == null && !userStopped -> showRetry("没收到回复，重试", null)
             offline -> showRetry("连不上电脑，重新扫码", { startScan() })
             // 失败给一行可点的动作，不砸对话框：点了就用同一句话再发一次

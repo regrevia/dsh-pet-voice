@@ -841,7 +841,7 @@ class MainActivity : Activity() {
                     textTurn = null
                 }
             }
-        }, PetSettings.chatSession(this)).also { it.start() }
+        }, PetSettings.chatSession(this), appCtx = this).also { it.start() }
     }
 
     /* ---------------- 权限：缺什么就说清楚并当场去授 ---------------- */

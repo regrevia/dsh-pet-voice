@@ -137,10 +137,37 @@ export function createPet (container) {
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w; canvas.height = h
       console.warn('[fit] 画布 ' + w + 'x' + h + '（' + (container.clientWidth || CW) + 'x' + (container.clientHeight || CH) + ' css @' + dpr + '）')
+      // 气泡让位是按窗口尺寸算的：窗口变了（气泡留白 / 转屏）就得跟着重算
+      if (window.__petLetWay) setTimeout(window.__petLetWay, 0)
     }
   }
   fit()
   window.addEventListener('resize', fit)
+
+  /**
+   * 气泡留白（CSS px）。原生在气泡出现时把窗口「往上」加高这么多，这块高度只在气泡那一侧，
+   * 页面把人物按「没加高时的窗口」居中 —— 人一像素都不动，气泡也不用压着头顶。
+   * 悬浮窗内的区域会吃触摸，所以只在气泡显示的几秒里长，气泡一收就还原。
+   */
+  let padCss = 0
+  /** 把画布坐标换算成设备像素的锚点：k=缩放，ox/oy=内容左上角。留白只抬高 oy。 */
+  function metrics () {
+    if (!ctx || !usingCanvas) return null
+    const dpr = Math.min(2.5, window.devicePixelRatio || 1)
+    const pad = padCss * dpr
+    const k = Math.min(canvas.width / CW, (canvas.height - pad) / CH)
+    if (!(k > 0)) return null
+    return { k: k, ox: (canvas.width - CW * k) / 2, oy: (canvas.height - pad - CH * k) / 2 + pad }
+  }
+  /** 原生加高窗口之前先调它；重复设同一个值不做事，避免每句话都重排。 */
+  window.__petPad = function (px) {
+    const next = Math.max(0, Math.min(120, Math.round((Number(px) || 0) * 100) / 100))
+    if (next === padCss) return padCss
+    padCss = next
+    fit()
+    console.warn('[bubble] 页面留白 ' + padCss + 'px')
+    return padCss
+  }
 
   let curClip = 'idle'
   let activeVid = null
@@ -448,11 +475,11 @@ export function createPet (container) {
 
   function av3Draw (ts) {
     if (!ctx || !usingCanvas || !active || destroyed) return
-    const k = Math.min(canvas.width / CW, canvas.height / CH)
-    if (!(k > 0)) return
+    const m = metrics()
+    if (!m) return
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-    ctx.setTransform(k, 0, 0, k, (canvas.width - CW * k) / 2, (canvas.height - CH * k) / 2)
+    ctx.setTransform(m.k, 0, 0, m.k, m.ox, m.oy)
     if (!v3.on) {
       // 加载中：旧形象最后一帧占位
       if (v3.snap) ctx.drawImage(v3.snap, 0, 0, CW, CH)
@@ -540,8 +567,9 @@ export function createPet (container) {
     av.lastOpen = !!open
     av.lastBlink = !!blink
 
-    const k = Math.min(canvas.width / CW, canvas.height / CH)
-    if (!(k > 0)) return
+    const m = metrics()
+    if (!m) return
+    const k = m.k
     // 待机幅度按「肉眼能看出来」调：呼吸 1.6%+0.6%、浮动 5px、左右微晃 ±0.6°、横向漂移 2px。
     const breathe = Math.sin(ts / 1450) * 0.016 + Math.sin(ts / 2450) * 0.006
     const bob = Math.sin(ts / 780) * (speaking ? 3.4 : 5.0)
@@ -562,7 +590,7 @@ export function createPet (container) {
 
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-    ctx.setTransform(k, 0, 0, k, (canvas.width - CW * k) / 2, (canvas.height - CH * k) / 2)
+    ctx.setTransform(m.k, 0, 0, m.k, m.ox, m.oy)
     const paint = (img, alpha) => {
       ctx.save()
       ctx.globalAlpha = alpha
@@ -588,25 +616,39 @@ export function createPet (container) {
   }
 
   /**
-   * 某段素材在画布里的落位。缩放对所有人一视同仁：素材本来就是同一块 420×465 画布
-   * 渲出来的角色，按每段自己的 BODY 高度归一化（tap_proud 295 / dance 296 / idle 346）
-   * 等于把蹲下的姿势放大 17%，屏幕上就是「点一下先撑大再缩回」——
-   * 这才是「大小会突然变化」的根。统一用待机那一个缩放，只让位置跟姿势走。
+   * 每段素材的视觉缩放。素材分两批渲染：第二批（dance / sleep / tap_joy / tap_proud …
+   * 共 9 段）本身画得小 14~20%，跟待机一起用统一缩放，换动作时人物就是「突然小一圈」——
+   * 这正是「大小没固定」的来源。判据用「人物本体面积」而不是像素框高度：
+   * 面积对蹲下、举手、头顶星星这些都不敏感（星星不连在人物上，不算进连通面积），
+   * 值 = sqrt(idle 面积 / 该段面积)，线性尺寸比。夹在 0.95~1.22，个别极端帧不外扩。
    */
-  const SCALE = Math.min(1.3, Math.max(0.85, TARGET_H / BODY.idle[3]))
-  // 所有片段共用这一个缩放（= 待机片段的自然大小）：以前是每个片段各自
-  // TARGET_H/BODY[片段][3] 拉满，片段之间差 24%，换动作时肉眼就是「突然变大/变小」。
-  // 现在画布 1:1 画原始像素，角色大小恒定，只有姿势高低变化。
+  const SIZE = {
+    cheer: 1.00, curtsy: 1.02, dance: 1.16, drag: 0.97, idle: 1.00,
+    jump: 1.22, look_around: 1.01, sleep: 1.17, startle: 1.16, stretch: 1.16,
+    tail_slap: 1.14, talking: 1.02, tap: 1.00, tap_joy: 1.19, tap_pout: 1.03,
+    tap_proud: 1.20, tap_shy: 1.00, tap_tickle: 1.00, tap_wave: 1.17, thinking: 1.01,
+    wake_up: 1.01, whale_bubble: 1.16, yawn: 0.99
+  }
+  // 面积判据对「收臂/腾空」这种窄姿势会高估：jump 的投影面积只有 idle 的六成，
+  // 但身高一样，直接按面积放到 1.22 会把人拉成竹竿、头顶还冲出画布。再用身高封顶：
+  // 渲染后主体高不超过 360 画布像素（画布 465、主体目标高 346），只对个别极端段生效。
+  const scaleFor = (clip) => {
+    const s = SIZE[clip] || SIZE.idle
+    const b = BODY[clip]
+    return b ? Math.min(s, 360 / b[3]) : s
+  }
+  const SCALE = scaleFor('idle')
   function geoFor (clip) {
     const n = NORM[clip] || [0, 0, CW, CH]
     const b = BODY[clip] || n
+    const s = scaleFor(clip)
     const bcx = b[0] + b[2] / 2
     const bBot = b[1] + b[3]
-    const dw = n[2] * SCALE, dh = n[3] * SCALE
+    const dw = n[2] * s, dh = n[3] * s
     // 用「人物主体框」(BODY) 对齐，而不是整块内容框(NORM)：各片段的裁剪边距不一样，
     // 按内容框贴底会让脚底落在不同高度 —— 换动作时人物整体上下滑一下，看着就像「变小/掉一下」。
-    let dx = TARGET_CX - (bcx - n[0]) * SCALE
-    const dy = TARGET_BOTTOM - (bBot - n[1]) * SCALE
+    let dx = TARGET_CX - (bcx - n[0]) * s
+    const dy = TARGET_BOTTOM - (bBot - n[1]) * s
     // 气泡这类特效会伸出画布左右：整体挪回画布内，宁可偏一两像素也不裁掉
     if (dx < 0) dx = 0
     else if (dx > CW - dw) dx = Math.max(0, CW - dw)
@@ -638,27 +680,26 @@ export function createPet (container) {
 
   function draw (v) {
     if (!ctx || !usingCanvas) return
-    const k = Math.min(canvas.width / CW, canvas.height / CH)
-    if (!(k > 0)) return
+    const m = metrics()
+    if (!m) return
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-    ctx.setTransform(k, 0, 0, k, (canvas.width - CW * k) / 2, (canvas.height - CH * k) / 2)
+    ctx.setTransform(m.k, 0, 0, m.k, m.ox, m.oy)
     const f = fadePrev
     if (f) {
       const t = Math.min(1, (nowMs() - f.t0) / (f.dur || 150))
       // smootherstep：两端比 smoothstep 更缓，起步和收尾都看不出「开始淡」那一刻
       const e = t * t * t * (t * (t * 6 - 15) + 10)
-      // 真正的交叉淡化：旧层 1-e、新层 e，画面不会整体变虚（背景透出来）也不会双影——
-      // 前提是两层用同一个缩放（SCALE 对所有片段一致），位移按 e 从旧落位滑到新落位。
-      // 双影 = 两层各按各的落位画；这里只差一次平移，淡化过去就是「换了个姿势」。
+      // 真正的交叉淡化：旧层 1-e、新层 e，画面不会整体变虚（背景透出来）也不会双影。
+      // 两段素材的视觉缩放不同（第二批本身画得小），所以尺寸也按 e 插值：两层在同一尺寸上
+      // 交叉，观感是一次平滑的「换姿势」，不会同时出现一大一小两个影子。
       const gt = geoAt(curClip)
       const gp = f.geo || geoAt(f.clip)
-      drawLayer(f.vid, f.clip, 1 - e, gp)
-      drawLayer(v, curClip, e, {
-        n: gt.n, dw: gt.dw, dh: gt.dh,
-        dx: gp.dx + (gt.dx - gp.dx) * e,
-        dy: gp.dy + (gt.dy - gp.dy) * e
-      })
+      const mix = (a, b) => a + (b - a) * e
+      const mw = mix(gp.dw, gt.dw), mh = mix(gp.dh, gt.dh)
+      const mx = mix(gp.dx, gt.dx), my = mix(gp.dy, gt.dy)
+      drawLayer(f.vid, f.clip, 1 - e, { n: gp.n || NORM[f.clip], dw: mw, dh: mh, dx: mx, dy: my })
+      drawLayer(v, curClip, e, { n: gt.n, dw: mw, dh: mh, dx: mx, dy: my })
       if (fadeSamples.length < 40) fadeSamples.push([Math.round((nowMs() - f.t0)), +e.toFixed(3), +(1 - e).toFixed(3)])
       if (t >= 1) {
         try { f.vid.pause() } catch (e) {}
@@ -940,14 +981,21 @@ export function createPet (container) {
    * boot.js 用它算气泡让位：目标只是「头顶露出气泡下沿」，
    * 216 窗口下把小人下移约 30px 就够（只缩 3%），不需要缩掉三分之一。
    */
-  console.warn('[size] 统一缩放 ' + SCALE.toFixed(3) + '（基准 idle 身高 ' + BODY.idle[3] + 'px）')
+  const EFF = Object.keys(SIZE).map(scaleFor)
+  console.warn('[size] 视觉缩放 idle=' + SCALE.toFixed(2) + ' 跳变最大 ' +
+    Math.max.apply(null, EFF).toFixed(2) + '/' + Math.min.apply(null, EFF).toFixed(2) +
+    '（面积归一后再按身高封顶 360，非像素框）')
   window.__petBodyBox = () => {
     const W = container.clientWidth || CW
-    const H = container.clientHeight || CH
+    // h 只算「没加高时」的窗口：让位余量是拿窗口高度当硬上限算的，留白那块不能算进去
+    const H = (container.clientHeight || CH) - padCss
     const k = Math.min(W / CW, H / CH)
     if (!(k > 0)) return null
-    const oy = (H - CH * k) / 2
-    return { w: W, h: H, k: k, top: oy + BODY.idle[1] * k, bottom: oy + TARGET_BOTTOM * k }
+    const oy = (H - CH * k) / 2 + padCss
+    // 头顶跟着当前片段的缩放走：第二批素材放大后头顶更高，气泡让位要按真实头顶算
+    const b = BODY[curClip] || BODY.idle
+    const top = oy + (TARGET_BOTTOM - b[3] * scaleFor(curClip)) * k
+    return { w: W, h: H, k: k, pad: padCss, top: top, bottom: oy + TARGET_BOTTOM * k }
   }
 
   // 宿主探针读取的现场：走 canvas 还是降级 video、当前是哪段、上次交接采了几帧

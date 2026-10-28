@@ -28,6 +28,10 @@ class PetTurn(
     private val onSession: ((String) -> Unit)? = null,
     /** 这一问要带上的图片（宿主上已落盘的绝对路径），交给插件拼在正文后面。 */
     private val attachments: List<String> = emptyList(),
+    /** 待发队列补发时复用当初那句的 requestId：宿主按 id 去重，补发不会变成两轮。 */
+    requestIdOverride: String = "",
+    /** 落盘待发队列要用的 Context；不传就只在内存里重试（旧调用点）。 */
+    private val appCtx: android.content.Context? = null,
 ) {
 
     interface Callback {
@@ -82,6 +86,10 @@ class PetTurn(
     @Volatile
     private var sessionId = ""
 
+    /** 宿主到底收下这句没有。收下了就别再补发（会重复），没收下就必须落盘。 */
+    @Volatile
+    private var delivered = false
+
     /** 本轮真正的落点：拿到 dispatch 回执后才有值，用来把别处会话的 delta 过滤掉。 */
     @Volatile
     private var expectedSession = ""
@@ -123,7 +131,7 @@ class PetTurn(
      * 弱网下最常见的不是「没发出去」，而是「电脑收到了、回执在回来的路上丢了」。
      * 换个 id 重试就会在电脑上多开一轮、把回复念两遍；同一个 id 宿主直接判重复，安全。
      */
-    private val requestId = java.util.UUID.randomUUID().toString()
+    private val requestId = requestIdOverride.ifBlank { java.util.UUID.randomUUID().toString() }
 
     fun start() {
         Thread({ run() }, "pet-turn").apply { isDaemon = true; start() }
@@ -171,7 +179,15 @@ class PetTurn(
 
         var sse: PetClient.Stream? = null
         streamSession = requestedSession.ifBlank { expectedSession }
+        // 预检一次都没通：链路基本是断的，开流只会干等一个读超时（真机 30s「处理中」发呆）。
+        // 直接走轮询的一次性探测，失败就落盘排队，人很快能看见「已排队，联网后自动发出」。
+        val linkSuspect = pre?.ok != true
+        if (linkSuspect) {
+            latency.mark("skipStream", "预检未通，直接轮询")
+            dbg("linkSuspect=true 跳开流")
+        }
         try {
+            if (linkSuspect) throw IllegalStateException("preflight failed")
             // 钉了会话就订阅那只：订阅默认落点会收不到别的会话的增量，只能干等
             sse = client.openStream(streamSession, latency)
         } catch (e: Exception) {
@@ -196,7 +212,7 @@ class PetTurn(
                 sse.close()
             } else {
                 sse.close()
-                if (!cancelled.get() && !ended.get()) pollTurn()
+                if (!cancelled.get() && !ended.get()) pollTurn(fast = linkSuspect)
             }
         } else if (!cancelled.get()) {
             pollTurn()
@@ -386,6 +402,40 @@ class PetTurn(
         }
     }
 
+    /**
+     * 派发彻底失败（重试也没成）时，绝不把这句话扔掉：落盘进待发队列，联网后自动补发。
+     * 返回 true 表示已经排队（上层文案要改成「已排队」而不是「没发出去」）。
+     */
+    private fun queueIfUndelivered(res: PetClient.Result?): Boolean {
+        val ctx = appCtx ?: return false
+        val code = res?.code ?: 0
+        // 4xx（除 408/429）是这句话本身的问题，重发无用；404 由上层改投专属会话处理
+        if (code != 0 && code != 401 && code != 408 && code != 429 && code < 500) return false
+        val n = try {
+            Outbox.add(ctx, text, requestId, requestedSession, attachments, lastError = "code=$code")
+        } catch (_: Exception) {
+            return false
+        }
+        return n > 0
+    }
+
+    /**
+     * 这一轮走完了却没出字、而宿主根本没收到这句话（断网/开流失败/刷新丢的那类）：
+     * 交给界面在一次终局里补一次落盘，宁可慢一点也绝不静默丢句。
+     * 返回 true = 已排队；界面据此显示「已排队，联网后自动发出」而不是「重试」。
+     */
+    fun requeueIfLost(): Boolean {
+        if (delivered) return false
+        val ctx = appCtx ?: return false
+        val n = try {
+            Outbox.add(ctx, text, requestId, requestedSession, attachments, lastError = "本轮无回执")
+        } catch (_: Exception) {
+            return false
+        }
+        if (n > 0) dbg("requeueIfLost 落盘 requestId=$requestId")
+        return n > 0
+    }
+
     private fun dispatchAndWait() {
         if (cancelled.get()) return
         runCatching {
@@ -395,10 +445,12 @@ class PetTurn(
         if (res == null || !res.ok) {
             // 404 = 钉住的那只会话被删了：明说，让上层清掉偏好回到默认落点
             if (res?.code == 404) postError("会话已失效（404），下次自动回到专属会话")
+            else if (queueIfUndelivered(res)) postError("已排队，联网后自动发出")
             else if (res == null) postError("连不上电脑，检查网络")
             else postError("没发出去，重试")
             return
         }
+        delivered = true
         sessionId = resolvedOf(res)
         adoptResolved(sessionId, adoptionBaseline())
         startPollFallback()
@@ -410,26 +462,29 @@ class PetTurn(
         if (!cancelled.get() && !ended.get()) postError(TIMEOUT_TEXT)
     }
 
-    private fun pollTurn() {
+    private fun pollTurn(fast: Boolean = false) {
         if (firstPollSent.compareAndSet(false, true)) {
             latency.mark("pollSent", "baseline cursor=-1")
         }
         // 对齐基线这一步也扛断网：短重试之后还不行，就是真连不上了（后面派发只会更慢，直接说）
         var base: PetClient.Result? = null
-        for (i in 1..3) {
+        val tries = if (fast) 1 else 3
+        for (i in 1..tries) {
             base = try {
                 client.poll("", -1, 0)
             } catch (_: Exception) {
                 null
             }
             if (base?.ok == true) break
-            if (i < 3) {
+            if (i < tries) {
                 status(LINK_LOST_TEXT)
                 sleepQuietly(600L * i)
             }
         }
         if (base?.ok != true) {
-            postError("连不上电脑，检查网络")
+            // 基线都没拿到：这句话八成也没发出去，别让人手动重试，落盘等联网
+            if (queueIfUndelivered(base)) postError("已排队，联网后自动发出")
+            else postError("连不上电脑，检查网络")
             return
         }
         var cursor = base.json?.optInt("cursor", -1) ?: -1
@@ -438,10 +493,12 @@ class PetTurn(
         }
         val res = sendWithRetry(text)
         if (res == null || !res.ok) {
-            if (res == null) postError("连不上电脑，检查网络")
+            if (queueIfUndelivered(res)) postError("已排队，联网后自动发出")
+            else if (res == null) postError("连不上电脑，检查网络")
             else postError("没发出去，重试")
             return
         }
+        delivered = true
         sessionId = resolvedOf(res)
         adoptResolved(sessionId, adoptionBaseline())
         if (sessionId.isBlank()) {
@@ -848,6 +905,7 @@ class PetTurn(
                 emitSentence(text, "recover")
             }
         }
+        dbg("finishOnce delivered=$delivered text=${text.length}")
         main.post { cb.onDone() }
     }
 
