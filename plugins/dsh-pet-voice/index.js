@@ -4456,6 +4456,7 @@ export function apply(ctx, config) {
   /** sessionId -> { at, line } 冷却与去重：一句话不说两遍。 */
   const linkSaid = (SHARED.linkSaid ||= new Map())
   const LINK_COOLDOWN_MS = 120_000
+  const LINK_QUICK_MS = 5_000
   const LINK_WATCH_MS = 30 * 60_000
 
   function readPhoneTouch() {
@@ -4586,6 +4587,35 @@ export function apply(ctx, config) {
     } catch (error) {
       // 旁观只是锦上添花：它出错绝不能影响会话本身的帧
       LOG('旁观气泡失败：', error?.message ?? error)
+    }
+  }
+
+  /**
+   * 手机上刚发生的一件事（排队 / 引导 / 中断）用一句话回执：只在主人开着联动、气泡、
+   * 且这条会话确实是手机碰过的才说，冷却与 [linkLineFor] 共用一份 [linkSaid]。
+   */
+  function linkSay(sessionId, line, tag) {
+    try {
+      const cfg = getPanelConfig()
+      if (!cfg?.link || !cfg?.bubble) return
+      const key = bareSessionId(String(sessionId ?? ''))
+      if (!key || !line) return
+      const touchedAt = Math.max(phoneTouched.get(key) ?? 0, Number(readPhoneTouch()[key] ?? 0))
+      if (!touchedAt || Date.now() - touchedAt > LINK_WATCH_MS) return
+      // 回执与「跑完了」不是一类话：排队/引导/中断本来就是连着发生的，用短冷却，
+      // 别让 120s 的长冷却把紧接着的「记下了」「好，停了」吞掉。
+      const quick = (SHARED.linkQuick ||= new Map())
+      const prev = quick.get(key)
+      if (prev && Date.now() - prev < LINK_QUICK_MS) {
+        netLog('link-skip', { why: 'quick-cooldown', tag })
+        return
+      }
+      quick.set(key, Date.now())
+      netLog('link-line', { event: tag, line })
+      enqueueSay({ text: line, id: `link:${tag}:${key}:${Date.now()}` })
+    } catch (error) {
+      // 回执是锦上添花：出错绝不能影响这次派发/中断本身
+      LOG('联动回执失败：', error?.message ?? error)
     }
   }
 
@@ -5978,6 +6008,12 @@ export function apply(ctx, config) {
         netLog('dispatch-result', { status: result.status, usedSessionId: result.body?.usedSessionId ?? '' })
         // 桌上那只记一下：手机在这条会话里活动过，回来旁观就只说它
         markPhoneSession(result.body?.usedSessionId || body?.sessionId)
+        const used = result.body?.usedSessionId || body?.sessionId
+        if (result.status === 200 && result.body?.queued) {
+          linkSay(used, '电脑上还在跑，这句排上了', 'queued')
+        } else if (result.body?.steered === true) {
+          linkSay(used, '记下了，接着这轮说', 'steer')
+        }
         return sendJson(res, result.status, result.body)
       }
 
@@ -6363,6 +6399,7 @@ export function apply(ctx, config) {
         }
         if (!controller?.cancel) return sendJson(res, 503, { ok: false, error: '宿主缺少 sessionController' })
         const value = controller.cancel({ sessionId })
+        linkSay(sessionId, '好，停了', 'cancel')
         return sendJson(res, 200, { ok: true, value: value ?? null })
       }
 
