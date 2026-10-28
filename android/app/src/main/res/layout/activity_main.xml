@@ -454,7 +454,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:buttonTint="@color/pet_accent"
-                android:text="气泡"
+                android:text="气泡 · 在电脑面板里开关"
                 android:textColor="@color/pet_text"
                 android:textSize="13sp" />
 

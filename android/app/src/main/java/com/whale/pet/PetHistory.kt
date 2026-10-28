@@ -47,6 +47,8 @@ object PetHistory {
         val ts: Long,
         val sid: String = "",
         val atts: List<Att> = emptyList(),
+        /** 宿主转录里的序号；本地新发还没对上宿主时是 0。 */
+        val seq: Long = 0L,
     ) {
         val isMe: Boolean get() = role == ROLE_ME
         val isNote: Boolean get() = role == ROLE_NOTE
@@ -59,7 +61,7 @@ object PetHistory {
         append(context, role, text, emptyList())
 
     /** [atts] = 这条带的图/视频；只发图没写正文时 [text] 是气泡里的替代字。 */
-    fun append(context: Context, role: String, text: String, atts: List<Att>): Long {
+    fun append(context: Context, role: String, text: String, atts: List<Att>, seq: Long = 0L): Long {
         val t = text.trim()
         if (t.isEmpty() && atts.isEmpty()) return 0L
         // 单条太长（整段回复）截到 2000 字，避免 SharedPreferences 无限涨
@@ -72,6 +74,7 @@ object PetHistory {
                 .put("t", body)
                 .put("ts", now)
                 .put("s", PetSettings.chatSession(context))
+            if (seq > 0L) rec.put("q", seq)
             if (atts.isNotEmpty()) {
                 val list = JSONArray()
                 atts.forEach { a ->
@@ -103,7 +106,7 @@ object PetHistory {
                 // 上一只的消息不能混在这一只下面（不带 id 的旧记录留着，免得一升级就清空）
                 val sid = o.optString("s")
                 if (sid.isNotBlank() && want.isNotBlank() && sid != want) continue
-                out.add(Item(o.optString("r", ROLE_PET), text, o.optLong("ts", 0L), sid, atts))
+                out.add(Item(o.optString("r", ROLE_PET), text, o.optLong("ts", 0L), sid, atts, o.optLong("q", 0L)))
             }
             return out
         }
@@ -115,6 +118,71 @@ object PetHistory {
         val all = all(context)
         if (all.size <= limit) return all
         return ArrayList(all.subList(all.size - limit, all.size))
+    }
+
+    /**
+     * 把宿主转录的一页并进来（宿主是真相源，手机只是缓存）。
+     *
+     * 同一句只留一条：宿主序号（q）已经有的跳过；本地刚发、还没对上宿主的那条
+     * （q=0、角色与正文都一样）只补上序号，不另插一行。[older]=这一页比本地更早，
+     * 整页放前面。@return 这次新增的条数
+     */
+    fun mergeHost(context: Context, sid: String, page: List<Item>, older: Boolean): Int {
+        if (page.isEmpty()) return 0
+        synchronized(lock) {
+            val arr = readArray(context)
+            val kept = ArrayList<JSONObject>(arr.length() + page.size)
+            for (i in 0 until arr.length()) arr.optJSONObject(i)?.let { kept.add(it) }
+            val fresh = ArrayList<JSONObject>(page.size)
+            for (item in page) {
+                val q = item.seq
+                if (q <= 0L) continue
+                if (kept.any { it.optLong("q", 0L) == q }) continue
+                if (fresh.any { it.optLong("q", 0L) == q }) continue
+                // 本地刚发那条：角色、正文相同，补序号即可（省一次插行，也不丢附件）
+                val mine = kept.indexOfLast {
+                    it.optLong("q", 0L) == 0L && it.optString("r") == item.role &&
+                        it.optString("t") == item.text && it.optString("s").let { s -> s.isBlank() || s == sid }
+                }
+                if (mine >= 0) {
+                    runCatching { kept[mine].put("q", q) }
+                    continue
+                }
+                val rec = JSONObject()
+                    .put("r", item.role)
+                    .put("t", item.text)
+                    .put("ts", if (item.ts > 0L) item.ts else System.currentTimeMillis())
+                    .put("s", sid)
+                    .put("q", q)
+                fresh.add(rec)
+            }
+            if (fresh.isEmpty()) {
+                persist(context, kept)
+                return 0
+            }
+            val out = ArrayList<JSONObject>(kept.size + fresh.size)
+            if (older) { out.addAll(fresh); out.addAll(kept) } else { out.addAll(kept); out.addAll(fresh) }
+            val trimmed = if (out.size > MAX) ArrayList(out.subList(out.size - MAX, out.size)) else out
+            persist(context, trimmed)
+            return fresh.size
+        }
+    }
+
+    /** 当前会话在本地存着的最早一个宿主序号（0 = 还没跟宿主对上）。 */
+    fun oldestSeq(context: Context): Long {
+        val want = PetSettings.chatSession(context)
+        synchronized(lock) {
+            val arr = readArray(context)
+            var min = 0L
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val sid = o.optString("s")
+                if (sid.isNotBlank() && want.isNotBlank() && sid != want) continue
+                val q = o.optLong("q", 0L)
+                if (q > 0L && (min == 0L || q < min)) min = q
+            }
+            return min
+        }
     }
 
     /** 当前会话一共多少条（用来判「还有更早的」）。 */
@@ -132,6 +200,12 @@ object PetHistory {
             out.add(Att(host, local, a.optString("k", Att.KIND_IMAGE)))
         }
         return out
+    }
+
+    private fun persist(context: Context, items: List<JSONObject>) {
+        val arr = JSONArray()
+        items.forEach { arr.put(it) }
+        prefs(context).edit().putString(KEY, arr.toString()).apply()
     }
 
     /** 清空对话记录。 */

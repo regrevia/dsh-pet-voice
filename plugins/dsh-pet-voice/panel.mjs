@@ -50,6 +50,10 @@ const DEFAULT_CONFIG = {
   peek: 'ask',
   // App 里新建的会话默认用哪一档推理：'' = 跟随桌面端（不干预）
   newReasoning: '',
+  // 手机上那部分非刚需能力：关掉就真的不发、不读、不冒泡，App 以这里为准
+  interact: true,
+  voiceOn: true,
+  link: true,
 }
 
 const TRANSPORTS = ['auto', 'poll']
@@ -336,6 +340,9 @@ function readPanelConfig() {
     newReasoning: REASONING_IDS.includes(String(raw?.newReasoning ?? '').trim())
       ? String(raw.newReasoning).trim()
       : DEFAULT_CONFIG.newReasoning,
+    interact: raw?.interact === undefined ? DEFAULT_CONFIG.interact : raw.interact !== false,
+    voiceOn: raw?.voiceOn === undefined ? DEFAULT_CONFIG.voiceOn : raw.voiceOn !== false,
+    link: raw?.link === undefined ? DEFAULT_CONFIG.link : raw.link !== false,
   }
 }
 
@@ -386,6 +393,9 @@ export function setPanelConfig(patch) {
     next.newReasoning = level
   }
   if (input.bubble !== undefined) next.bubble = input.bubble !== false
+  if (input.interact !== undefined) next.interact = input.interact !== false
+  if (input.voiceOn !== undefined) next.voiceOn = input.voiceOn !== false
+  if (input.link !== undefined) next.link = input.link !== false
   if (input.transport !== undefined) {
     const transport = String(input.transport ?? '').trim()
     if (!TRANSPORTS.includes(transport)) throw new Error('传输方式只能选自动或轮询')
@@ -482,6 +492,9 @@ export function panelState({ origin, pairing } = {}) {
     persona: config.persona,
     maxWords: config.maxWords,
     bubble: config.bubble,
+    interact: config.interact,
+    voiceOn: config.voiceOn,
+    link: config.link,
     transport: config.transport,
     ttsProvider: config.ttsProvider,
     ttsUrl: config.ttsUrl,

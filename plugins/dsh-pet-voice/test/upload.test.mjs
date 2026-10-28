@@ -146,13 +146,13 @@ test('不是仓库：不建 .git，不写文件，图片照常落盘', () => {
 test('composeDispatchText：无附件原样返回，有附件逐行追加', () => {
   assert.equal(composeDispatchText('看看这个', []), '看看这个')
   assert.equal(composeDispatchText('看看这个'), '看看这个')
-  assert.equal(composeDispatchText('看看这个', ['/tmp/a.png']), '看看这个\n\n[图片] /tmp/a.png')
+  assert.equal(composeDispatchText('看看这个', ['/tmp/a.png']), '看看这个\n\n![图片](/tmp/a.png)')
   assert.equal(
     composeDispatchText('看看', ['/tmp/a.png', '/tmp/b.jpg']),
-    '看看\n\n[图片] /tmp/a.png\n[图片] /tmp/b.jpg',
+    '看看\n\n![图片](/tmp/a.png)\n![图片](/tmp/b.jpg)',
   )
   // 空正文时不留前导空行
-  assert.equal(composeDispatchText('', ['/tmp/a.png']), '[图片] /tmp/a.png')
+  assert.equal(composeDispatchText('', ['/tmp/a.png']), '![图片](/tmp/a.png)')
 })
 
 test('normalizeAttachments：相对路径/不存在/超 6 张一律拒绝', () => {

@@ -88,6 +88,18 @@ const TOKEN_PATH = join(HOME_DIR, 'token')
 const STATE_PATH = join(HOME_DIR, 'state.json')
 /** 小爱专用会话（钉死在某个项目里，见 ensurePetSession）。 */
 const PET_SESSION_PATH = join(HOME_DIR, 'pet-session.json')
+// 手机「碰过哪条会话」落盘：热重载会留下多个插件实例，内存里的 Map 各是一份，
+// 派发落在老实例、旁观的帧却由新实例发出，就会误判成「手机没碰过」。落盘一份大家都读得到。
+const PHONE_TOUCH_PATH = join(HOME_DIR, 'phone-touch.json')
+/** 中途进度气泡的判据（纯函数，便于单测）：跑到 PROGRESS_AFTER_MS 之后、这一轮还没给过才给。 */
+const PROGRESS_AFTER_MS = 25_000
+function progressLineFor(startedAt, saidThisTurn, now) {
+  if (saidThisTurn) return ''
+  if (!startedAt) return ''
+  if ((now ?? Date.now()) - startedAt < PROGRESS_AFTER_MS) return ''
+  return '还在跑，再等等'
+}
+
 /** 单测用 DSH_PET_VOICE_PET_SESSION 指到临时文件，别动用户真正的专属会话绑定。 */
 const petSessionFile = () => process.env.DSH_PET_VOICE_PET_SESSION || PET_SESSION_PATH
 
@@ -2057,10 +2069,91 @@ function inboxOfSession(sessionId) {
         .map((part) => String(part.text ?? ''))
         .join('\n')
         .trim()
-      if (text) out.push({ kind, text, at: toMs(item?.at) || 0 })
+      if (text) out.push({ kind, id: String(item?.id ?? ''), text, at: toMs(item?.at) || 0 })
     }
   }
   return out
+}
+
+/**
+ * 活在 agent 身上的队列：投影只是镜像，真正能操作的是宿主 `agent.inbox`。
+ * `next-step` 是插进下一步的话，`next-turn` 是等一整轮的话——和桌面端「待输入」是同一份。
+ */
+async function liveInbox(ctx, sessionId) {
+  const controller = ctx.get?.('sessionController')
+  if (typeof controller?.resolveAgent !== 'function') return null
+  let agent
+  try {
+    agent = (await controller.resolveAgent(sessionId))?.agent
+  } catch {
+    return null
+  }
+  const inbox = agent?.inbox
+  if (!inbox) return null
+  const rows = []
+  for (const [kind, list] of [
+    ['next-step', Array.isArray(inbox.nextStep) ? inbox.nextStep : []],
+    ['next-turn', Array.isArray(inbox.nextTurn) ? inbox.nextTurn : []],
+  ]) {
+    for (const item of list) {
+      const text = (Array.isArray(item?.content) ? item.content : [])
+        .filter((part) => part?.type === 'text')
+        .map((part) => String(part.text ?? ''))
+        .join('\n')
+        .trim()
+      if (text) rows.push({ kind, id: String(item?.id ?? ''), text, at: toMs(item?.at) || 0 })
+    }
+  }
+  return rows
+}
+
+/**
+ * 队列操作：撤掉一条 / 上移一格 / 下移一格。
+ * 桌面端点的是同一套 `agent.inbox`：`remove(id)` 与 `splice(kind, start, count, items)`。
+ */
+async function inboxActionRoute(ctx, body) {
+  const sessionId = String(body?.sessionId ?? '').trim()
+  const action = String(body?.action ?? '').trim()
+  const id = String(body?.id ?? '').trim()
+  if (!sessionId || !['remove', 'up', 'down'].includes(action) || !id) {
+    return { status: 400, body: { ok: false, error: '参数不对' } }
+  }
+  const rows = await liveInbox(ctx, sessionId)
+  if (rows === null) return { status: 503, body: { ok: false, error: '宿主没给出会话接口' } }
+  const target = rows.find((row) => row.id === id)
+  // 已经轮到它跑了（或桌面刚撤掉）：不是错，回最新队列让手机自己跟上
+  if (!target) return { status: 409, body: { ok: false, error: '这条已经不在队列里', inbox: rows } }
+  const controller = ctx.get?.('sessionController')
+  let agent
+  try {
+    agent = (await controller.resolveAgent(sessionId))?.agent
+  } catch {
+    agent = undefined
+  }
+  const inbox = agent?.inbox
+  if (!inbox || typeof inbox.remove !== 'function') {
+    return { status: 503, body: { ok: false, error: '宿主没给出队列接口' } }
+  }
+  try {
+    if (action === 'remove') {
+      inbox.remove(id)
+    } else {
+      const list = target.kind === 'next-step' ? inbox.nextStep : inbox.nextTurn
+      const from = list.findIndex((item) => String(item?.id ?? '') === id)
+      const to = action === 'up' ? from - 1 : from + 1
+      if (from < 0 || to < 0 || to >= list.length) {
+        return { status: 409, body: { ok: false, error: '已经到头了', inbox: rows } }
+      }
+      const next = list.slice()
+      const [moved] = next.splice(from, 1)
+      next.splice(to, 0, moved)
+      inbox.splice(target.kind, 0, list.length, next)
+    }
+  } catch (error) {
+    LOG('队列操作失败：', error?.message ?? error)
+    return { status: 500, body: { ok: false, error: '队列没改成' } }
+  }
+  return { status: 200, body: { ok: true, inbox: (await liveInbox(ctx, sessionId)) ?? [] } }
 }
 
 /**
@@ -2132,6 +2225,8 @@ export const __browseInternals = {
 }
 
 /** 派发落点相关（单测用，见 plugins/dsh-pet-voice/test/dispatch-target.test.mjs）。 */
+export const __inboxInternals = { liveInbox, inboxActionRoute }
+
 export const __dispatchInternals = {
   publicTurns,
   targetSessionId,
@@ -2198,6 +2293,8 @@ export const __ttsInternals = {
   DEFAULT_VOICE: TTS_DEFAULT_VOICE,
   VOICES: TTS_VOICES,
 }
+
+export const __linkInternals = { progressLineFor, PROGRESS_AFTER_MS }
 
 export const __uploadInternals = {
   extFor,
@@ -3124,6 +3221,18 @@ function isMissingSessionError(error) {
 }
 
 /**
+ * 这只会话归别的调度器管（Team 队员的子代理会话）。
+ *
+ * 宿主对这类会话直接拒收 prompt——不是网络问题，重发多少次都一样。以前一律回 502，
+ * App 按「可重试」把它塞进待发队列，退避几十次之后那句话无声消失；回 409 才会被判成
+ * 永久失败，界面上留一句「这个会话不能从手机发」。
+ */
+function isForeignSessionError(error) {
+  return /owned by subagent|subagent routing|not a pet session|会话被别的/i
+    .test(String(error?.message ?? error ?? ''))
+}
+
+/**
  * 这只会话宿主和磁盘认不认识：list() → controller.get() → 投影缓存/转录。
  * 任何一层认得就算在（宁可让 prompt 去撞一次，也别把能用的会话判死）。
  */
@@ -3534,8 +3643,14 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
   const prevOrigin = turnKeys.map((key) => turnOrigin?.get(key)).find(Boolean) ?? ''
   // 这一句是不是排在电脑那轮后面：回执里直接带出去，别指望 App 一定收到刚才那帧 queued
   let queuedBehindDesktop = false
+  // 主人在手机上按「引导」：跟桌面端一模一样——插进正在跑的这一轮（宿主 agent.steer
+  // 落进 next-step），**不掐断**。以前这里走的是「掐掉上一轮再开新的一轮」，表现是
+  // 这轮的工具调用被打成 aborted、回复断在半截，App 只能显示「没收到回复」。
+  const steerInto = prevRunning && body?.steer === true
   if (prevRunning) {
-    if (prevAbort) {
+    if (steerInto) {
+      netLog('dispatch-steer', { sessionId })
+    } else if (prevAbort) {
       // 上一句也是手机派的：掐掉，主人再开口就是要新的那句
       netLog('dispatch-interrupt', { sessionId })
       try { prevAbort.abort() } catch { /* 已经结束 */ }
@@ -3564,19 +3679,22 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
       try { deps.emit(sessionId, 'queued', { ahead: 'desktop' }) } catch { /* 推送失败不影响排队 */ }
     }
   }
-  // 认领记号：该会话下一次 turn/start 就是这一句的轮次
-  if (awaitPetTurn) for (const key of turnKeys) awaitPetTurn.set(key, Date.now())
+  // 认领记号：该会话下一次 turn/start 就是这一句的轮次。引导不开新轮，不能认领
+  // （认领了会一直挂着，把以后电脑端的一轮误标成手机轮，App 就把回复整帧丢掉）。
+  if (!steerInto && awaitPetTurn) for (const key of turnKeys) awaitPetTurn.set(key, Date.now())
   const ac = new AbortController()
   // 排队时前面那轮可能还要跑好几分钟：时长给足，别把还在队里的这句 abort 成「没回复」
   const acTimer = setTimeout(() => { try { ac.abort() } catch { /* ignore */ } }, 300_000)
-  for (const key of turnKeys) liveAbort.set(key, ac)
+  // 引导不登记 liveAbort：登记会覆盖正在跑那轮的中断把手，finally 一清就等于把它弄丢，
+  // 下次派发既掐不掉它、也认不出它是谁的轮。
+  if (!steerInto) for (const key of turnKeys) liveAbort.set(key, ac)
   // 人设/长度档/旁听材料挂进这条会话的 system prompt：只有模型看得见，不进对话记录。
   await syncHiddenPrompt(ctx, sessionId, config)
   const prompt = controller.prompt(
     {
       requestId: rid || randomBytes(8).toString('hex'),
       sessionId,
-      mode: 'queue',
+      mode: steerInto ? 'steer' : 'queue',
       content: [{ type: 'text', text: buildDispatchPrompt(promptText) }],
       clientTimeZone: tzOf(req),
     },
@@ -3597,6 +3715,10 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
     // 失败就别留去重记录，否则用户重发同一句会被当成「已收到」而永远落不了地。
     if (rid) DISPATCH_SEEN.delete(rid)
     forgetClaim()
+    if (first.error && isForeignSessionError(first.error)) {
+      // 永久失败：回 4xx 让 App 别退避重发（重发不会变好，只会拖到用户以为发出了）。
+      return { status: 409, body: { ok: false, error: '这个会话不能从手机发' } }
+    }
     if (isMissingSessionError(first.error)) {
       // 只有 prompt 明说「不存在」才 404：App 见 404 会清掉本地钉的会话，不能乱报。
       return { status: 404, body: { ok: false, error: `会话不存在：${sessionId}` } }
@@ -3613,9 +3735,9 @@ async function dispatchToSessionInner(ctx, state, body, req, deps) {
       }
       deps.emit(sessionId, 'error', { message: String(error?.message ?? error) })
     })
-    return { status: 202, body: { ok: true, accepted: true, sessionId, usedSessionId: sessionId, attachments: attachmentPaths.length, queued: queuedBehindDesktop } }
+    return { status: 202, body: { ok: true, accepted: true, sessionId, usedSessionId: sessionId, attachments: attachmentPaths.length, queued: queuedBehindDesktop, steered: steerInto } }
   }
-  return { status: 200, body: { ok: true, accepted: true, sessionId, usedSessionId: sessionId, value: first.value ?? null, attachments: attachmentPaths.length, queued: queuedBehindDesktop } }
+  return { status: 200, body: { ok: true, accepted: true, sessionId, usedSessionId: sessionId, value: first.value ?? null, attachments: attachmentPaths.length, queued: queuedBehindDesktop, steered: steerInto } }
 }
 
 /* ------------------------------------------------------------------ */
@@ -4246,6 +4368,8 @@ export function apply(ctx, config) {
     // 每条帧都带上 sessionId：SSE 是广播的，客户端靠它把别的会话的帧滤掉
     const wire = { ...(payload ?? {}), sessionId, seq: buf.seq }
     buf.frames.push({ seq: buf.seq, event, data: wire })
+    // 桌宠旁观只认会话事件，不读正文；有开关兜着，出错也不许影响这一帧
+    if (event === 'end' || event === 'tool') observeFrame(sessionId, event, wire)
     if (buf.frames.length > BUFFER_MAX) buf.frames.splice(0, buf.frames.length - BUFFER_MAX)
     const wake = [...buf.waiters]
     buf.waiters.clear()
@@ -4279,8 +4403,20 @@ export function apply(ctx, config) {
 
   const SAY_MAX = 20
   const SAY_MAX_CHARS = 300
-  const sayQueue = []
-  let saySeq = 0
+  // 队列与游标挂在 SHARED 上：热重载/插件重启不该让手机手里的 cursor 突然失效，
+  // 更不该把还没播的句子一起丢掉（接待里「播报突然没了」就是这么来的）。
+  const sayQueue = (SHARED.sayQueue ||= [])
+  const sayState = (SHARED.sayState ||= { seq: 0 })
+
+  /**
+   * 递增值从毫秒时间戳起跳：进程重启后游标只增不减，手机那边 `since=<旧值>`
+   * 不会因为序号回到 0 而永远取不到新句子。
+   */
+  function nextSaySeq() {
+    const now = Date.now()
+    sayState.seq = Math.max(sayState.seq, now) + 1
+    return sayState.seq
+  }
 
   const sayItem = (item) => ({
     seq: item.seq,
@@ -4289,6 +4425,169 @@ export function apply(ctx, config) {
     at: item.at,
     id: item.id,
   })
+
+  /** 同一句话只念一次（重试请求不该让手机重复播报）。返回 {item, deduped}。 */
+  function enqueueSay({ text, voice = '', id = '' }) {
+    const raw = stripForSpeech(String(text ?? '')).trim()
+    if (!raw) return null
+    const truncated = raw.length > SAY_MAX_CHARS
+    const body = truncated ? raw.slice(0, SAY_MAX_CHARS) : raw
+    const v = TTS_VOICES.some((item) => item.id === voice) ? String(voice) : TTS_DEFAULT_VOICE
+    if (id) {
+      const same = sayQueue.find((item) => item.id === id)
+      if (same) return { item: same, deduped: true, truncated }
+    }
+    const item = { seq: nextSaySeq(), text: body, voice: v, id, at: new Date().toISOString() }
+    sayQueue.push(item)
+    let dropped = 0
+    while (sayQueue.length > SAY_MAX) {
+      sayQueue.shift()
+      dropped += 1
+    }
+    broadcastSay(item)
+    LOG(`播报入队 #${item.seq}：${body.length} 字（队列 ${sayQueue.length}${dropped ? `，挤出 ${dropped} 条` : ''}）`)
+    return { item, dropped, truncated }
+  }
+
+  /* ---------- 桌宠旁观：只跟着手机这条会话说一两句 ---------- */
+
+  /** sessionId -> 手机最近碰过它的时刻（只对它说话，别插嘴别人的会话）。 */
+  const phoneTouched = (SHARED.phoneTouched ||= new Map())
+  /** sessionId -> { at, line } 冷却与去重：一句话不说两遍。 */
+  const linkSaid = (SHARED.linkSaid ||= new Map())
+  const LINK_COOLDOWN_MS = 120_000
+  const LINK_WATCH_MS = 30 * 60_000
+
+  function readPhoneTouch() {
+    try {
+      if (!existsSync(PHONE_TOUCH_PATH)) return {}
+      const raw = JSON.parse(readFileSync(PHONE_TOUCH_PATH, 'utf8'))
+      return raw && typeof raw === 'object' ? raw : {}
+    } catch {
+      return {}
+    }
+  }
+
+  /**
+   * 一轮跑过 [PROGRESS_AFTER_MS] 还没收尾，就在手机上冒一句「还在跑」。
+   *
+   * **按时间触发，不按事件**：一个长工具可能只有「开始」一个帧，等它的下一个帧就等于永远等不到。
+   * 计时器回调是独立故障域，异常必须自己兜住；收尾时 [linkLineFor] 会清掉它。
+   */
+  function armProgressBubble(key, startedAt) {
+    try {
+      const prev = linkTimers.get(key)
+      if (prev) clearTimeout(prev)
+      const timer = setTimeout(() => {
+        try {
+          linkTimers.delete(key)
+          if (linkTurnStart.get(key) !== startedAt) return
+          const cfg = getPanelConfig()
+          if (!cfg?.link || !cfg?.bubble) return
+          const line = progressLineFor(startedAt, linkProgress.has(key), Date.now())
+          if (!line) return
+          linkProgress.set(key, Date.now())
+          netLog('link-line', { event: 'timer', progress: true, line })
+          enqueueSay({ text: line, id: `link-progress:${key}:${startedAt}` })
+        } catch (error) {
+          LOG('进度气泡失败：', error?.message ?? error)
+        }
+      }, PROGRESS_AFTER_MS)
+      timer.unref?.()
+      linkTimers.set(key, timer)
+    } catch (error) {
+      LOG('进度计时器起不来：', error?.message ?? error)
+    }
+  }
+
+  function markPhoneSession(sessionId) {
+    const key = bareSessionId(String(sessionId ?? ''))
+    if (!key) return
+    phoneTouched.set(key, Date.now())
+    // 派活即算这一轮开始：进度气泡用它判断「已经跑了有一会儿」，不需要猜宿主内部状态
+    const startedAt = Date.now()
+    linkTurnStart.set(key, startedAt)
+    linkProgress.delete(key)
+    armProgressBubble(key, startedAt)
+    try {
+      // 只留最近 30 分钟的条目，文件不会越滚越大
+      const now = Date.now()
+      const kept = {}
+      for (const [k, v] of Object.entries(readPhoneTouch())) {
+        if (now - Number(v ?? 0) <= LINK_WATCH_MS) kept[k] = Number(v)
+      }
+      kept[key] = now
+      writeFileSync(PHONE_TOUCH_PATH, JSON.stringify(kept))
+    } catch {
+      /* 落盘失败不影响派发 */
+    }
+  }
+
+  /** 这一轮跑过工具没有：跑过才说「跑完了」，纯聊天不打断。 */
+  const linkTools = (SHARED.linkTools ||= new Map())
+  /** sessionId -> 这一轮开始跑的粗略时刻（派活即记，用来判断「跑了有一会儿了」）。 */
+  const linkTurnStart = (SHARED.linkTurnStart ||= new Map())
+  /** sessionId -> 这一轮是否已经给过「还在跑」的进度气泡（一轮只给一次）。 */
+  const linkProgress = (SHARED.linkProgress ||= new Map())
+  /** sessionId -> 进度气泡的计时器：一轮跑过 25 秒还没收尾才用，收尾/换轮要清掉。 */
+  const linkTimers = (SHARED.linkTimers ||= new Map())
+
+
+  function linkLineFor(sessionId, event, wire) {
+    const cfg = getPanelConfig()
+    // 主人关了「桌宠联动」或「气泡」，服务端就不该再往手机上送这种句子
+    if (!cfg?.link || !cfg?.bubble) {
+      netLog('link-skip', { why: 'panel-off' })
+      return null
+    }
+    const key = bareSessionId(sessionId)
+    if (!key) return null
+    const touchedAt = Math.max(phoneTouched.get(key) ?? 0, Number(readPhoneTouch()[key] ?? 0))
+    if (!touchedAt || Date.now() - touchedAt > LINK_WATCH_MS) {
+      netLog('link-skip', { why: 'not-touched', event })
+      return null
+    }
+    if (event === 'tool') {
+      linkTools.set(key, Date.now())
+      return null
+    }
+    if (event !== 'end') return ''
+    const usedTool = (linkTools.get(key) ?? 0) > 0
+    linkTools.delete(key)
+    linkTurnStart.delete(key)
+    linkProgress.delete(key)
+    const timer = linkTimers.get(key)
+    if (timer) clearTimeout(timer)
+    linkTimers.delete(key)
+    const reason = String(wire?.reason ?? '')
+    // 宿主收尾给的是 kind：stop/length 是正常收尾，别的（aborted/error/cancel…）都算断在半路
+    const normalEnd = !reason || reason === 'stop' || reason === 'length'
+    const line = !normalEnd
+      ? '这轮断在半路，回去看看'
+      : (usedTool ? '跑完了，结果在会话里' : '')
+    if (!line) return null
+    const prev = linkSaid.get(key)
+    // 冷却只按时间算：同一句话隔久了照样能说，不能因为「上次说过这句」就哑掉
+    if (prev && Date.now() - prev.at < LINK_COOLDOWN_MS) {
+      netLog('link-skip', { why: 'cooldown', wait: LINK_COOLDOWN_MS - (Date.now() - prev.at) })
+      return ''
+    }
+    netLog('link-line', { event, reason, usedTool, line })
+    return { line, progress: false }
+  }
+
+  function observeFrame(sessionId, event, wire) {
+    try {
+      const said = linkLineFor(sessionId, event, wire)
+      if (!said?.line) return
+      const key = bareSessionId(sessionId)
+      if (!said.progress) linkSaid.set(key, { at: Date.now(), line: said.line })
+      enqueueSay({ text: said.line, id: `link:${key}:${Date.now()}` })
+    } catch (error) {
+      // 旁观只是锦上添花：它出错绝不能影响会话本身的帧
+      LOG('旁观气泡失败：', error?.message ?? error)
+    }
+  }
 
   /** say 是全局播报：所有 SSE 订阅者都推一遍，不分会话。 */
   function broadcastSay(item) {
@@ -5259,6 +5558,11 @@ export function apply(ctx, config) {
     const snapshot = async () => ({
       ...(await panelState({ origin, pairing: await pairInfo(origin) })),
       pluginVersion: PLUGIN_VERSION,
+      // 手机上那几件非刚需的活，开关在桌面端面板里；App 只照这个值做，不自己留一份
+      features: (() => {
+        const cfg = getPanelConfig()
+        return { interact: cfg.interact, voice: cfg.voiceOn, link: cfg.link, bubble: cfg.bubble }
+      })(),
       ttsReady: ttsReady(normalizeTtsProvider(getPanelConfig().ttsProvider)),
       localVoices: normalizeTtsProvider(getPanelConfig().ttsProvider) === 'local' ? localVoices() : [],
       asrReady: asrReady(),
@@ -5555,6 +5859,16 @@ export function apply(ctx, config) {
               hasPersona: Boolean(String(config.persona ?? '').trim()),
             }
           })(),
+          // 手机上那几件非刚需的活：只认面板里的开关，App 不做第二份判断
+          features: (() => {
+            const config = getPanelConfig()
+            return {
+              interact: config.interact !== false,
+              voice: config.voiceOn !== false,
+              link: config.link !== false,
+              bubble: config.bubble !== false,
+            }
+          })(),
           // 小爱技能入口：给页面/自测脚本一个可发现的地址（不含 secret）
           xiaoai: {
             endpoint: `${API}/xiaoai`,
@@ -5614,6 +5928,23 @@ export function apply(ctx, config) {
         }
       }
 
+      if (route === 'inbox' && method === 'GET') {
+        const sid = url.searchParams.get('sessionId') ?? ''
+        const live = await liveInbox(ctx, sid)
+        return sendJson(res, 200, { ok: true, inbox: live ?? inboxOfSession(sid) })
+      }
+
+      if (route === 'inbox' && method === 'POST') {
+        let body = {}
+        try {
+          body = JSON.parse(String((await readBody(req, 16 * 1024)) ?? '{}') || '{}')
+        } catch {
+          return sendJson(res, 400, { ok: false, error: 'bad json' })
+        }
+        const out = await inboxActionRoute(ctx, body)
+        return sendJson(res, out.status, out.body)
+      }
+
       if (route === 'goals' && method === 'GET') {
         try {
           return sendJson(res, 200, goalsOfSession(url.searchParams.get('sessionId') ?? ''))
@@ -5643,6 +5974,8 @@ export function apply(ctx, config) {
         // 派发细节（存在性判定、去重、prompt）都在 dispatchToSession 里，单测直接调它。
         const result = await dispatchToSession(ctx, state, body, req, { emit, liveTurns, liveAbort, awaitPetTurn, turnOrigin, armEndFallback })
         netLog('dispatch-result', { status: result.status, usedSessionId: result.body?.usedSessionId ?? '' })
+        // 桌上那只记一下：手机在这条会话里活动过，回来旁观就只说它
+        markPhoneSession(result.body?.usedSessionId || body?.sessionId)
         return sendJson(res, result.status, result.body)
       }
 
@@ -6049,41 +6382,15 @@ export function apply(ctx, config) {
 
       if (route === 'say' && method === 'POST') {
         const body = await readJson(req)
-        const raw = stripForSpeech(String(body.text ?? '')).trim()
-        if (!raw) return sendJson(res, 400, { ok: false, error: 'text 为空' })
-        const truncated = raw.length > SAY_MAX_CHARS
-        const text = truncated ? raw.slice(0, SAY_MAX_CHARS) : raw
-        const voice = TTS_VOICES.some((item) => item.id === body.voice)
-          ? String(body.voice)
-          : TTS_DEFAULT_VOICE
         const id = typeof body.id === 'string' ? body.id.slice(0, 64) : ''
-        // 同一个 id 只念一次：重试请求不会让手机重复播报。
-        if (id) {
-          const same = sayQueue.find((item) => item.id === id)
-          if (same) {
-            return sendJson(res, 200, {
-              ok: true,
-              seq: same.seq,
-              queued: sayQueue.length,
-              deduped: true,
-              ...(truncated ? { truncated: true } : {}),
-            })
-          }
-        }
-        saySeq += 1
-        const item = { seq: saySeq, text, voice, id, at: new Date().toISOString() }
-        sayQueue.push(item)
-        let dropped = 0
-        while (sayQueue.length > SAY_MAX) {
-          sayQueue.shift()
-          dropped += 1
-        }
-        broadcastSay(item)
-        LOG(`播报入队 #${item.seq}：${text.length} 字（队列 ${sayQueue.length}${dropped ? `，挤出 ${dropped} 条` : ''}）`)
+        const put = enqueueSay({ text: body.text, voice: body.voice, id })
+        if (!put) return sendJson(res, 400, { ok: false, error: 'text 为空' })
+        const { item, dropped = 0, truncated = false } = put
         return sendJson(res, 200, {
           ok: true,
           seq: item.seq,
           queued: sayQueue.length,
+          ...(put.deduped ? { deduped: true } : {}),
           ...(truncated ? { truncated: true, maxChars: SAY_MAX_CHARS } : {}),
           ...(dropped ? { dropped } : {}),
         })
@@ -6094,13 +6401,17 @@ export function apply(ctx, config) {
         const rawSince = url.searchParams.get('since')
         const since = rawSince === null ? -1 : Number(rawSince)
         if (!Number.isFinite(since) || since < 0) {
-          return sendJson(res, 200, { ok: true, items: [], cursor: saySeq })
+          // 对齐不能把「已经排着队、还没播过」的句子一起丢掉：
+          // 游标停在最老一条之前，下一轮就会把它们正常取走。
+          const oldest = sayQueue.length ? sayQueue[0].seq : 0
+          const cursor = oldest > 0 ? oldest - 1 : sayState.seq
+          return sendJson(res, 200, { ok: true, items: [], cursor })
         }
         const items = sayQueue.filter((item) => item.seq > since).slice(-SAY_MAX).map(sayItem)
         return sendJson(res, 200, {
           ok: true,
           items,
-          cursor: items.length ? items[items.length - 1].seq : Math.max(since, saySeq),
+          cursor: items.length ? items[items.length - 1].seq : Math.max(since, sayState.seq),
         })
       }
 

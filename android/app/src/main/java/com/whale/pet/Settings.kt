@@ -143,6 +143,8 @@ object PetSettings {
     private const val K_PINNED = "pinned_title"
     private const val K_CHAT_SESSION = "chat_session"
     /** 上一次看到的「电脑上开着哪只对话」：用来发现桌面端换过会话。 */
+    private const val K_FEAT = "host_features"
+    private const val K_FEAT_AT = "host_features_at"
     private const val K_PENDING_APK = "pending_apk_path"
     private const val K_PENDING_CODE = "pending_apk_code"
     private const val K_PENDING_NAME = "pending_apk_name"
@@ -276,6 +278,36 @@ object PetSettings {
 
     fun clearChatSession(context: Context) {
         prefs(context).edit().remove(K_CHAT_SESSION).apply()
+    }
+
+    /* ---------------- 桌面面板的开关：App 只照做，不自己再存一份判断 ---------------- */
+
+    /**
+     * 面板里那几个开关（摸头互动 / 语音对话 / 看会话冒泡 / 气泡）。
+     * 存成一行 `interact=1,voice=1,link=1,bubble=0`：App 重启也知道上次的状态，
+     * 拿不到宿主状态时按默认全开，别把功能悄悄关掉。
+     */
+    fun feature(context: Context, key: String): Boolean {
+        val raw = prefs(context).getString(K_FEAT, "").orEmpty()
+        if (raw.isBlank()) return true
+        for (part in raw.split(',')) {
+            val kv = part.split('=', limit = 2)
+            if (kv.size == 2 && kv[0] == key) return kv[1] != "0"
+        }
+        return true
+    }
+
+    /** 面板还没回话时 App 也不会把功能关掉：只在真的读到值时才覆盖。 */
+    fun saveFeatures(context: Context, features: org.json.JSONObject?) {
+        if (features == null) return
+        fun one(key: String, hostKey: String = key, def: Boolean = true): Boolean =
+            if (features.has(hostKey)) features.optBoolean(hostKey, def) else feature(context, key)
+        val line = "interact=${if (one("interact")) 1 else 0}," +
+            "voice=${if (one("voice")) 1 else 0}," +
+            "link=${if (one("link")) 1 else 0}," +
+            "bubble=${if (one("bubble")) 1 else 0}"
+        if (line == prefs(context).getString(K_FEAT, "")) return
+        prefs(context).edit().putString(K_FEAT, line).putLong(K_FEAT_AT, System.currentTimeMillis()).apply()
     }
 
     /** 桌面端上一次停在哪只对话上（只用来发现「换过了」，不参与派发）。 */

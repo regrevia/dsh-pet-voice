@@ -89,6 +89,8 @@ class PetTurn(
     /** 宿主到底收下这句没有。收下了就别再补发（会重复），没收下就必须落盘。 */
     @Volatile
     private var delivered = false
+    /** 宿主明确拒收（4xx，不是网络问题）：重发不会变好，界面直说并停手。 */
+    @Volatile private var permanent = false
 
     /** 本轮真正的落点：拿到 dispatch 回执后才有值，用来把别处会话的 delta 过滤掉。 */
     @Volatile
@@ -406,6 +408,13 @@ class PetTurn(
      * 派发彻底失败（重试也没成）时，绝不把这句话扔掉：落盘进待发队列，联网后自动补发。
      * 返回 true 表示已经排队（上层文案要改成「已排队」而不是「没发出去」）。
      */
+    /** 拒收原因说人话：这几种重发都不会变好。 */
+    private fun rejectedText(code: Int): String = when (code) {
+        409 -> "这个会话不能从手机发"
+        401, 403 -> "电脑那边没认出这台手机"
+        else -> "没发出去，重试"
+    }
+
     private fun queueIfUndelivered(res: PetClient.Result?): Boolean {
         val ctx = appCtx ?: return false
         val code = res?.code ?: 0
@@ -426,6 +435,9 @@ class PetTurn(
      */
     /** 宿主到底收没收到这一轮（回执/回答都算）。界面据此决定要不要留着落盘凭据。 */
     fun isDelivered(): Boolean = delivered
+
+    /** 宿主拒收（不是网络问题）：同一句再发多少次都一样，界面据此清凭据、不给重试。 */
+    fun isPermanent(): Boolean = permanent
 
     fun requeueIfLost(): Boolean {
         if (delivered) return false
@@ -450,7 +462,11 @@ class PetTurn(
             if (res?.code == 404) postError("会话已失效（404），下次自动回到专属会话")
             else if (queueIfUndelivered(res)) postError("已排队，联网后自动发出")
             else if (res == null) postError("连不上电脑，检查网络")
-            else postError("没发出去，重试")
+            else {
+                val code = res.code
+                if (code != 408 && code != 429 && code in 400..499) permanent = true
+                postError(rejectedText(code))
+            }
             return
         }
         delivered = true
@@ -498,7 +514,11 @@ class PetTurn(
         if (res == null || !res.ok) {
             if (queueIfUndelivered(res)) postError("已排队，联网后自动发出")
             else if (res == null) postError("连不上电脑，检查网络")
-            else postError("没发出去，重试")
+            else {
+                val code = res.code
+                if (code != 408 && code != 429 && code in 400..499) permanent = true
+                postError(rejectedText(code))
+            }
             return
         }
         delivered = true

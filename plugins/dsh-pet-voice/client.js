@@ -203,6 +203,9 @@ window.__ModuleLoader__.load({
       peek: s.peek ?? 'ask',
       newReasoning: s.newReasoning ?? '',
       bubble: s.bubble !== false,
+      interact: s.interact !== false,
+      voiceOn: s.voiceOn !== false,
+      link: s.link !== false,
     })
 
     /** 服务器转发的三个字段：账号、公网地址、私钥。 */
@@ -786,6 +789,60 @@ window.__ModuleLoader__.load({
                 },
               },
               h('span', { style: S.knob(draft.bubble) }),
+            ),
+          ),
+          h(
+            'div',
+            { style: { ...S.row, ...S.rowBorder, justifyContent: 'space-between' } },
+            h('span', { style: S.label }, '摸头互动'),
+            h(
+              'button',
+              {
+                style: S.switch(draft.interact),
+                'aria-label': '摸头互动',
+                onClick: () => {
+                  const next = !draft.interact
+                  field('interact')(next)
+                  save({ interact: next })
+                },
+              },
+              h('span', { style: S.knob(draft.interact) }),
+            ),
+          ),
+          h(
+            'div',
+            { style: { ...S.row, ...S.rowBorder, justifyContent: 'space-between' } },
+            h('span', { style: S.label }, '看会话冒泡'),
+            h(
+              'button',
+              {
+                style: S.switch(draft.link),
+                'aria-label': '看会话冒泡',
+                onClick: () => {
+                  const next = !draft.link
+                  field('link')(next)
+                  save({ link: next })
+                },
+              },
+              h('span', { style: S.knob(draft.link) }),
+            ),
+          ),
+          h(
+            'div',
+            { style: { ...S.row, ...S.rowBorder, justifyContent: 'space-between' } },
+            h('span', { style: S.label }, '语音对话'),
+            h(
+              'button',
+              {
+                style: S.switch(draft.voiceOn),
+                'aria-label': '语音对话',
+                onClick: () => {
+                  const next = !draft.voiceOn
+                  field('voiceOn')(next)
+                  save({ voiceOn: next })
+                },
+              },
+              h('span', { style: S.knob(draft.voiceOn) }),
             ),
           ),
         ),

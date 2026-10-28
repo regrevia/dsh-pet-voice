@@ -409,7 +409,9 @@ class MainActivity : Activity() {
         wakeCheck.isChecked = cfg.wakeEnabled
         wakeHint.visibility = if (cfg.wakeEnabled) View.VISIBLE else View.GONE
         autoStartCheck.isChecked = cfg.autoStart
-        bubbleCheck.isChecked = cfg.bubble
+        // 气泡开关只有桌面面板那一份是真的：这里只照着显示，不让两边各存一套
+        bubbleCheck.isEnabled = false
+        bubbleCheck.isChecked = PetSettings.feature(this, "bubble")
         if (wakeNameInput.text.isNullOrBlank()) wakeNameInput.setText(cfg.wakeName)
         spriteSpinner.setSelection(
             PetConfig.SPRITE_SIZES.indexOfFirst { it.first == cfg.spriteSize }.coerceAtLeast(0),
@@ -591,7 +593,7 @@ class MainActivity : Activity() {
             preset = presetKeys[presetSpinner.selectedItemPosition.coerceIn(0, presetKeys.size - 1)] as String,
             wakeEnabled = wakeCheck.isChecked,
             autoStart = autoStartCheck.isChecked,
-            bubble = bubbleCheck.isChecked,
+            bubble = old.bubble,
             wakeName = PetConfig.cleanWakeName(wakeNameInput.text.toString()),
             spriteSize = PetConfig.SPRITE_SIZES.getOrNull(spriteSpinner.selectedItemPosition)
                 ?.first ?: PetConfig.DEFAULT_SPRITE,

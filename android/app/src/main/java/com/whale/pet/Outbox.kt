@@ -56,6 +56,31 @@ object Outbox {
     /** 补发成功后捞回来的那轮回话（补发时没人开轮询，回复只会留在电脑上）。主线程回调。 */
     private val replyListeners = java.util.concurrent.CopyOnWriteArrayList<(String) -> Unit>()
 
+    /** 补发被宿主明确拒绝、或退避到底也发不出去：这句真的没了，得让用户看见。主线程回调。 */
+    private val failedListeners =
+        java.util.concurrent.CopyOnWriteArrayList<(String, String, Boolean) -> Unit>()
+
+    fun addFailedListener(l: (String, String, Boolean) -> Unit) {
+        if (!failedListeners.contains(l)) failedListeners.add(l)
+    }
+
+    fun removeFailedListener(l: (String, String, Boolean) -> Unit) {
+        failedListeners.remove(l)
+    }
+
+    /** 宿主拒绝的原因说人话；`retry` 决定界面给不给「再发一次」。 */
+    private fun rejectedLine(code: Int): Pair<String, Boolean> = when (code) {
+        401, 403 -> "电脑那边没认出这台手机" to false
+        404 -> "这个会话不在了" to false
+        409 -> "这个会话不能从手机发" to false
+        else -> "这句没送到" to true
+    }
+
+    private fun notifyFailed(text: String, reason: String, retry: Boolean) {
+        if (failedListeners.isEmpty()) return
+        main.post { failedListeners.forEach { l -> runCatching { l(text, reason, retry) } } }
+    }
+
     fun addReplyListener(l: (String) -> Unit) {
         if (!replyListeners.contains(l)) replyListeners.add(l)
     }
@@ -380,6 +405,8 @@ object Outbox {
             remove(ctx, item.requestId)
             NetLog.record("outbox", code, 0, "补发被拒（$code），不再重试 ${item.requestId.take(8)}")
             Log.i("Outbox", "补发被拒 code=$code ${item.requestId.take(8)}")
+            val (line, again) = rejectedLine(code)
+            notifyFailed(item.text, line, again)
             return
         }
         val attempts = item.attempts + 1
@@ -387,6 +414,7 @@ object Outbox {
             remove(ctx, item.requestId)
             NetLog.record("outbox", code, 0, "补发 ${MAX_ATTEMPTS} 次仍失败，放弃 ${item.requestId.take(8)}")
             Log.w("Outbox", "补发 ${MAX_ATTEMPTS} 次仍失败，放弃 ${item.requestId.take(8)}")
+            notifyFailed(item.text, "这句没送到", true)
             return
         }
         val base = minOf(60_000L, 1_500L shl minOf(attempts, 5))

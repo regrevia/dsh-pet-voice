@@ -108,7 +108,7 @@ test('附件行标记：视频 [视频]，图片 [图片]', () => {
   assert.equal(attachmentMark('/tmp/a.png'), '[图片]')
   assert.equal(
     composeDispatchText('看这两个', ['/tmp/a.png', '/tmp/b.mov']),
-    '看这两个\n\n[图片] /tmp/a.png\n[视频] /tmp/b.mov',
+    '看这两个\n\n![图片](/tmp/a.png)\n[视频] /tmp/b.mov',
   )
 })
 

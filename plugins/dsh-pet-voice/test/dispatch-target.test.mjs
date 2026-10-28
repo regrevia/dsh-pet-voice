@@ -172,3 +172,35 @@ test('④ 上一轮是自己派的 → 用自己的 abort 掐，不再额外取�
   assert.equal(calls.ended.length, 1, '掐掉之后要主动安排收尾')
   assert.equal(calls.ended[0].graceMs, 2000)
 })
+
+test('③c 引导（steer）打在电脑那轮上：不取消、不抢中断把手，prompt 走 steer', async () => {
+  writePet({ workspaceId: 'ef76a38a-8d4f-40e0-8e7c-f05734c1178a', cwd: PET_PATH, sessionId: PINNED })
+  const { ctx, deps, calls } = host({ rows: [{ id: PINNED, title: '宠物', cwd: PET_PATH }] })
+  deps.liveTurns.set(PINNED, Date.now())
+  deps.turnOrigin.set(PINNED, 'desktop')
+  const result = await D.dispatchToSession(ctx, { preset: '' }, { text: '顺手看下日志', sessionId: PINNED, steer: true }, fakeReq, deps)
+  assert.equal(result.status, 200)
+  assert.equal(calls.cancel.length, 0, '引导不能取消正在跑的那轮')
+  assert.equal(calls.prompt.length, 1)
+  assert.equal(calls.prompt[0].mode, 'steer', '引导要作为这一轮的一步，不是新排一轮')
+  assert.equal(result.body.steered, true, '回执要告诉手机这句已经并进当前轮')
+  // 引导没有自己的 abort：登记上去会覆盖主轮的中断把手，取消按钮就掐不到东西了
+  assert.equal(deps.liveAbort.has(PINNED), false, '引导不能登记 liveAbort')
+  assert.equal(deps.awaitPetTurn.has(PINNED), false, '引导不能把自己标成「手机派的那轮」')
+})
+
+test('⑧ 宿主拒收别人的会话（Team 队员）→ 409，不能报成可重试的 502', async () => {
+  writePet({ workspaceId: 'ef76a38a-8d4f-40e0-8e7c-f05734c1178a', cwd: PET_PATH, sessionId: PINNED })
+  const foreign = 'session-1234abcd-0000-4000-8000-00000000beef'
+  const { ctx, deps } = host({
+    rows: [{ id: foreign, title: '队员', cwd: PET_PATH }],
+    prompt: async () => { throw new Error(`session "${foreign}" is owned by subagent routing`) },
+  })
+  const result = await D.dispatchToSession(ctx, { preset: '' }, { text: '在吗', sessionId: foreign, requestId: 'rid-foreign-1' }, fakeReq, deps)
+  assert.equal(result.status, 409, '永久拒收要给 4xx：5xx 会被手机当成网络问题无限退避重发')
+  assert.equal(result.body.ok, false)
+  assert.equal(result.body.error, '这个会话不能从手机发')
+  // 失败的派发不能留下去重记号，否则用户换会话重发同一句会被吞掉
+  const again = await D.dispatchToSession(ctx, { preset: '' }, { text: '在吗', sessionId: foreign, requestId: 'rid-foreign-1' }, fakeReq, deps)
+  assert.equal(again.status, 409)
+})

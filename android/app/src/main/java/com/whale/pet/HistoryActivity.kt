@@ -34,6 +34,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
@@ -72,6 +73,8 @@ class HistoryActivity : Activity() {
         const val SEND_VIDEO_MAX_BYTES = 200L * 1024 * 1024
         /** 历史一页多少条：翻上去再取下一页。 */
         const val HISTORY_PAGE = 30
+        /** 一次向宿主要多少条：一页多一点，翻两下刚好一小段。 */
+        const val HOST_PAGE = 40
         /** 页面开着时多久核一次「这只对话还在不在、叫什么」（不跟电脑切）。 */
         const val HOST_WATCH_MS = 20_000L
 
@@ -92,6 +95,7 @@ class HistoryActivity : Activity() {
     private lateinit var runBar: View
     private lateinit var runText: TextView
     private lateinit var runStop: TextView
+    private lateinit var runSteer: TextView
     private lateinit var input: EditText
     private lateinit var sendBtn: android.widget.ImageView
     private lateinit var emojiBtn: android.widget.ImageView
@@ -109,6 +113,9 @@ class HistoryActivity : Activity() {
     private lateinit var goalText: TextView
     private lateinit var goalAction: TextView
     private lateinit var goalQueue: TextView
+    private lateinit var queueBar: LinearLayout
+    /** 队列里那几句：id 是宿主给的，撤掉/调顺序都按它认。 */
+    private data class Queued(val id: String, val text: String)
     @Volatile private var goalId = ""
     @Volatile private var goalRevision = 0
     @Volatile private var goalPhase = ""
@@ -158,6 +165,13 @@ class HistoryActivity : Activity() {
     private val pending = ArrayList<PetHistory.Att>()
     /** 历史一屏摆多少条。 */
     private var historyLimit = HISTORY_PAGE
+    /** 宿主那边还有更早的没有取回来（历史懒加载的第二段来源）。 */
+    private var hostMore = false
+    private var hostPaging = false
+    private var hostSid = ""
+    private var lastHostPageAt = 0L
+    /** 列表自己的滚动状态：只有手指拖/甩到顶才自动补页。 */
+    private var scrollState = android.widget.AbsListView.OnScrollListener.SCROLL_STATE_IDLE
     /** 加页时别贴底：翻上去看的是旧的，回到底部会把人踢回去。 */
     private var keepScroll = false
     /** 用户是不是还贴着底：自己往上翻的时候别被新回复拽回去。 */
@@ -234,12 +248,21 @@ class HistoryActivity : Activity() {
     private val outboxDelivered: (String) -> Unit = { runCatching { reload() } }
     // 补发成功把回答捞回来时也要刷一次：否则页面上「已补发」有了、正文要等下次进页面
     private val outboxReply: (String) -> Unit = { runCatching { reload() } }
+    // 补发被宿主拒了不会自己再发：留一行看得懂的话，能重试的给一次重试
+    private val outboxFailed: (String, String, Boolean) -> Unit = { text, reason, again ->
+        runCatching {
+            adapter.error = reason
+            adapter.errorAction = if (again) ({ send(text, shownAs = text) }) else null
+            reload()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_history)
         Outbox.addDeliveredListener(outboxDelivered)
         Outbox.addReplyListener(outboxReply)
+        Outbox.addFailedListener(outboxFailed)
 
         list = findViewById(R.id.historyList)
         // 状态栏内边距自己加：fitsSystemWindows 会和键盘 resize 抢高度，底栏被挤掉过
@@ -253,6 +276,7 @@ class HistoryActivity : Activity() {
         runBar = findViewById(R.id.chatRun)
         runText = findViewById(R.id.chatRunText)
         runStop = findViewById(R.id.chatStop)
+        runSteer = findViewById(R.id.chatSteer)
         input = findViewById(R.id.chatInput)
         sendBtn = findViewById(R.id.chatSend)
         emojiBtn = findViewById(R.id.chatEmoji)
@@ -269,6 +293,7 @@ class HistoryActivity : Activity() {
         goalText = findViewById(R.id.goalText)
         goalAction = findViewById(R.id.goalAction)
         goalQueue = findViewById(R.id.goalQueue)
+        queueBar = findViewById(R.id.chatQueue)
         goalAction.setOnClickListener { toggleGoal() }
         // 删除跟桌面端那个 🗑 一样：长按整行才出现，避免误触
         goalBar.setOnLongClickListener {
@@ -305,7 +330,9 @@ class HistoryActivity : Activity() {
         }
         // 贴着底就跟着新回复走；翻上去看历史时就停住，底部给一个「回到底部」
         list.setOnScrollListener(object : android.widget.AbsListView.OnScrollListener {
-            override fun onScrollStateChanged(v: android.widget.AbsListView?, state: Int) {}
+            override fun onScrollStateChanged(v: android.widget.AbsListView?, state: Int) {
+                scrollState = state
+            }
             override fun onScroll(
                 v: android.widget.AbsListView?,
                 first: Int,
@@ -323,6 +350,13 @@ class HistoryActivity : Activity() {
                 if (atBottom != nearBottom) {
                     nearBottom = atBottom
                     toBottom.visibility = if (atBottom) View.GONE else View.VISIBLE
+                }
+                // 手指拖到顶就自己取更早的一页（程序和布局引起的 0 位不算，不然一进会话就全load完）。
+                val dragging = scrollState == android.widget.AbsListView.OnScrollListener.SCROLL_STATE_TOUCH_SCROLL ||
+                    scrollState == android.widget.AbsListView.OnScrollListener.SCROLL_STATE_FLING
+                val soon = System.currentTimeMillis() - lastHostPageAt < 600L
+                if (dragging && !soon && first == 0 && total > 0 && !hostPaging && hostMore && adapter.rows.size > 0) {
+                    loadHostPage(older = true)
                 }
             }
         })
@@ -346,6 +380,16 @@ class HistoryActivity : Activity() {
         emojiBtn.setOnClickListener { showEmojiPicker() }
         attachBtn.setOnClickListener { showAttachMenu() }
         runStop.setOnClickListener { stopTurn() }
+        // 引导：这一轮还没说完时补一句。框里已经有字就直接插进去，没有就把光标放回输入框。
+        runSteer.setOnClickListener {
+            val say = input.text?.toString()?.trim().orEmpty()
+            if (say.isNotEmpty()) {
+                steer(say)
+            } else {
+                input.requestFocus()
+                input.setHint("说一句，插进这一轮")
+            }
+        }
         input.setOnEditorActionListener { _, actionId, ev ->
             if (actionId == EditorInfo.IME_ACTION_SEND || (ev?.keyCode == KeyEvent.KEYCODE_ENTER && ev.action == KeyEvent.ACTION_DOWN)) {
                 sendChat()
@@ -451,6 +495,11 @@ class HistoryActivity : Activity() {
         refreshHeader()
         reload()
         syncSession()
+        // 进来先只拉最新一页（宿主是真相源，手机只是缓存）；翻上去再要更早的
+        if (hostSid != PetSettings.chatSession(this) || PetHistory.count(this) == 0) {
+            hostMore = true
+            loadHostPage(older = false)
+        }
         // 进来先补一次「只有我问、没有回答」的缺口：上一轮可能因断网断在一半
         repairMissingReply()
         // 页面开着的时候核一下这只还在不在、名字对不对（20 秒一次；有回合在跑就 3 秒）
@@ -509,7 +558,22 @@ class HistoryActivity : Activity() {
                     if (reply.isNotBlank()) break
                     if (tryNo < 3) runCatching { Thread.sleep(3_000L) }
                 }
-                if (reply.isBlank()) return@Thread
+                if (reply.isBlank()) {
+                    // 电脑那边这一轮没留下回答：多半是中途断了。别装没事，也别反复自动重发——
+                    // 在末尾留一行状态，给一句能点的重发。
+                    val idle = System.currentTimeMillis() - last.ts > 60_000L
+                    if (idle && turn == null) {
+                        ui.post(Runnable {
+                            if (isFinishing || isDestroyed || turn != null) return@Runnable
+                            runCatching {
+                                adapter.error = "上次回复中断"
+                                adapter.errorAction = { send(text, shownAs = text) }
+                                reload()
+                            }
+                        })
+                    }
+                    return@Thread
+                }
                 val exists = PetHistory.all(this).any { it.role == PetHistory.ROLE_PET && it.text == reply }
                 if (exists) return@Thread
                 PetHistory.append(this, PetHistory.ROLE_PET, reply)
@@ -528,6 +592,8 @@ class HistoryActivity : Activity() {
     private val hostWatch = object : Runnable {
         override fun run() {
             syncSession()
+            // 一分钟对齐一次宿主最新一页：电脑上刚说的话也能在这只对话里出现
+            if (System.currentTimeMillis() - lastHostPageAt > 60_000L) loadHostPage(older = false)
             ui.postDelayed(this, if (hostBusy || localBusy) 3_000L else HOST_WATCH_MS)
         }
     }
@@ -547,6 +613,7 @@ class HistoryActivity : Activity() {
     override fun onDestroy() {
         Outbox.removeDeliveredListener(outboxDelivered)
         Outbox.removeReplyListener(outboxReply)
+        Outbox.removeFailedListener(outboxFailed)
         closeVideo()
         ui.removeCallbacks(hostWatch)
         ui.removeCallbacksAndMessages(null)
@@ -572,6 +639,8 @@ class HistoryActivity : Activity() {
     /* ---------------- 标题与列表 ---------------- */
 
     private fun refreshHeader() {
+        // 面板关掉「语音对话」时这一页就别留着话筒：留着点了也没用
+        micBtn.visibility = if (PetSettings.feature(this, "voice")) View.VISIBLE else View.GONE
         val title = PetSettings.pinnedTitle(this)
         projectBtn.text = title.ifBlank { "项目" }
         // 第二行是「这一问落在哪只会话」。还没拿到会话名（刚开的新会话、名字还没生成）
@@ -630,14 +699,76 @@ class HistoryActivity : Activity() {
         }
         goalAction.visibility = if (goalAction.text.isBlank()) View.GONE else View.VISIBLE
         val inbox = detail.optJSONArray("inbox")
-        val queued = (0 until (inbox?.length() ?: 0))
-            .mapNotNull { inbox?.optJSONObject(it)?.optString("text")?.trim() }
-            .filter { it.isNotBlank() }
-        goalQueue.visibility = if (queued.isEmpty()) View.GONE else View.VISIBLE
-        goalQueue.text = queued.take(2).joinToString("\n") { "待输入 · $it" }.let {
-            if (queued.size > 2) "$it\n等 ${queued.size} 条" else it
+        val queued = (0 until (inbox?.length() ?: 0)).mapNotNull { i ->
+            val row = inbox?.optJSONObject(i) ?: return@mapNotNull null
+            val text = row.optString("text").trim().replace('\n', ' ')
+            val id = row.optString("id").trim()
+            if (text.isBlank() || id.isBlank()) null else Queued(id, text)
         }
+        renderQueue(queued)
+        goalQueue.visibility = View.GONE
         goalBar.visibility = View.VISIBLE
+    }
+
+    /** 队列：一句一行，右侧点掉；长按调顺序或撤掉。 */
+    private fun renderQueue(items: List<Queued>) {
+        queueBar.removeAllViews()
+        if (items.isEmpty()) {
+            queueBar.visibility = View.GONE
+            return
+        }
+        queueBar.visibility = View.VISIBLE
+        for (item in items) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            row.addView(TextView(this).apply {
+                text = "待输入 · ${item.text}"
+                setTextColor(getColor(R.color.pet_hint))
+                textSize = 12f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(0, dp(4), 0, dp(4))
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            row.addView(TextView(this).apply {
+                text = "撤掉"
+                setTextColor(getColor(R.color.pet_accent))
+                textSize = 12f
+                setPadding(dp(10), dp(4), dp(4), dp(4))
+                setOnClickListener { queueAct("remove", item.id) }
+            })
+            row.setOnLongClickListener { showQueueMenu(item); true }
+            queueBar.addView(row)
+        }
+    }
+
+    private fun showQueueMenu(item: Queued) {
+        android.app.AlertDialog.Builder(this)
+            .setItems(arrayOf("上移", "下移", "撤掉")) { _, which ->
+                queueAct(arrayOf("up", "down", "remove")[which], item.id)
+            }
+            .show()
+    }
+
+    /** 队列改动走宿主：桌面端看到的是同一份，手机上点完立刻回读一遍。 */
+    private fun queueAct(action: String, id: String) {
+        val sid = PetSettings.chatSession(this)
+        if (sid.isBlank()) return
+        Thread({
+            val res = try {
+                PetClient { PetSettings.load(this) }.inboxAction(sid, action, id)
+            } catch (_: Exception) { null }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                val body = res?.json
+                if (body?.optBoolean("ok") != true && action != "remove") {
+                    toast(body?.optString("error").orEmpty().ifBlank { "队列没改成" })
+                }
+                syncSession()
+            }
+        }, "pet-queue").apply { isDaemon = true }.start()
     }
 
     /** 点目标行右侧的按钮：在跑就暂停，停下了就继续。执行完立刻跟宿主对一次。 */
@@ -747,6 +878,8 @@ class HistoryActivity : Activity() {
 
     /** 宿主现状 → 标题 + 本地指针。只在真的变了的时候动。 */
     private fun adoptHostState(state: JSONObject) {
+        // 桌面面板的开关是唯一来源：读到就落一份，下次冷启动也照这个来
+        PetSettings.saveFeatures(this, state.optJSONObject("features"))
         val target = state.optString("dispatchTarget").orEmpty()
         // turns 的键是裸 uuid（宿主两种写法都存，投影时归一过）
         val turns = state.optJSONObject("turns")
@@ -862,7 +995,7 @@ class HistoryActivity : Activity() {
         val items = PetHistory.recent(this, historyLimit)
         val older = PetHistory.count(this) - items.size
         val rows = ArrayList<ChatRow>(items.size + 2)
-        if (older > 0) rows.add(ChatRow.More(older))
+        if (older > 0 || hostMore) rows.add(ChatRow.More(older))
         items.forEachIndexed { i, item ->
             if (item.isNote) {
                 rows.add(ChatRow.Note(item.text))
@@ -902,7 +1035,13 @@ class HistoryActivity : Activity() {
      * 不然加完行列表会自己跳。
      */
     private fun loadEarlier() {
-        if (adapter.rows.size >= PetHistory.count(this)) return
+        android.util.Log.i("PetChat", "more rows=${adapter.rows.size} count=${PetHistory.count(this)} limit=$historyLimit hostMore=$hostMore")
+        if (hostPaging) return
+        // 缓存里还有没摆出来的行就先摆本地；本地到底了才去宿主取更早的一页。
+        if (historyLimit >= PetHistory.count(this) && hostMore) {
+            loadHostPage(older = true)
+            return
+        }
         val first = list.firstVisiblePosition
         val top = list.getChildAt(0)?.top ?: 0
         val before = adapter.rows.size
@@ -912,6 +1051,79 @@ class HistoryActivity : Activity() {
         keepScroll = false
         val added = (adapter.rows.size - before).coerceAtLeast(0)
         ui.post { list.setSelectionFromTop((first + added).coerceAtLeast(0), top) }
+    }
+
+    /**
+     * 取一页宿主转录并进本地记录。
+     *
+     * 进会话先只取最新一页（[older]=false），用户往上翻到本地缓存尽头再按
+     * `before=<最早 seq>` 取更早的——跟桌面端一样，不带整段历史。
+     */
+    private fun loadHostPage(older: Boolean) {
+        if (hostPaging) return
+        if (older && !hostMore) return
+        val sid = PetSettings.chatSession(this)
+        if (sid.isBlank()) return
+        hostPaging = true
+        android.util.Log.i("PetChat", "hostpage start older=$older sid=${sid.takeLast(8)}")
+        val first = list.firstVisiblePosition
+        val top = list.getChildAt(0)?.top ?: 0
+        val beforeRows = adapter.rows.size
+        Thread({
+            val client = PetClient { PetSettings.load(this) }
+            var added = 0
+            try {
+                val before = if (older) PetHistory.oldestSeq(this) else 0L
+                if (older && before <= 0L) {
+                    hostMore = false
+                    return@Thread
+                }
+                val res = client.session(sid, HOST_PAGE, if (before > 0L) before else null)
+                val json = res.json
+                android.util.Log.i("PetChat", "hostpage res ok=${res.ok} code=${res.code} before=$before json=${json != null}")
+                if (res.ok && json != null) {
+                    val arr = json.optJSONArray("messages") ?: JSONArray()
+                    val page = ArrayList<PetHistory.Item>(arr.length())
+                    for (i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        val text = o.optString("text").trim()
+                        if (text.isEmpty()) continue
+                        // 运行时注入的上下文（<goal_round> 之类）不是人说的话，对话里不摆
+                        if (text.startsWith("<")) continue
+                        val role = when (o.optString("role")) {
+                            "user" -> PetHistory.ROLE_ME
+                            "assistant" -> PetHistory.ROLE_PET
+                            else -> continue
+                        }
+                        page.add(
+                            PetHistory.Item(
+                                role, text, o.optLong("time", 0L), sid, emptyList(), o.optLong("seq", 0L)
+                            )
+                        )
+                    }
+                    added = PetHistory.mergeHost(this, sid, page, older)
+                    hostSid = sid
+                    hostMore = json.optBoolean("hasMore", false)
+                    lastHostPageAt = System.currentTimeMillis()
+                    android.util.Log.i("PetChat", "hostpage merged page=${page.size} added=$added hasMore=$hostMore")
+                }
+            } catch (e: Exception) {
+                android.util.Log.i("PetChat", "hostpage fail ${e.javaClass.simpleName}: ${e.message}")
+            } finally {
+                hostPaging = false
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    if (!older && adapter.rows.size == 0) historyLimit = HISTORY_PAGE
+                    if (older && beforeRows >= historyLimit) historyLimit += HISTORY_PAGE
+                    keepScroll = true
+                    reload()
+                    keepScroll = false
+                    if (older) {
+                        ui.post { list.setSelectionFromTop((first + added).coerceAtLeast(0), top) }
+                    }
+                }
+            }
+        }, "pet-host-page").apply { isDaemon = true }.start()
     }
 
     private fun scrollToBottom(force: Boolean = false) {
@@ -1003,8 +1215,10 @@ class HistoryActivity : Activity() {
             return
         }
         if (text.isBlank()) return
+        // 正在回复时发的这句不是「等下一轮」：交给宿主当引导（steer），
+        // 跟桌面端一样插进这一轮，不打断正在流的回复。
         if (turn != null) {
-            toast("上一轮还没结束")
+            steer(text)
             return
         }
         // 「拍张照」「截个屏」是手机自己办的事，不进对话
@@ -1016,6 +1230,61 @@ class HistoryActivity : Activity() {
         }
         input.setText("")
         send(text)
+    }
+
+    /**
+     * 这一轮还在跑时补一句：走宿主的派发口插进当前回合（桌面端叫引导），
+     * 本地先落一条带「排队中」尾巴的气泡，宿主真收了就等转录把它认回来。
+     */
+    /** 上一次引导用的 (requestId, 原文)：重试沿用同一个，避免宿主那边落成两条。 */
+    private var steerRetry: Pair<String, String>? = null
+
+    private fun steer(text: String, append: Boolean = true, ridOverride: String? = null) {
+        val sid = PetSettings.chatSession(this)
+        if (sid.isBlank()) {
+            toast("还没连上")
+            return
+        }
+        input.setText("")
+        runText.text = "引导中"
+        if (append) PetHistory.append(this, PetHistory.ROLE_ME, text)
+        reload()
+        scrollToBottom(force = true)
+        // 重试要沿用同一个 requestId：宿主按它去重，所以「其实已经到了、只是回包丢了」不会变成两条
+        val rid = ridOverride ?: java.util.UUID.randomUUID().toString()
+        steerRetry = rid to text
+        Thread({
+            val res = try {
+                PetClient { PetSettings.load(this) }.dispatch(text, sid, rid, steer = true)
+            } catch (_: Exception) { null }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (res?.ok != true) {
+                    // 没送到的这句留在列表里，给一行能点的重试；不弹框、不吞话
+                    queuedNote = false
+                    adapter.error = "这句没送到"
+                    adapter.errorAction = { steerAgain(text) }
+                    reload()
+                    return@runOnUiThread
+                }
+                // 宿主把它插进了正在跑的这一轮：这一轮照常接下去，别按「排队」算时间
+                steerRetry = null
+                val steered = res.json?.optBoolean("steered") == true
+                if (!steered) queuedNote = true
+                runText.text = if (steered) "引导中" else "排队中"
+                ui.removeCallbacks(hostWatch)
+                ui.postDelayed(hostWatch, 600L)
+            }
+        }, "pet-steer").apply { isDaemon = true }.start()
+    }
+
+    /** 引导那句没送到：点错误行用同一句再派一次。 */
+    private fun steerAgain(text: String) {
+        adapter.error = ""
+        adapter.errorAction = null
+        reload()
+        val same = steerRetry?.takeIf { it.second == text }?.first
+        steer(text, append = false, ridOverride = same)
     }
 
     /**
@@ -1141,6 +1410,8 @@ class HistoryActivity : Activity() {
 
                 override fun onSentence(sentence: String) {
                     if (token != turnToken) return
+                    // 面板关了语音：只出字不出声
+                    if (!PetSettings.feature(this@HistoryActivity, "voice")) return
                     val cfg = PetSettings.load(this@HistoryActivity)
                     val player = tts ?: TtsPlayer(this@HistoryActivity, client, { cfg }, {}, {}).also { tts = it }
                     player.enqueue(sentence)
@@ -1154,6 +1425,8 @@ class HistoryActivity : Activity() {
 
                 override fun onError(message: String) {
                     if (token != turnToken) return
+                    // 宿主明确拒收：这句不会再补发，落盘凭据清掉，别让它下次启动又排队一轮
+                    if (turn?.isPermanent() == true) PendingSend.clear(this@HistoryActivity, rid)
                     finishTurn(message)
                 }
             },
@@ -1170,6 +1443,8 @@ class HistoryActivity : Activity() {
     private fun finishTurn(error: String?) {
         ui.removeCallbacks(ticker)
         localBusy = false
+        sendBtn.contentDescription = "发送"
+        input.setHint("发消息")
         // 先留住这一轮：终局要按「宿主到底收没收到」决定补发，turn 清早了就没处问了
         val ended = turn
         turn = null
@@ -1187,6 +1462,9 @@ class HistoryActivity : Activity() {
         val queued = error != null && error.contains("已排队")
         when {
             queued -> showRetry("已排队，联网后自动发出", null)
+            // 拒收类（会话不归手机管、配对失效）重发无用：直接说，不给会失败的重试
+            error != null && (error.contains("不能从手机发") || error.contains("没认出")) ->
+                showRetry(error, null)
             error == null && finalText.isNotBlank() -> PetHistory.append(this, PetHistory.ROLE_PET, finalText)
             // 一轮走完了却一个字都没有：不能就这么静默收工，用户只会以为 App 坏了
             // 断网/开流失败走完一轮、宿主其实一个字都没收到：直接落盘补发，别再让人手动重试
@@ -1286,6 +1564,8 @@ class HistoryActivity : Activity() {
                 return
             }
             runText.text = if (ms > 90_000) "还在跑 ${ms / 1000} s · 可中断" else "处理中 ${ms / 1000} s"
+            // 正在回复时按发送不是「再排一轮」，是插一句引导：按钮说法跟着变
+            sendBtn.contentDescription = "发送引导"
             ui.postDelayed(this, 1000)
         }
     }

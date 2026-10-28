@@ -271,6 +271,10 @@ class FloatingPetService : Service() {
         val head = text.replace("\n", " ").trim().take(18)
         if (head.isNotEmpty()) sayToBubble("刚才那句已补发：$head")
     }
+    // 补发彻底发不出去（被宿主拒收）才出声：还会重试的那些不打扰，聊天页自己会说明
+    private val outboxFailed: (String, String, Boolean) -> Unit = { _, reason, retry ->
+        if (!retry && reason.isNotBlank()) sayToBubble(reason.take(24))
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -278,6 +282,7 @@ class FloatingPetService : Service() {
         // 补发后捞回来的回答直接念出来：补发那一刻浮窗并没有在等回合
         Outbox.addReplyListener(outboxReply)
         Outbox.addDeliveredListener(outboxDelivered)
+        Outbox.addFailedListener(outboxFailed)
         runCatching { Outbox.start(this) }
         alive = true
         inst = this
@@ -434,6 +439,7 @@ class FloatingPetService : Service() {
         if (inst === this) inst = null
         Outbox.removeReplyListener(outboxReply)
         Outbox.removeDeliveredListener(outboxDelivered)
+        Outbox.removeFailedListener(outboxFailed)
         if (AppForeground.onChange != null) AppForeground.onChange = null
         stopContinuous("服务结束")
         stopSayPoll()
@@ -616,6 +622,8 @@ class FloatingPetService : Service() {
                 null
             }
             val name = r?.json?.optJSONObject("pet")?.optString("wakeName").orEmpty().trim()
+            // 面板开关一起落一份：桌宠这边的动作/语音/气泡都以它为准
+            r?.json?.let { PetSettings.saveFeatures(this, it.optJSONObject("features")) }
             main.post {
                 if (destroyed) return@post
                 if (name.isEmpty()) {
@@ -995,6 +1003,8 @@ class FloatingPetService : Service() {
                     dragBaseX = it.x
                     dragBaseY = it.y
                 }
+                // 面板关了「摸头互动」：只留拖窗，别再一碰就动、也别开麦
+                if (!PetSettings.feature(this, "interact")) return true
                 // 按下去就有反馈（震动 + 立刻做反应），别等 UP 才动：按住说话要马上进 listening
                 haptic(HapticFeedbackConstants.CLOCK_TICK)
                 evalAck("按住", "window.PetBridge&&PetBridge.action('tap')")
@@ -1207,6 +1217,8 @@ class FloatingPetService : Service() {
     }
 
     private fun say(text: String) {
+        // 面板关了气泡就一句都不冒：动作照做，嘴上不出字
+        if (!PetSettings.feature(this, "bubble")) return
         // 两句都要按序落在 WebView 线程上：先让出气泡的位置，再让气泡出现。
         // 以前是让小人整体下移来躲气泡，人一动就「被挤下去 / 被裁掉一截」；
         // 现在人不动，长出来的那一块全在气泡那一侧，且只在气泡显示的几秒里存在。
@@ -1365,6 +1377,12 @@ class FloatingPetService : Service() {
         if (!cfg.ready) {
             updateNotification("还没配对 · 点一下进 App")
             openSettings()
+            return
+        }
+        // 面板关了语音：不录音、不识别、不朗读；想说话点进 App 打字
+        if (!PetSettings.feature(this, "voice")) {
+            updateNotification("语音已关 · 点一下进 App")
+            say("语音关了，去电脑上开")
             return
         }
         // 按住说话是一次性的：松手就发，发完回待机，不自动续听（续听会让用户以为又开麦了）
@@ -2106,7 +2124,8 @@ class FloatingPetService : Service() {
             wake.stop()
             return
         }
-        if (!cfg.wakeEnabled || !cfg.ready) {
+        // 语音总开关关掉时「常听」也不许开麦：那是同一份麦克风
+        if (!cfg.wakeEnabled || !cfg.ready || !PetSettings.feature(this, "voice")) {
             wake.stop()
             return
         }

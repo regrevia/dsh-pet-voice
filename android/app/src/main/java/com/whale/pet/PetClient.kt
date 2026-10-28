@@ -86,9 +86,12 @@ class PetClient(private val config: () -> PetConfig) {
         requestId: String = java.util.UUID.randomUUID().toString(),
         /** 宿主上已落盘的图片绝对路径；插件把路径拼在这一问后面，模型自己去看图。 */
         attachments: List<String> = emptyList(),
+        /** true = 插进正在跑的这一轮（桌面端的「引导」），不开新轮、不掐断。 */
+        steer: Boolean = false,
     ): Result {
         // requestId 跟着这一次发送走：重发时同一句不会被当成两问，桌面端也不会复读
         val body = JSONObject().put("text", text).put("requestId", requestId)
+        if (steer) body.put("steer", true)
         if (sessionId.isNotBlank()) body.put("sessionId", sessionId)
         if (attachments.isNotEmpty()) {
             val arr = org.json.JSONArray()
@@ -139,6 +142,13 @@ class PetClient(private val config: () -> PetConfig) {
     fun render(text: String): Result = postJson("render", JSONObject().put("text", text))
     /** 掐掉这只会话正在跑的这一轮（宿主 sessionController.cancel）。 */
     fun cancel(sessionId: String): Result = postJson("cancel", JSONObject().put("sessionId", sessionId))
+
+    /** 还没轮到跑的那几句（桌面端「待输入」）；每句带 id，手机可以撤掉或调顺序。 */
+    fun inbox(sessionId: String): Result = get("inbox", mapOf("sessionId" to sessionId))
+
+    /** remove / up / down：改的就是桌面端同一份队列。 */
+    fun inboxAction(sessionId: String, action: String, id: String): Result =
+        postJson("inbox", JSONObject().put("sessionId", sessionId).put("action", action).put("id", id))
 
     /** 这只会话当前的目标，没有就空数组。 */
     fun goals(sessionId: String): Result = get("goals", mapOf("sessionId" to sessionId))
