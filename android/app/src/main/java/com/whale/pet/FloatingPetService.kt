@@ -401,6 +401,7 @@ class FloatingPetService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        keepAlive()
         applyConfigIfChanged()
         ensureOverlay()
         startHostStateTick()
@@ -431,6 +432,57 @@ class FloatingPetService : Service() {
             }
         }
         super.onTaskRemoved(rootIntent)
+    }
+
+    /**
+     * 系统或小米把进程杀掉后 START_STICKY 不一定有人来拉：留一个 15 分钟的闹钟，
+     * 到点由系统 AlarmManager 把自己叫醒（闹钟归系统管，进程死掉它还在）。
+     * 用户自己按「退出」时在 [quitAll] 里取消，不会自己又爬起来。
+     */
+    private fun keepAlive() {
+        val am = try {
+            getSystemService(AlarmManager::class.java)
+        } catch (_: Exception) {
+            null
+        } ?: return
+        val now = SystemClock.elapsedRealtime()
+        // 兜底：普通重复闹钟，权限不够、精确闹钟被限流时靠它在十几分钟内爬起来
+        try {
+            am.setInexactRepeating(
+                AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                now + KEEPALIVE_FIRST_MS,
+                KEEPALIVE_MS,
+                keepAliveIntent(KEEPALIVE_REQ),
+            )
+        } catch (_: Exception) {
+        }
+        // 准点那一次：Android 12+ 允许的话用精确闹钟，别等系统的 15 分钟窗口
+        try {
+            if (Build.VERSION.SDK_INT < 31 || am.canScheduleExactAlarms()) {
+                am.setExactAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    now + KEEPALIVE_FIRST_MS,
+                    keepAliveIntent(KEEPALIVE_REQ + 1),
+                )
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun keepAliveIntent(req: Int): PendingIntent = PendingIntent.getService(
+        this,
+        req,
+        Intent(this, FloatingPetService::class.java).setAction(ACTION_START),
+        PendingIntent.FLAG_IMMUTABLE,
+    )
+
+    private fun cancelKeepAlive() {
+        try {
+            val am = getSystemService(AlarmManager::class.java)
+            am.cancel(keepAliveIntent(KEEPALIVE_REQ))
+            am.cancel(keepAliveIntent(KEEPALIVE_REQ + 1))
+        } catch (_: Exception) {
+        }
     }
 
     override fun onDestroy() {
@@ -1622,6 +1674,7 @@ class FloatingPetService : Service() {
 
     /** 「关掉大肥鱼」：常听/唤醒/录音/TTS/悬浮窗全停，并关掉自启动，避免下次开机又自己起来。 */
     private fun quitAll() {
+        cancelKeepAlive()
         try {
             wake.stop()
         } catch (_: Exception) {
@@ -2330,6 +2383,11 @@ class FloatingPetService : Service() {
         const val ACTION_HIDE = "com.whale.pet.action.HIDE"
     const val ACTION_SHOW = "com.whale.pet.action.SHOW"
     const val ACTION_STOP = "com.whale.pet.action.STOP"
+
+    /** 被杀后自愈：首次 1 分钟，之后每 15 分钟一次系统闹钟把自己叫醒。 */
+    private const val KEEPALIVE_REQ = 8
+    private const val KEEPALIVE_FIRST_MS = 60_000L
+    private const val KEEPALIVE_MS = 15 * 60_000L
 
     /** 本应用自己的页面在前台时把小人收起来；服务（含唤醒）继续活着。 */
     @Volatile

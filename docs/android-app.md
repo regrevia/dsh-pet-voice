@@ -828,8 +828,9 @@ adb logcat -d | grep "PetSprite: sprite" | tail -3
 以下行为【需真机确认】，模拟器给不出结论：
 
 1. **后台恢复**：Android 14/15 对后台启动前台服务、`BOOT_COMPLETED` 拉起麦克风类 FGS 都收紧了。
-   手机被杀进程、重启、或用户从最近任务划掉后，悬浮窗能否自动回来、回来时麦克风是否仍然可用——未验证。
-   当前预期是**用户重新点开 App** 才能恢复常听；做不到「划掉也常驻」，也不该写成能。
+   进程被杀后 75 s 内自己回来这点已实测（闹钟自愈，见 §23.30：前台服务、悬浮窗、通知都恢复）；
+   唤醒引擎回来后不自己抢麦克风，要用户再点一下才常听——这是有意保留的，别写成「杀了也常听」。
+   重启机器后仍走 `BOOT_COMPLETED`，只恢复悬浮窗与通知，麦克风同理。
 2. **麦克风 FGS 在厂商 ROM 上的存活**：MIUI/HyperOS、ColorOS 等对 `microphone` 类型前台服务有额外的省电与
    「后台录音」拦截；`docs/real-device-install.md` 里的白名单步骤是给用户的建议，没有实测数据支撑。
 3. **唤醒成功率与误唤醒**：模拟器识别器只有 en-US 且常 `ERROR_NO_MATCH`，唤醒命中的真实比例、安静/电视人声
@@ -1788,3 +1789,22 @@ App 这边：运行条写「引导中」，这一轮照常计时（不按「排�
 **实测（0.9.124 / vc194）**：`POST /pet-voice/panel/state {"wakeOn":false}` → 15–20 s 内 prefs 变 `wake=0` → App 设置页常听行置灰、显示上句提示；`{"wakeOn":true}` 同样 15–20 s 内回到 `wake=1`，行恢复。
 
 **同类开关的边界**：「说完继续说」没有 App 侧的本地开关，只有面板 `continuous`，本来就一致；`气泡`/`摸头`/`看会话冒泡`/`语音对话` 在 App 里一直是不可点的显示行，同理。以后再加本地开关，先想清楚它是不是「面板的显示镜像」，别让它变成第二份真相。
+
+## 23.30 被系统杀掉后自己回来（闹钟自愈）
+
+不点退出、也不是划掉任务，就是进程被系统/小米后台清理杀掉：`START_STICKY` 在这台机器上不生效——实测 `kill -9` 后 4 分钟没人来拉，悬浮窗、叫名字、待发补发全停。
+
+现在服务起来时挂两个系统闹钟（`AlarmManager`，闹钟归系统管，进程死掉它还在）：
+
+| 闹钟 | 时刻 | 作用 |
+| --- | --- | --- |
+| 精确一次性（`setExactAndAllowWhileIdle`） | 起服务后 60 s | 准点把自己叫回来；`canScheduleExactAlarms()` 为假时跳过 |
+| 普通重复（`setInexactRepeating`，15 分钟） | 起服务后 60 s 起 | 精确闹钟被限流时的兜底，系统窗口最多十几分钟 |
+
+清单里加了 `USE_EXACT_ALARM`（Android 13+ 装机即给）和 `SCHEDULE_EXACT_ALARM`（`maxSdkVersion=32`）。`dumpsys alarm` 里能看到两条：一条 `window=+11m15s`，一条 `window=0 exactAllowReason=policy_permission`。
+
+自愈回来走的是「恢复」分支：重建悬浮窗、通知回到「按住说话」，唤醒引擎不自己抢麦克风（第一次用还是要点一下），待发队列照常补发。
+
+**实测（0.9.125 / vc195）**：起服务 → `su -c "kill -9 <pid>"` → 45 s 仍无进程 → 75 s 内新 pid 起来，`dumpsys activity services` 显示 `FloatingPetService isForeground=true`，`dumpsys window` 里 `com.whale.pet` 的 `APPLICATION_OVERLAY` 窗口回来了（676×462 @1652,2306），`dumpsys alarm` 里两条闹钟已重新挂上——链条不会断。
+
+**边界**：用户按通知「退出」走 `quitAll()`，那里先 `cancelKeepAlive()` 再停服务，不会自己又爬起来；开机自启仍走 `BOOT_COMPLETED` 那条老路。小米的「自启动/省电策略」仍可能整体压制，闹钟窗口也就到十几分钟这个量级，不承诺秒级。
