@@ -55,7 +55,6 @@ class MainActivity : Activity() {
     private lateinit var spriteSpinner: Spinner
     private lateinit var outfitSpinner: Spinner
     private lateinit var displayModeValue: TextView
-    private lateinit var historyCount: TextView
     private lateinit var report: TextView
     // 文字通道已并入「对话」页；主界面没有这些控件了，取到就是 null，统一按可空处理。
     private var textInput: EditText? = null
@@ -113,7 +112,6 @@ class MainActivity : Activity() {
         spriteSpinner = findViewById(R.id.spriteSpinner)
         outfitSpinner = findViewById(R.id.outfitSpinner)
         displayModeValue = findViewById(R.id.displayModeValue)
-        historyCount = findViewById(R.id.historyCount)
         report = findViewById(R.id.report)
         updateState = findViewById(R.id.updateState)
 
@@ -425,8 +423,6 @@ class MainActivity : Activity() {
             homeMode -> "在桌面时出现"
             else -> "一直显示"
         }
-        val count = PetHistory.all(this).size
-        historyCount.text = if (count > 0) "$count 条" else ""
         val pinned = PetSettings.chatSession(this)
         sessionLabel?.text = if (pinned.isBlank()) "会话：接着上次" else "会话：新开"
         // 权限不再靠按钮自检：进界面缺麦克风就当场要一次，问过就记住，不反复弹。

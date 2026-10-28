@@ -95,14 +95,6 @@
                 android:textSize="15sp" />
 
             <TextView
-                android:id="@+id/historyCount"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginEnd="6dp"
-                android:textColor="@color/pet_hint"
-                android:textSize="13sp" />
-
-            <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="\u203a"

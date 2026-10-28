@@ -962,3 +962,116 @@ say 游标语义（0.9.70 修）：宿主 `GET say` 返回的 `cursor` 是**整�
 
 注意间隔再小收益就饱和了：单句上屏还包含 WebView 一帧的渲染，剩下的 150 ms 里
 大部分是这一帧和宿主 TTS 的排队，不是轮询空等。
+
+### 23.5 连发多句：按顺序回放，最多挂 6 句（0.9.78）
+
+0.9.74 的挂起只留最新一句（旧的覆盖），连发时前几句等于被吞了。
+0.9.78 把 `pendingSay` 改成先进先出队列，最多 6 句（`SAY_QUEUE_MAX`），
+回桌面后按 250 ms 间隔一句一句补上屏，日志 `气泡上屏 N 字`（每句一行）。
+
+### 23.6 悬浮气泡让位：只下移 30 px、只缩 3%（0.9.79 – 0.9.81）
+
+气泡卡片压在头顶时，`boot.js` 给 `#stage` 加 `has-bubble`：`translateY(var(--shift)) scale(var(--shrink))`。
+
+- 窗口是 `dp(size) × dp(size+48)` 的**固定几何**，任何时候都不改窗口尺寸；
+  让位只动 CSS transform，所以「气泡弹出来把桌宠窗口顶大一圈」这类跳动已经没有。
+- 系数由画布实际盒子算：`shrink = clamp((box.h - 74) / (box.bottom - box.top), 0.85, 1)`，
+  216 px 窗口下 = **0.967**；`shift = round(box.h - box.bottom × shrink)` = **30 px**，
+  刚好让头顶露出气泡下沿，不用缩掉三分之一。
+- 同一句话只让位一次（`sayGeomKey` 去重），否则每帧都写 CSS 变量。
+- 让位/还原走 `#stage` 的 `transition: transform .18s cubic-bezier(.2,.8,.2,1)`，是渐变不是瞬移。
+
+真机（15ca9736）日志：
+
+```
+W PetJs : WARNING [fit] 画布 420x540（168x216 css @2.5）
+W PetJs : WARNING [bubble] 让位 30px / 缩放 0.967
+```
+
+### 23.7 点按分级：点好几下才生气（0.9.82 – 0.9.86）
+
+「点一下就突然生气」的根因是生气素材在单点随机池里。现在的规则（`boot.js` 的 `action()`，
+2.6 s 内算同一轮，第 n 下按 n 分级）：
+
+| 第几下 | 动作 |
+|---|---|
+| 1 | 随机轻反应（`tap` / `tap_shy` / `tap_tickle` / `tap_wave` / `tap_joy`） |
+| 2 | `tap_joy` 高兴 |
+| 3 | `tap_pout` 撅嘴生气 |
+| 4 | `tap_proud` 得意 |
+| 5+ | `startle` 吓一跳 |
+
+`ONCE` 表里必须有被点名的键：0.9.85 的 `playOnce('tap_pout')` 返回 false（表里没这个键），
+真机 3 连点只看到 `tap→tap_joy`，第三下毫无反应——0.9.86 补上 `tap_pout` 后实测：
+
+```
+[fade] idle→tap        200ms 实测210ms
+[fade] tap→tap_joy     200ms 实测207ms
+[fade] tap_joy→tap_pout 200ms 实测204ms   # 第三下才生气
+```
+
+### 23.8 渐进式虚化：两层交叉淡入淡出（0.9.82 – 0.9.87）
+
+视频素材是一段一段的，换动作时两个 `<video>` 会同时在画布上出画。历史两版都踩了坑：
+老层 alpha=1 直接叠 → 前后动作贴图重叠；干脆不虚化 → 重叠更严重而且换动作是硬切。
+
+现在的做法：两层用**同一个缩放**、老层按 `smoothstep` 从 1 降到 0、新层从 0 升到 1，
+两层总不透明度不超过 1；老层的绘制位置从上一段的包围盒线性插到新段的包围盒。
+
+- 进动作 200 ms（跟手），回待机 240 ms（显得稳）。
+- `[fade]` 日志给的是**实测**耗时（`nowMs() - t0`），不是名义值：
+
+```
+[fade] idle→curtsy    200ms 实测207ms n=26
+[fade] curtsy→idle    240ms 实测242ms n=30
+[fade] idle→tail_slap 200ms 实测201ms n=28
+[fade] tail_slap→idle 240ms 实测242ms n=31
+```
+
+实测 200–249 ms 与名义值差 ≤9 ms，n=19–40 帧说明渲染走的是 ~120 Hz（不是重复 rAF）。
+
+### 23.9 「突然的大小变化」：所有片段共用一个缩放（0.9.82 起）
+
+以前每个片段各自 `TARGET_H / BODY[片段][3]` 拉满，片段之间身高差 24%
+（`idle` 346 px vs `tap_proud` 295 px），换动作时肉眼就是角色突然变大/变小。
+现在只有一个 `SCALE = clamp(TARGET_H / BODY.idle[3])` = **1.000**，画布按 1:1 画原始像素，
+角色大小恒定，剩下的高度差是姿势本身（躺、蹲、跳），不再有缩放跳变。启动打一行：
+
+```
+W PetJs : WARNING [size] 统一缩放 1.000（基准 idle 身高 346px）
+```
+
+### 23.10 待机：只有一个定时器，连招不被自己打断（0.9.83 – 0.9.87）
+
+症状：日志里一条接一条 `idle→idle`，真正的待机小动作一次没播。
+
+根因有两个，叠在一起：
+
+1. **两个待机驱动**：`boot.js` 随机 9–21 s 一次 + `anim-pet.js` 1.5–3 s 一次，互相抢着起链。
+2. **连招被自己掐掉**：`scheduleIdle()` 的 1.5–3 s 定时器每次都调 `playChain(...)`，
+   而 `playChain` 一进来就 `clearTimeout(chainTimer)`，正在走第 2/3 步的链被清掉，
+   于是永远停在第 0 步（idle）。
+
+修法：`anim-pet.js` 是唯一定时器；起新链前看 `chainDeadline`，没走完就不再起。
+连招本身改成 `['idle', a, 'idle', b, 'idle']`，一轮放两个不同的待机小动作
+（白天池 10 种：`look_around / dance / curtsy / whale_bubble / tail_slap / stretch / tap_wave / tap_joy / tap_shy / jump`），
+两段之间夹一次 idle，衔接不断。
+
+另一个必需的细节是**交互优先**：点一下/说话/拖动起的片段会把进行中的连招掐掉
+（`play()` 里 `!o.chain && name !== 'idle'` 时清 `chainTimer`），并让待机静默 6 s；
+否则待机链的下一步会在 0.2 s 后把刚起的反应顶掉，看着就是「点了没反应」。
+`freezeWhenIdle()` 也改成 no-op（以前 900 ms 后停 rAF，画面定住再跳一下）。
+
+真机 95 s 采样（0.9.86，白天池），待机动作肉眼可见地轮换：
+
+```
+[fade] idle→dance       200ms 实测203ms
+[fade] dance→idle       240ms 实测248ms
+[fade] idle→whale_bubble 200ms 实测209ms
+[fade] idle→tap_wave    200ms 实测207ms
+[fade] idle→tap_joy     200ms 实测202ms
+[fade] idle→tail_slap   200ms 实测201ms
+[fade] idle→stretch     200ms 实测203ms
+```
+
+每轮两个动作后（0.9.87）一轮之内就能看到两种，轮换周期从约 2 分钟降到约 1 分钟。

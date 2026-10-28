@@ -67,7 +67,14 @@ class FloatingPetService : Service() {
     /** App 自己在前台时悬浮窗是 GONE，这时候来的气泡先存着，等回到桌面再上屏。 */
     @Volatile
     private var appFg = false
-    private var pendingSay: String? = null
+    /**
+     * App 在前台时挂起的气泡。一次回答里 `say` 会被调好几次（分句朗读），
+     * 所以这里必须是**有序多句**：0.9.77 之前是单槽 `String?`，前台期间来两句就只剩最后一句，
+     * 回桌面时前一句被静默吞掉。回桌面按挂起顺序依次补上。
+     */
+    private val pendingSay = ArrayDeque<String>()
+    /** `pendingSay` 会被 pet-say 线程（轮询）和主线程（回桌面补播）同时碰，进出都走这把锁。 */
+    private val pendingSayLock = Any()
 
     /** 本地气泡队列 + 当前这句还要停留多久（跟 JS 的 dwell 公式对齐）。 */
     private val sayQueue = ArrayDeque<String>()
@@ -156,6 +163,12 @@ class FloatingPetService : Service() {
      * 说完再上下一句；队列满了就不动游标，让宿主那边留着下轮再取。
      */
     private val SAY_QUEUE_MAX = 6
+
+    /**
+     * 前台挂起队列的上限。前台可能待很久（在里面聊十几轮），不设上限就成了内存泄漏；
+     * 满了丢最旧的一句并记一次日志——最旧的通常早被页面上那条回复覆盖了。
+     */
+    private val PENDING_SAY_MAX = 6
 
     /** 本次按下只给回执（连点第二下起）：UP 时不要走 finishPtt。 */
     private var receiptOnly = false
@@ -643,6 +656,8 @@ class FloatingPetService : Service() {
                 if (items != null) {
                     for (i in 0 until items.length()) {
                         if (accepted >= SAY_MAX_PER_POLL) break
+                        // 前台挂起队列满了就别再取了：剩下的留在宿主队列，回桌面后下一轮再来。
+                        if (appFg && synchronized(pendingSayLock) { pendingSay.size } >= PENDING_SAY_MAX) break
                         val o = items.optJSONObject(i) ?: continue
                         val text = o.optString("text").orEmpty().trim()
                         if (text.isNotEmpty()) {
@@ -756,10 +771,14 @@ class FloatingPetService : Service() {
         }
         runCatching { wm.updateViewLayout(v, p) }
         // 在 App 里打字问的那句，回答落到桌面上再讲：等窗口真的重新可见再上屏。
-        if (!on) pendingSay?.let { text ->
-            pendingSay = null
-            Log.i("PetSay", "回桌面补上屏 ${text.length} 字")
-            main.postDelayed({ offerSay(text) }, 250L)
+        if (!on) {
+            val list = synchronized(pendingSayLock) {
+                if (pendingSay.isEmpty()) emptyList() else pendingSay.toList().also { pendingSay.clear() }
+            }
+            if (list.isNotEmpty()) {
+                Log.i("PetSay", "回桌面补上屏 ${list.size} 句（${list.joinToString("、") { "${it.length} 字" }}）")
+                main.postDelayed({ list.forEach { offerSay(it) } }, 250L)
+            }
         } else if (sayQueue.isNotEmpty()) {
             // 切到前台气泡就看不见了，排队的句子不用再补；最新的回答走 pendingSay 那条路。
             Log.i("PetSay", "切到前台，丢掉排队 ${sayQueue.size} 句")
@@ -777,8 +796,15 @@ class FloatingPetService : Service() {
         val body = text.trim()
         if (body.isEmpty() || destroyed) return false
         if (appFg) {
-            pendingSay = body
-            Log.i("PetSay", "气泡挂起 ${body.length} 字（App 在前台，回桌面再上屏）")
+            val n = synchronized(pendingSayLock) {
+                if (pendingSay.size >= PENDING_SAY_MAX) {
+                    pendingSay.removeFirst()
+                    Log.i("PetSay", "前台挂起已满 $PENDING_SAY_MAX 句，丢掉最旧的一句")
+                }
+                pendingSay.addLast(body)
+                pendingSay.size
+            }
+            Log.i("PetSay", "气泡挂起 ${body.length} 字（累计 $n 句，回桌面再上屏）")
             return false
         }
         if (sayQueue.size >= SAY_QUEUE_MAX) {
@@ -1167,6 +1193,18 @@ class FloatingPetService : Service() {
      * 连点/快速反复操作时每次短按都会走到「按住说话，松手发送」，不节流就会
      * 一直被同一句提示糊脸；这里只保留第一下，后续只写日志（仍算回执，不静默）。
      */
+    /**
+     * 提示只进通知栏，不弹气泡。
+     *
+     * 气泡占顶部 68px，宠物要靠 transform 缩到 2/3 + 下移才不被挡住；短按宠物本来
+     * 只是「戳一下」，却因为这句提示整只缩小一圈，用户感知就是「点一下大小就变了」。
+     * 只有真正的台词才让位，操作提示一律走通知。
+     */
+    private fun hintNotify(text: String) {
+        Log.i("PetTap", "提示（只进通知）：$text")
+        updateNotification(text)
+    }
+
     private fun hintOnce(text: String) {
         val now = SystemClock.elapsedRealtime()
         if (now - lastHintAt < HINT_MIN_GAP) {
@@ -1224,15 +1262,14 @@ class FloatingPetService : Service() {
             Log.i("PetTap", "松手：没在录 turn=$turnActive tts=${tts.busy} speaking=$speaking")
             // 录音还没起来就松手了（抢麦失败 / 上一轮还在收尾）：给一句提示就回待机
             if (!turnActive && !tts.busy && !speaking) {
-                hintOnce("按住说话，松手发送")
-                updateNotification(getString(R.string.notif_text))
+                hintNotify("按住说话，松手发送")
             }
             return
         }
         if (heldMs < HOLD_MIN_MS) {
             Log.i("PetTap", "松手：按太短 ${heldMs}ms < ${HOLD_MIN_MS}ms，丢弃这段当误触")
             cancelPtt()
-            hintOnce("按住说话，松手发送")
+            hintNotify("按住说话，松手发送")
             return
         }
         finishRecording(HOLD_MIN_MS.toInt())
@@ -1367,11 +1404,9 @@ class FloatingPetService : Service() {
             logVad(listenedMs, heard, 0, false)
             // 录音这边知道为什么没声（拿不到帧 / 说得太短），别只写日志——用户在等一个说法。
             val fault = recorder.takeFaultText()
+            // 没录到人声只更新通知栏：气泡一弹宠物就得缩到 2/3 让位，
+            // 用户点一下宠物就看到尺寸变化，比这句提示更显眼，得不偿失。
             updateNotification(fault ?: "没听到声音 · 点我再说")
-            // 按住说话没录到人声：直接教怎么用，别只留在通知栏里
-            if (fault == VoiceRecorder.MSG_TOO_SHORT || fault == VoiceRecorder.MSG_NO_SPEECH) {
-                hintOnce("按住说话，松手发送")
-            }
             // 点一下就抬手：不算一轮，直接回待机，别自动重听（重听会让用户以为卡住了）。
             if (fault == VoiceRecorder.MSG_TOO_SHORT || fault == VoiceRecorder.MSG_NO_SIGNAL ||
                     fault == VoiceRecorder.MSG_NO_SPEECH) {

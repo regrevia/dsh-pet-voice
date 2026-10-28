@@ -30,10 +30,12 @@ function resumeLoop () {
   rafQueue = []
   for (const cb of queued) nativeRaf(cb)
 }
-function freezeWhenIdle () {
-  setTimeout(() => { if (mode === 'idle') pauseLoop() }, 900)
-}
+// 以前待机 900ms 就把 rAF 停掉「省电」，可角色本来就是一直在动的直播画面：
+// 停了之后左等右等还是那张静帧，下一次交互再恢复，屏幕上是「卡住→突然动起来」，
+// 这就是「动作衔接不流畅」的一半来源。渲染只在熄屏/不可见时才停（见 setActive/visibility）。
+function freezeWhenIdle () { /* 不再冻结 rAF */ }
 
+let sayGeomKey = ''
 const stage = document.getElementById('stage')
 const pet = createPet(stage)
 
@@ -113,7 +115,13 @@ function idleDelay () {
   return 9000 + Math.random() * 12000
 }
 
+// 待机动作只由 anim-pet.js 里的 scheduleIdle 驱动（1.5–3s 一次、带交叉淡化、
+// 且会避开上一段）。这里原来是第二套定时器，两套互相 playOnce/playChain 打断，
+// 屏幕上就是刚起势就被掐断、再接一段别的——所以这里只清定时器，不再排新的。
 function scheduleIdlePlay () {
+  clearTimeout(idleTimer)
+}
+function scheduleIdlePlayLegacy () {
   clearTimeout(idleTimer)
   if (!autoPlay || !active) return
   idleTimer = setTimeout(() => {
@@ -188,26 +196,30 @@ window.PetBridge = {
     lastInteract = Date.now()
     wakeUp()
     const now = Date.now()
+    // 这一下是这一轮里的第几下（2.6s 内算同一轮）
+    const n = now - lastTapAt < 2600 ? taps + 1 : 1
     if (name === 'wave') {
       // v3 素材有真实挥手；老素材没有就退回点击的挥手变体
       if (!pet.playOnce('wave')) pet.tap()
-      taps = now - lastTapAt < 900 ? taps + 1 : 1
-      lastTapAt = now
-      freezeWhenIdle()
-      return true
-    }
-    if (name === 'celebrate') {
+    } else if (name === 'celebrate') {
       pet.celebrate()
     } else if (now - lastInteract > 120000) {
       // 很久没理她，点一下是「惊醒」而不是元气挥手
       pet.playOnce('wake')
-    } else if (now - lastTapAt < 900 && taps >= 2) {
-      // 连点：第 3 下开始被逗急了（每轮最多放大到「吓一跳」）
-      pet.playOnce(taps >= 3 ? 'startle' : 'tap_proud')
+    } else if (n >= 5) {
+      // 逗过头：吓一跳。分级只在这里做，随机池里没有生气，
+      // 所以「点一下突然生气」不会再有，连点才升级。
+      pet.playOnce('startle')
+    } else if (n === 4) {
+      pet.playOnce('tap_proud')
+    } else if (n === 3) {
+      pet.playOnce('tap_pout')
+    } else if (n === 2) {
+      pet.playOnce('tap_joy')
     } else {
       pet.tap()
     }
-    taps = now - lastTapAt < 900 ? taps + 1 : 1
+    taps = n
     lastTapAt = now
     freezeWhenIdle()
     return true
@@ -232,10 +244,39 @@ window.PetBridge = {
     const s = String(text || '').trim()
     if (!s) { bubble.classList.remove('show'); document.body.classList.remove('has-bubble'); return false }
     bubbleText.textContent = s.length > 90 ? s.slice(0, 89) + '…' : s
+    // 先算好让位再让气泡出现：--shift / --shrink 必须在 has-bubble 生效前就位。
+    // 顺序反了的话，第一次说话会先按 CSS 兜底值缩放一帧、再跳到量出来的值，
+    // 看起来就是「点一下先缩一下、又缩一下」。stageH 没布局好（0）时保持上一次的值。
+    const stageH = window.innerHeight
+    if (stageH > 0) {
+      // 气泡底边：top 2 + 高 68 + 4px 缝（68 与 #bubble 的 height 一致，两处要一起改）
+      const bubBottom = 74
+      const box = window.__petBodyBox ? window.__petBodyBox() : null
+      let shrink = 0.96
+      let shiftPx = Math.round(stageH * 0.14)
+      if (box && box.h > 0 && box.bottom > box.top) {
+        // 让位的目标只有一个：头顶露在气泡下沿之外、脚不跑出窗口。
+        // 需要把人物缩掉的最大比例 = (窗口高 - 气泡底) / 人物高 ——
+        // 216 窗口下是 (216-74)/146.8 ≈ 0.967，也就是只缩 3%，肉眼看不出来。
+        // 旧算法按 (窗口高 - 让位高) / 窗口高 缩到 0.667：说一句话人就突然小一圈，
+        // 那是「输出气泡的时候突然变小很多」的根源。
+        shrink = Math.min(1, (box.h - bubBottom) / (box.bottom - box.top))
+        shrink = Math.max(0.85, shrink)
+        // 脚底贴窗口下沿：下移量正好把缩掉的空隙补回来，人物不下坠也不悬空。
+        shiftPx = Math.round(box.h - box.bottom * shrink)
+      }
+      document.documentElement.style.setProperty('--shift', shiftPx + 'px')
+      document.documentElement.style.setProperty('--shrink', shrink.toFixed(4))
+      // 只在这两个值真的变了时才打一行（窗口尺寸换了才会有），平时一条不多；
+      // 用 warn 是因为宿主只把 warn/error 转进 logcat（PetJs），info 看不到。
+      const key = shiftPx + '/' + shrink.toFixed(4)
+      if (key !== sayGeomKey) {
+        sayGeomKey = key
+        console.warn('[bubble] 让位 ' + shiftPx + 'px / 缩放 ' + shrink.toFixed(3))
+      }
+    }
     bubble.classList.add('show')
     document.body.classList.add('has-bubble')
-    lastInteract = Date.now()
-    wakeUp()
     // 量真实高度再决定身体让位多少：一行、两行、三行都对齐，末字不会被裁。
     // 必须同步量：待机 900ms 后 rAF 会被冻掉，放进 rAF 里这段永远不执行——之前就踩过，
     // --shift 一直是空值、退回默认 52px，120dp 档才会贴头。
@@ -245,15 +286,6 @@ window.PetBridge = {
     // 卡片高度固定 68px（与 #bubble 的 height 一致）：量出来的高度不再随字数变，
     // --shift / --shrink 只跟窗口大小有关，连点不会让小人忽大忽小。
     // 68 是 3 行文字 + padding + 边框的下限，改成别的值时两处必须一起改。
-    const stageH = window.innerHeight
-    const bubH = 68
-    const pad = 0.086 * (stageH - bubH)
-    const margin = Math.max(2, Math.round((16 - pad) / 0.914))
-    const shiftPx = Math.min(Math.ceil(bubH) + margin, Math.round(stageH * 0.6))
-    document.documentElement.style.setProperty('--shift', shiftPx + 'px')
-    // 让位不用「压矮盒子」，改成等比缩小：可见高度正好少掉让位量，宽高比不变。
-    const shrink = Math.max(0.55, Math.min(1, (stageH - shiftPx) / stageH))
-    document.documentElement.style.setProperty('--shrink', shrink.toFixed(4))
     clearTimeout(bubbleTimer)
     // 气泡停留时间跟字数走，长一点的话有时间读完
     bubbleTimer = setTimeout(() => { bubble.classList.remove('show'); document.body.classList.remove('has-bubble') }, Math.min(9000, 3200 + s.length * 90))

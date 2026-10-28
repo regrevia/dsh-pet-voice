@@ -11,15 +11,19 @@
  * 对外接口不变：setMode / setMouth / tap / tapKind / celebrate / playOnce /
  *               setDragging / setActive / destroy
  */
-import { idlePool, nextIdleDelay } from './idle.js'
+import { idlePool, nextIdleDelay, pickIdle } from './idle.js'
 
 export function createPet (container) {
   const CLIPS = { idle: 'idle', listening: 'idle', thinking: 'thinking', talking: 'talking', happy: 'cheer' }
   const ONCE = {
-    tap: ['tap', 'tap_shy', 'tap_tickle', 'tap_pout', 'tap_wave', 'tap_joy'],
+    // 生气（tap_pout）不在这里：随机池里有它就代表「点一下也可能突然生气」。
+    // 它只由 tap() 的连点升级触发（点 3 下起），见 tap()。
+    tap: ['tap', 'tap_shy', 'tap_tickle', 'tap_wave', 'tap_joy'],
     tap_wave: ['tap_wave'],
     tap_joy: ['tap_joy'],
     tap_proud: ['tap_proud'],
+    // 生气只能靠 playOnce/tap 的升级链点名播；它不在随机池里，所以单点不会突然生气。
+    tap_pout: ['tap_pout'],
     wake: ['wake_up'],
     cheer: ['cheer'],
     drag: ['drag'],
@@ -122,11 +126,16 @@ export function createPet (container) {
   let alphaChecked = false
 
   function fit () {
-    const r = container.getBoundingClientRect()
+    // 只认 layout 尺寸（clientWidth/Height）：#stage 在气泡让位时带 transform，
+    // getBoundingClientRect() 返回的是缩放后的框，背板会跟着缩、还会白重分配一次 canvas
+    // （清空绘制状态 + 换一次纹理），画面在交接的那一帧就糊一下。
     const dpr = Math.min(2.5, window.devicePixelRatio || 1)
-    const w = Math.max(2, Math.round((r.width || CW) * dpr))
-    const h = Math.max(2, Math.round((r.height || CH) * dpr))
-    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h }
+    const w = Math.max(2, Math.round((container.clientWidth || CW) * dpr))
+    const h = Math.max(2, Math.round((container.clientHeight || CH) * dpr))
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w; canvas.height = h
+      console.warn('[fit] 画布 ' + w + 'x' + h + '（' + (container.clientWidth || CW) + 'x' + (container.clientHeight || CH) + ' css @' + dpr + '）')
+    }
   }
   fit()
   window.addEventListener('resize', fit)
@@ -572,34 +581,43 @@ export function createPet (container) {
     ctx.setTransform(1, 0, 0, 1, 0, 0)
   }
 
-  /** 画一层（按主体框归一化到统一高度/脚底基线/中心），alpha 用于动作间渐变。 */
-  function drawLayer (v, clip, alpha) {
-    if (!ctx || !v || alpha <= 0.002) return
+  /**
+   * 某段素材在画布里的落位。缩放对所有人一视同仁：素材本来就是同一块 420×465 画布
+   * 渲出来的角色，按每段自己的 BODY 高度归一化（tap_proud 295 / dance 296 / idle 346）
+   * 等于把蹲下的姿势放大 17%，屏幕上就是「点一下先撑大再缩回」——
+   * 这才是「大小会突然变化」的根。统一用待机那一个缩放，只让位置跟姿势走。
+   */
+  const SCALE = Math.min(1.3, Math.max(0.85, TARGET_H / BODY.idle[3]))
+  // 所有片段共用这一个缩放（= 待机片段的自然大小）：以前是每个片段各自
+  // TARGET_H/BODY[片段][3] 拉满，片段之间差 24%，换动作时肉眼就是「突然变大/变小」。
+  // 现在画布 1:1 画原始像素，角色大小恒定，只有姿势高低变化。
+  function geoFor (clip) {
     const n = NORM[clip] || [0, 0, CW, CH]
     const b = BODY[clip] || n
-    // 一次性动作（点击/庆祝）沿用待机的缩放：各自按主体框归一化会让点击时身体比待机
-    // 大 7%~18%（tap 339 / tap_wave 292 / idle 346），看起来就是点一下先撑大再缩回。
-    // 动作只换姿势不换大小，毛发/水花的锚点公式照旧，s 与待机一致就稳定。
-    const idleScale = Math.min(1.3, Math.max(0.85, TARGET_H / BODY.idle[3]))
-    const scale = /^(tap|cheer|curtsy)\b/.test(clip) ? idleScale
-      : Math.min(1.3, Math.max(0.85, TARGET_H / b[3]))
-    // 缩放只看主体高度（细胳膊/尾巴/气泡不吃进高度），落点仍按整段素材的最底边贴地，
-    // 这样待机就是原地不动（0.9.28 的位置一像素不差），换动作只换姿势不换大小。
     const bcx = b[0] + b[2] / 2
-    const dw = n[2] * scale, dh = n[3] * scale
-    let dx = TARGET_CX + (n[0] - bcx) * scale
+    const dw = n[2] * SCALE, dh = n[3] * SCALE
+    let dx = TARGET_CX + (n[0] - bcx) * SCALE
     const dy = TARGET_BOTTOM - dh
     // 气泡这类特效会伸出画布左右：整体挪回画布内，宁可偏一两像素也不裁掉
     if (dx < 0) dx = 0
     else if (dx > CW - dw) dx = Math.max(0, CW - dw)
+    return { n: n, dx: dx, dy: dy, dw: dw, dh: dh }
+  }
+  const geoAt = (clip) => geoFor(clip)
+
+  /** 画一层。alpha 用于动作渐变；g 缺省就按该段自己的落位。 */
+  function drawLayer (v, clip, alpha, g) {
+    if (!ctx || !v || alpha <= 0.002) return
+    const gg = g || geoAt(clip)
+    const n = gg.n
     ctx.globalAlpha = alpha
     try {
-      ctx.drawImage(v, n[0], n[1], n[2], n[3], dx, dy, dw, dh)
+      ctx.drawImage(v, n[0], n[1], n[2], n[3], gg.dx, gg.dy, gg.dw, gg.dh)
     } catch (e) { /* 帧未就绪，下一帧再画 */ }
   }
 
   /**
-   * 每帧重画画布：旧动作淡出、新动作淡入（一次性动作 200ms，回待机 260ms）。
+   * 每帧重画画布：旧动作淡出、新动作淡入（一次性动作 200ms，回待机 240ms）。
    * 素材之间本来就有呼吸/重心差异，硬切会「啪」一下跳，渐变之后同一段素材内的动作变化是连续的。
    */
   function fadeTick () {
@@ -621,14 +639,35 @@ export function createPet (container) {
       const t = Math.min(1, (nowMs() - f.t0) / (f.dur || 150))
       // smoothstep：两端缓起缓落，动作交接不「跳闪」
       const e = t * t * (3 - 2 * t)
-      drawLayer(f.vid, f.clip, 1 - e)
-      drawLayer(v, curClip, e)
+      // 真正的交叉淡化：旧层 1-e、新层 e，画面不会整体变虚（背景透出来）也不会双影——
+      // 前提是两层用同一个缩放（SCALE 对所有片段一致），位移按 e 从旧落位滑到新落位。
+      // 双影 = 两层各按各的落位画；这里只差一次平移，淡化过去就是「换了个姿势」。
+      const gt = geoAt(curClip)
+      const gp = f.geo || geoAt(f.clip)
+      drawLayer(f.vid, f.clip, 1 - e, gp)
+      drawLayer(v, curClip, e, {
+        n: gt.n, dw: gt.dw, dh: gt.dh,
+        dx: gp.dx + (gt.dx - gp.dx) * e,
+        dy: gp.dy + (gt.dy - gp.dy) * e
+      })
       if (fadeSamples.length < 40) fadeSamples.push([Math.round((nowMs() - f.t0)), +e.toFixed(3), +(1 - e).toFixed(3)])
       if (t >= 1) {
         try { f.vid.pause() } catch (e) {}
+        // 这块解码器空出来了：先把「下一步最可能播的待机素材」挂上（只 load 不播）。
+        // 动作播完回待机时 src 已经就位，不用再等加载，也不会先黑一下再出声。
+        if (f.vid !== activeVid) {
+          try {
+            const warm = src(baseClip())
+            if (f.vid.getAttribute('src') !== warm) { f.vid.src = warm; f.vid.load() }
+          } catch (e) {}
+        }
         const to = curClip; const from = f.clip; const dur = f.dur
         // 交接过程留最后一份采样，宿主轮询取走（排查「切换跳闪」）
         window.__petLastFade = { from, to, dur: dur || 200, n: fadeSamples.length, samples: fadeSamples }
+        // 每交接一次打一行（宿主只转 warn/error）：能看到实际淡化时长和采到几帧，
+        // 「有没有硬切/掉帧」在 logcat 里就能数，不用截屏猜。
+        console.warn('[fade] ' + from + '→' + to + ' ' + (dur || 200) + 'ms 实测' +
+          Math.round(nowMs() - f.t0) + 'ms n=' + fadeSamples.length)
         fadeSamples = []
         fadePrev = null
       }
@@ -686,7 +725,10 @@ export function createPet (container) {
     try { next.pause() } catch (e) {}
     next.loop = !o.once
     next.playbackRate = 1
-    next.src = src(name)
+    // 同一个地址不重新挂 src：重新赋值会让解码器重头加载，接下一段时卡一下。
+    // （配合 draw() 渐变结束时给空出来的那块预热待机素材，回待机是立刻的。）
+    if (next.getAttribute('src') !== src(name)) next.src = src(name)
+    else if (o.once) { try { next.currentTime = 0 } catch (e) {} }
     let fired = false
     const go = () => {
       if (fired || destroyed || id !== seq) return
@@ -706,11 +748,19 @@ export function createPet (container) {
       next.play().catch(() => {})
       activeVid = next
       vidClip.set(next, name)
+      // 交互片段（点击反应、说话、拖动…）优先于待机连招：不掐掉进行中的连招，
+      // 待机链的下一步会在 0.2s 后把刚起的反应顶掉——看着就是「点了没反应/反应被打断」。
+      if (!o.chain && name !== 'idle' && chainDeadline) {
+        clearTimeout(chainTimer)
+        chainDeadline = 0
+        chainNext = null
+      }
+      if (!o.chain && name !== 'idle') idleHold = nowMs() + 6000
       // 进动作略快（200ms）让反馈跟手，回待机更慢（260ms）显得稳
-      const dur = o.fade === undefined ? (o.once ? 200 : 260) : o.fade
+      const dur = o.fade === undefined ? (o.once ? 200 : 240) : o.fade
       if (prev && prev !== next && prev.readyState >= 2 && dur > 0) {
         // 旧层继续播完这段渐变（画面在动，不是定格），渐变结束由 draw() 停掉它
-        fadePrev = { vid: prev, clip: vidClip.get(prev) || name, t0: nowMs(), dur }
+        fadePrev = { vid: prev, clip: vidClip.get(prev) || name, t0: nowMs(), dur, geo: geoAt(vidClip.get(prev) || name) }
         if (!fadeRaf) fadeRaf = requestAnimationFrame(fadeTick)
         setTimeout(() => { if (fadePrev && fadePrev.vid === prev) return; try { prev.pause() } catch (e) {} }, dur + 260)
       } else {
@@ -755,8 +805,10 @@ export function createPet (container) {
     const step = (i) => {
       if (destroyed) return
       if (i >= list.length) return
-      const name = list[i]
+      let name = list[i]
       const last = i === list.length - 1
+      // 已经在播同一段就别再交叉一次（待机链最后一步回 idle 时常见，纯浪费一帧渐变）
+      if (!last && name === curClip && name !== 'idle') { step(i + 1); return }
       if (last) {
         chainDeadline = 0
         chainNext = null
@@ -807,18 +859,48 @@ export function createPet (container) {
 
   // 待机小动作：白天爱动、晚上犯困，隔十几秒自己来一段，别一直重复同一口气。
   let idleTimer = 0
+  let tapTimes = []
+  let lastIdle = ''
+  let idleHold = 0
   const scheduleIdle = () => {
     clearTimeout(idleTimer)
     idleTimer = setTimeout(() => {
       if (destroyed) return
       if (baseMode === 'idle' && !dragging && active && document.visibilityState !== 'hidden') {
         // idle → 随机微动作 → idle，用链播保证动作之间不留空
-        playChain(['idle', pick(idlePool(new Date().getHours())), 'idle'], 120)
+        // 上一段连招还没走完就别再起一段：playChain 会 clearTimeout 掉进行中的
+        // 第 2/3 步，于是永远停在第 0 步（日志里就是一条接一条的 idle→idle，
+        // 待机小动作一次都没真正播出来）。
+        const busy = (chainDeadline && nowMs() < chainDeadline + 120) || nowMs() < idleHold
+        if (!busy) {
+          const pool = idlePool(new Date().getHours())
+          const a = pickIdle(pool, lastIdle, Math.random())
+          const b = pickIdle(pool, a, Math.random())
+          lastIdle = b
+          // 一轮里放两个不同的小动作：池子里 10 种，单轮一个要近 2 分钟才轮一遍，
+          // 看着像「老是那几个」；两段之间仍夹一次 idle，衔接不断。
+          playChain(['idle', a, 'idle', b, 'idle'], 160)
+        }
       }
       scheduleIdle()
     }, nextIdleDelay(Math.random()))
   }
   scheduleIdle()
+
+  /**
+   * 人物主体在窗口里的上下边界（CSS px），不含 #stage 的让位 transform。
+   * boot.js 用它算气泡让位：目标只是「头顶露出气泡下沿」，
+   * 216 窗口下把小人下移约 30px 就够（只缩 3%），不需要缩掉三分之一。
+   */
+  console.warn('[size] 统一缩放 ' + SCALE.toFixed(3) + '（基准 idle 身高 ' + BODY.idle[3] + 'px）')
+  window.__petBodyBox = () => {
+    const W = container.clientWidth || CW
+    const H = container.clientHeight || CH
+    const k = Math.min(W / CW, H / CH)
+    if (!(k > 0)) return null
+    const oy = (H - CH * k) / 2
+    return { w: W, h: H, k: k, top: oy + BODY.idle[1] * k, bottom: oy + TARGET_BOTTOM * k }
+  }
 
   // 宿主探针读取的现场：走 canvas 还是降级 video、当前是哪段、上次交接采了几帧
   window.__petDebug = () => ({
@@ -890,7 +972,6 @@ export function createPet (container) {
       // 屏幕上就是「动作放大→缩回」连闪两下。让它播完自己回 baseClip 更顺。
       if (onceDeadline && nowMs() < onceDeadline && next !== 'talking') return
       play(baseClip(), { fade: 200 })
-      if (next === 'talking' && activeVid) activeVid.playbackRate = 1.05
     },
     setMouth (value) {
       const v = Math.max(0, Math.min(1, Number(value) || 0))
@@ -902,12 +983,22 @@ export function createPet (container) {
         return
       }
       if (av.on) { av.speaking = v > 0.01; if (av.speaking) av.quietAt = avNow() + 420; return }
+      // 口型/语速一律不碰 playbackRate：按音量在 0.92~1.18 之间抖，
+      // 屏幕上就是「动作速率突然变快又突然慢下来」。素材本身 15fps 循环播放就够。
       if (baseMode !== 'talking' || !activeVid) return
-      activeVid.playbackRate = 0.92 + v * 0.26
+      if (activeVid.playbackRate !== 1) activeVid.playbackRate = 1
     },
     tap () {
       if (av3Play('tap')) return
-      play(pick(ONCE.tap), { once: true, fade: 90 })
+      // 连点升级：越点越有反应，生气排在第 3 下起，单点随机池里没有生气。
+      const t = nowMs()
+      tapTimes = tapTimes.filter((x) => t - x < 5000)
+      tapTimes.push(t)
+      const k = tapTimes.length
+      if (k >= 6) play(pick(['startle', 'tail_slap', 'dance']), { once: true })
+      else if (k >= 4) play(pick(['tap_proud', 'tap_joy']), { once: true })
+      else if (k >= 3) play('tap_pout', { once: true })
+      else play(pick(ONCE.tap), { once: true })
     },
     tapKind (kind) {
       if (av3Play(kind)) return
