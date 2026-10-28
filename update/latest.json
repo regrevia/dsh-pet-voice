@@ -1,12 +1,12 @@
 {
-  "versionCode": 181,
-  "versionName": "0.9.111",
-  "size": 30068310,
-  "sha256": "ccd52ce3406a318d87d074d2e68b338243257375610136b60b4e3f32f6581a63",
+  "versionCode": 183,
+  "versionName": "0.9.113",
+  "size": 30069790,
+  "sha256": "1bfa9bede46dd40e55ef34946e1646ee5af8899729e6aeec360444455e09c9b8",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.111/app-release.apk",
-  "notes": "0.9.111 长按目标行删除目标",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.111/app-release.apk",
-  "publishedAt": "2026-10-28T11:08:12.783Z",
-  "promotedAt": "2026-10-28T11:08:15.642Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.113/app-release.apk",
+  "notes": "对话手感对齐桌面：翻上历史不被拽回底部、回到底部胶囊、长按复制/重发、输入框最多四行",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.113/app-release.apk",
+  "publishedAt": "2026-10-28T11:32:19.061Z",
+  "promotedAt": "2026-10-28T11:32:21.767Z"
 }
