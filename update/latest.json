@@ -1,12 +1,12 @@
 {
-  "versionCode": 200,
-  "versionName": "0.9.130",
-  "size": 30091386,
-  "sha256": "fcf628766e55bea2b0c1ad5b7e15f9fbec5c75b9f02919137f186427eedb5418",
+  "versionCode": 201,
+  "versionName": "0.9.131",
+  "size": 30091526,
+  "sha256": "d09e63fb6cd90ea89446cd578d3b06bdf921636fed303cc7baf851edac066155",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.130/app-release.apk",
-  "notes": "换装不再闪屏；长回复语音不再被截断；退出 App 后也能收到并念出回复；发送位在轮次中变中断方块、排队项点击即引导",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.130/app-release.apk",
-  "publishedAt": "2026-10-28T16:46:11.815Z",
-  "promotedAt": "2026-10-28T16:46:14.950Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.131/app-release.apk",
+  "notes": "浮窗重启不再重念旧播报；换装不再闪屏；长回复语音不再被截断；退出 App 后也能收到并念出回复；轮次中发送位变中断方块、排队项点击即引导",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.131/app-release.apk",
+  "publishedAt": "2026-10-28T16:55:38.234Z",
+  "promotedAt": "2026-10-28T16:55:41.434Z"
 }
