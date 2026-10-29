@@ -1,14 +1,13 @@
 {
   "ok": true,
-  "versionCode": 208,
-  "versionName": "0.9.138",
-  "size": 30094734,
-  "sha256": "2e4fcc70ca10847425ff3f4f2ac6377e30ba7fe34718453f946d8c58b51670d7",
+  "versionCode": 209,
+  "versionName": "0.9.139",
+  "size": 30095238,
+  "sha256": "6ee6aa699c49f43ea1d53b33d761986e0c7a944c16c527b7bc03172309457ece",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.138/app-release.apk",
-  "notes": "回来能接上最新一轮（不再退回发送/丢回复）；排队行加「直接发送」；终止显示「已终止」且按钮立刻回发送",
-  "minPlugin": "0.1.36",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.138/app-release.apk",
-  "publishedAt": "2026-10-29T13:38:20.309Z",
-  "promotedAt": "2026-10-29T13:38:23.884Z"
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.139/app-release.apk",
+  "notes": "0.9.139：思考过程/会话摘要等注入文本一律不上屏；多图连发（≤6 张，输入框预览、图文同发，桌面端收到真图）；语音同一句只播一次（跨播放器去重）",
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.139/app-release.apk",
+  "publishedAt": "2026-10-29T15:48:04.473Z",
+  "promotedAt": "2026-10-29T15:48:08.285Z"
 }
