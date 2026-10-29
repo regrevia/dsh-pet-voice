@@ -1,13 +1,14 @@
 {
-  "versionCode": 205,
-  "versionName": "0.9.135",
-  "size": 30093430,
-  "sha256": "8e0d5ba86dde8a008d31e681a189730292bca0aee20f80c956b2b723bc97cbdb",
+  "ok": true,
+  "versionCode": 207,
+  "versionName": "0.9.137",
+  "size": 30093786,
+  "sha256": "fe3c912a7644d3f2b804a863970465e6f51a585a82ee43ee26eea256a2812291",
   "file": "app-release.apk",
-  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.135/app-release.apk",
-  "notes": "配对链接支持自建明文服务器（面板链接扫码/粘贴即可绑定）；连不上时那行字可点重新扫码",
+  "url": "https://cnb.cool/2022090087/dsh-pet-voice/-/releases/download/v0.9.137/app-release.apk",
+  "notes": "修复「检查更新」显示连接失败（宿主回包缺 ok 字段）；检查更新先问宿主、公开源超时收紧，点一下就有结果",
   "minPlugin": "0.1.35",
-  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.135/app-release.apk",
-  "publishedAt": "2026-10-28T21:55:42.910Z",
-  "promotedAt": "2026-10-28T21:55:46.304Z"
+  "fallbackUrl": "https://github.com/regrevia/dsh-pet-voice/releases/download/v0.9.137/app-release.apk",
+  "publishedAt": "2026-10-29T08:18:16.130Z",
+  "promotedAt": "2026-10-29T08:18:19.648Z"
 }
