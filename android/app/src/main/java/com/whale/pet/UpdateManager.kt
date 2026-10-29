@@ -75,10 +75,15 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
             ),
         )
 
-        /** 插件版本够不够：required 为空不挑；插件没上报版本就当太旧。 */
+        /**
+         * 插件版本够不够：required 为空不挑；插件没上报版本时不算太旧。
+         *
+         * 未知 ≠ 太旧：读不到插件版本通常是宿主连不上（隧道断/没绑定），
+         * 这时提示「先更新插件」等于把网络问题甩给用户，照着做也装不上。
+         */
         fun pluginTooOld(pluginVersion: String, required: String): Boolean {
             if (required.isBlank()) return false
-            if (pluginVersion.isBlank()) return true
+            if (pluginVersion.isBlank()) return false
             return compareVersion(pluginVersion, required) < 0
         }
 
@@ -110,16 +115,21 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
         BuildConfig.VERSION_NAME
     }
 
-    /** 有没有比本机新的版本：先问公开源，问不到再问宿主；都问不到当「没有」，静默。 */
-    fun check(): Info? = publicInfo() ?: hostInfo()
+    /**
+     * 有没有比本机新的版本：**先问宿主**，连不上再问公开源；都问不到当「没有」，静默。
+     *
+     * 顺序反过来的代价是实测过的：公开源在国内经常连不上，三个源各等到超时才回落到
+     * 宿主，用户点「检查更新」后要干等半分钟才看到结果，像是按钮坏了。
+     */
+    fun check(): Info? = hostInfo() ?: publicInfo()
 
     private fun publicMeta(channel: Channel): JSONObject? {
         var conn: HttpURLConnection? = null
         try {
             conn = (URL(channel.meta).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                connectTimeout = 8_000
-                readTimeout = 10_000
+                connectTimeout = 3_000
+                readTimeout = 4_000
                 instanceFollowRedirects = true
                 setRequestProperty("User-Agent", "WhalePet/${BuildConfig.VERSION_NAME}")
                 setRequestProperty("Accept", "application/json")
@@ -177,7 +187,9 @@ class UpdateManager(private val ctx: Context, private val client: PetClient) {
             return null
         }
         val j = res.json
-        if (j == null || !j.optBoolean("ok", false)) {
+        // ok:true 是规范写法，但历史 latest.json 里没有这个字段：只要回包里带 versionCode
+        // 就说明宿主答上来了，不能因为少个 ok 就报「连接失败」。
+        if (j == null || (!j.optBoolean("ok", false) && !j.has("versionCode"))) {
             lastCheck = "error"
             return null
         }

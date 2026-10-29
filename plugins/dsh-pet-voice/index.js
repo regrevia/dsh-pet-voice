@@ -5732,6 +5732,9 @@ export function apply(ctx, config) {
     const upstream = /^https:\/\//i.test(String(meta.url ?? '')) ? String(meta.url) : local
     const backup = upstream === local ? String(meta.fallbackUrl ?? '') : local
     return sendJson(res, 200, {
+      // ok 必须显式给：App 的 hostInfo 只认 ok:true 的包（没有这个字段就报「连接失败」，
+      // 前端看起来像隧道断了，其实回包是好的）。历史 latest.json 里没这个字段，别指望它。
+      ok: true,
       ...meta,
       versionCode: Number(meta.versionCode) || 0,
       url: upstream,

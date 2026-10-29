@@ -1982,3 +1982,42 @@ App 这边：运行条写「引导中」，这一轮照常计时（不按「排�
 - 顺带补的入口：绑定过之后扫码按钮一直是隐藏的，旧隧道一死首页只剩一句「重新扫码」却没有按钮可点。
   现在「连不上 / 未连接」那行文字本身就是入口（`statusHost` 可点 → `startScan()`），文字改成
   「电脑没响应，点这里重新扫码」/「点这里重新扫码，或检查同一个 Wi-Fi」。
+
+## 23.39 可用性抢修：绑定失效、检查更新报错、「先更新插件」（0.9.137 / 插件 0.1.35 热修）
+
+用户报的三件事都不是新功能，是三条通路同时坏了：
+
+1. **手机端无法绑定 / 已绑定的也连不上**。宿主令牌在 15:43 被轮换成了新值（`fab62a77…`），
+   手机里还是旧的 `56fd5ad1…`，于是每个请求都是 401，App 只能显示「连接失败」。
+   修复：把旧值写回 `~/.dsh/pet-voice/token`（`chmod 600`），轮换出来的那份留档
+   `~/.dsh/pet-voice/token.bak-fab62a77`。令牌是**每请求重读**的（`tokenStore.current()`），
+   改文件立刻生效，不用重启宿主，也不用重新配对。
+2. **「检查更新」明明宿主通了却显示「连接失败」**。`/api/update` 回的是
+   `{versionCode,versionName,…}`，**没有 `ok` 字段**；App 的 `hostInfo()` 要求 `ok:true`，
+   于是 HTTP 200 也被当成失败 → `lastCheck="error"` → 界面报「连接失败」。真正的漏洞在发布脚本：
+   `publish-apk.mjs` 里走 CNB 推广那条路写的最新清单（`cnbMetaFor()`）漏了 `ok:true`，
+   本地兜底那份（`meta`）有——所以只有「推广过的版本」才复现。
+   三处一起修：发布脚本补 `ok:true`；插件 `handleUpdate()` 显式给 `ok:true`（不再依赖清单里有没有）；
+   App `hostInfo()` 只要回包里带 `versionCode` 就认，缺 `ok` 不再判失败。旧清单靠人工补一次
+   （`~/.dsh/pet-voice/update/latest.json` 加 `"ok": true`）当天就恢复，不等发版。
+3. **检查更新慢到像坏了，还曾提示「先更新插件 0.1.35」**。两件事：
+   - `pluginTooOld()` 把「读不到插件版本」当成「太旧」。宿主连不上时 `/api/state` 502，
+     插件版本是空串，于是提示用户去更新一个已经是最新的插件——把网络问题甩给用户。
+     现在 `pluginVersion` 为空一律不算旧。
+   - `check()` 原来是「先问三个公开源，再问宿主」：国内连不上 cnb/jsDelivr/raw 时，
+     8s 建连 + 10s 读三个源一轮下来要半分钟。现在**先问宿主**（绑定着就毫秒级），
+     公开源只做兜底，且超时收到 3s/4s。
+- 实测（0.9.137 / versionCode 207，真机 com.whale.pet，全程公网链路 `http://42.193.189.240/pet-voice/`）：
+  - 点「检查更新」→ 约 2s 内 `检查中…` → 约 4s 出「已是最新」（旧版要等 30s+ 且报「连接失败」）。
+  - `net.log`：`GET /api/update http=200 94ms`；`/api/state`、`/api/workspaces` 全 200。
+  - 公网健康信号：未带令牌 `curl http://42.193.189.240/pet-voice/api/state` = **401**（通了才 401）。
+  - 域名：`pet.regrevia.com`、`pet.regrevia.cn` 都解析到 `42.193.189.240`，与公网入口同一个 IP。
+- 隧道/中转 IP 结论：公网入口仍是 `42.193.189.240`（Caddy `*:80` → 127.0.0.1:8443 → `ssh -R` →
+  本机 9443 反代 → 宿主端口）。旧机器 `134.175.47.91` 上的那条转发已经退役清掉，不需要改 App 里的地址。
+  隧道假死（本机 `ssh -N` 变孤儿、服务器上留着 `sshd: root` 占着 8443）时的恢复顺序：
+  `pkill -f "ssh -N"` → 服务器 `pkill -9 -f 'sshd: root'` → `bash scripts/pv-public.sh restart` → 再测 401。
+- 装机注意：这台 MIUI 上 `adb install` 会被拦（`INSTALL_FAILED_USER_RESTRICTED`），`install -r` 若签名不同
+  还会 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`；可靠路径是 `adb push` 到 `/data/local/tmp/` 后
+  `su -c "pm install -r -g /data/local/tmp/x.apk"`。重装会把运行时权限打回未授予，
+  装完要 `pm grant com.whale.pet android.permission.RECORD_AUDIO/CAMERA/POST_NOTIFICATIONS`，
+  否则一进 App 就弹授权框挡住首页。

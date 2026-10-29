@@ -418,6 +418,9 @@ async function cnbUploadAsset(token, releaseId, fileName, bytes) {
 
 function cnbMetaFor({ fileName, size, sha256, versionCode, versionName, notes, minPlugin, base, fallbackUrl }) {
   return {
+    // App 的 /api/update 要看到 ok:true 才认这份回包：缺了这个字段旧写法会让
+    // 手机端「检查更新」显示「连接失败」（宿主明明通了）。
+    ok: true,
     versionCode,
     versionName,
     size,
