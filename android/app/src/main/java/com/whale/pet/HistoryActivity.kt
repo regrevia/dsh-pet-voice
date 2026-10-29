@@ -189,6 +189,8 @@ class HistoryActivity : Activity() {
     private var sendIsStop = false
     /** 这一轮是手机自己发的：进度条已经在说话，标题行不再重复。 */
     @Volatile private var localBusy = false
+    /** 刚按过终止、宿主还没收尾：这段时间别把中断方块又摆回发送位。 */
+    @Volatile private var stopping = false
     private var peekTitle = ""
     private var syncing = false
     private var tts: TtsPlayer? = null
@@ -488,7 +490,8 @@ class HistoryActivity : Activity() {
         super.onResume()
         refreshHeader()
         reload()
-        syncSession()
+        // 回到页面：宿主若还在跑，发送位摆回中断、回答接着上屏
+        syncSession({ reattach() })
         // 进来先只拉最新一页（宿主是真相源，手机只是缓存）；翻上去再要更早的
         if (hostSid != PetSettings.chatSession(this) || PetHistory.count(this) == 0) {
             hostMore = true
@@ -583,6 +586,32 @@ class HistoryActivity : Activity() {
 
     private val repairLater = Runnable { runCatching { repairMissingReply() } }
 
+    /**
+     * 回到页面时那一轮还在宿主上跑：别从「发送」重新开始，接着听。
+     * 页面没了 SSE 就没了，所以先在常驻服务挂一只观察者把回答落进历史，
+     * 再每 2.5 秒把宿主最新一页并进来——人回来看到的就是刚出的那几句。
+     */
+    private fun reattach() {
+        val sid = PetSettings.chatSession(this)
+        if (sid.isBlank() || turn != null || stopping) return
+        if (!hostBusy && !localBusy) return
+        if (hostBusy) runCatching { ChatWatch.start(this, sid) }
+        ui.removeCallbacks(attachPull)
+        ui.postDelayed(attachPull, 2_500L)
+    }
+
+    private val attachPull = object : Runnable {
+        override fun run() {
+            if (isFinishing || isDestroyed) return
+            if (turn != null || stopping || (!hostBusy && !localBusy)) {
+                runCatching { reload() }
+                return
+            }
+            runCatching { loadHostPage(older = false) }
+            ui.postDelayed(this, 2_500L)
+        }
+    }
+
     private val hostWatch = object : Runnable {
         override fun run() {
             syncSession()
@@ -595,6 +624,7 @@ class HistoryActivity : Activity() {
     override fun onPause() {
         super.onPause()
         ui.removeCallbacks(hostWatch)
+        ui.removeCallbacks(attachPull)
         // 离开页面就别再录了，免得麦克风一直攥在手里
         micDown = false
         if (recorder?.isRecording == true) runCatching { recorder?.stop() }
@@ -610,6 +640,7 @@ class HistoryActivity : Activity() {
         Outbox.removeFailedListener(outboxFailed)
         closeVideo()
         ui.removeCallbacks(hostWatch)
+        ui.removeCallbacks(attachPull)
         ui.removeCallbacksAndMessages(null)
         turn?.cancel()
         turn = null
@@ -654,6 +685,8 @@ class HistoryActivity : Activity() {
         // 「在旁听：别的那只」只在 5 分钟内有材料时出现，过期自己收起来。
         peekLabel.text = if (peekTitle.isBlank()) "" else "在旁听：$peekTitle"
         peekLabel.visibility = if (peekTitle.isBlank()) View.GONE else View.VISIBLE
+        // 标题行一变就把发送位一起核一遍：从后台/列表回来也得是「中断」，不能退回「发送」
+        updateSendAffordance()
     }
 
     /** 宿主那边还没轮到跑的那几句：跟桌面端同一份队列，撤掉/调序也改同一份。 */
@@ -733,6 +766,13 @@ class HistoryActivity : Activity() {
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             })
             row.addView(TextView(this).apply {
+                text = "直接发送"
+                setTextColor(getColor(R.color.pet_accent))
+                textSize = 12f
+                setPadding(dp(10), dp(4), dp(4), dp(4))
+                setOnClickListener { sendQueuedNow(item) }
+            })
+            row.addView(TextView(this).apply {
                 text = "撤掉"
                 setTextColor(getColor(R.color.pet_accent))
                 textSize = 12f
@@ -761,6 +801,45 @@ class HistoryActivity : Activity() {
             } catch (_: Exception) {
             }
         }, "pet-queue-steer").apply { isDaemon = true }.start()
+    }
+
+    /**
+     * 直接发送：不排在后面等——先把正在跑的那轮掐掉，从队列里撤掉这条，
+     * 再把它当新的一句立刻发出去。桌面端排队条上也是这几个动作。
+     */
+    private fun sendQueuedNow(item: Queued) {
+        val sid = PetSettings.chatSession(this)
+        if (sid.isBlank()) return
+        queueBar.visibility = View.GONE
+        val t = turn
+        if (t != null) {
+            userStopped = true
+            t.cancel()
+            finishTurn(null)
+        }
+        stopping = true
+        hostBusy = false
+        localBusy = false
+        updateSendAffordance()
+        runText.text = "已终止"
+        runBar.visibility = View.VISIBLE
+        Thread({
+            val client = PetClient { PetSettings.load(this) }
+            runCatching { client.cancel(sid) }
+            // 等宿主把上一轮真的收尾再发：否则这句只会又被排到队尾
+            val key = sid.removePrefix("session-")
+            for (i in 0 until 20) {
+                val st = runCatching { client.state() }.getOrNull()?.json
+                val turns = st?.optJSONObject("turns")
+                if (turns == null || !turns.has(key)) break
+                runCatching { Thread.sleep(120L) }
+            }
+            runCatching { client.inboxAction(sid, "remove", item.id) }
+            ui.post {
+                if (isFinishing || isDestroyed) return@post
+                send(item.text, shownAs = item.text)
+            }
+        }, "pet-queue-now").apply { isDaemon = true }.start()
     }
 
     private fun showQueueMenu(item: Queued) {
@@ -903,10 +982,18 @@ class HistoryActivity : Activity() {
         // turns 的键是裸 uuid（宿主两种写法都存，投影时归一过）
         val turns = state.optJSONObject("turns")
         val myKey = PetSettings.chatSession(this).ifBlank { target }.removePrefix("session-")
-        val busy = turns != null && myKey.isNotBlank() && turns.has(myKey)
+        val busyOnHost = turns != null && myKey.isNotBlank() && turns.has(myKey)
+        // 刚按过终止：宿主还没收尾就别把中断方块摆回来；它真停了才松开这个闸
+        if (!busyOnHost) stopping = false
+        val busy = busyOnHost && !stopping
         if (busy != hostBusy) {
             hostBusy = busy
             refreshHeader()
+            // 宿主这一轮刚跑完：后台观察者落过的回答捞回来上屏
+            if (!busy && turn == null) {
+                reload()
+                repairMissingReply()
+            }
             ui.removeCallbacks(hostWatch)
             ui.postDelayed(hostWatch, if (busy) 3_000L else HOST_WATCH_MS)
         }
@@ -1398,6 +1485,8 @@ class HistoryActivity : Activity() {
         adapter.error = ""
         adapter.errorAction = null
         adapter.live = ""
+        userStopped = false
+        stopping = false
         turnStart = System.currentTimeMillis()
         // 这句已经进历史了，宿主到底收没收到还不知道：先落盘，进程被杀也能接着发
         val rid = java.util.UUID.randomUUID().toString()
@@ -1506,6 +1595,13 @@ class HistoryActivity : Activity() {
         // 已落进待发队列：这句没丢，别给「重试」按钮（再点一次就是第二轮），只告诉用户它会自己发
         val queued = error != null && error.contains("已排队")
         when {
+            // 自己按的终止：跟桌面端一样只说「已终止」，不再报「没收到回复」
+            userStopped -> {
+                adapter.error = ""
+                adapter.errorAction = null
+                runText.text = "已终止"
+                runBar.visibility = View.VISIBLE
+            }
             queued -> showRetry("已排队，联网后自动发出", null)
             // 拒收类（会话不归手机管、配对失效）重发无用：直接说，不给会失败的重试
             error != null && (error.contains("不能从手机发") || error.contains("没认出")) ->
@@ -1521,7 +1617,7 @@ class HistoryActivity : Activity() {
             else -> showRetry("没收到回复，重试", null)
         }
         reload()
-        userStopped = false
+        updateSendAffordance()
     }
 
     private fun showRetry(text: String, action: (() -> Unit)?) {
@@ -2091,8 +2187,12 @@ class HistoryActivity : Activity() {
     private fun stopTurn() {
         val t = turn ?: return
         userStopped = true
+        stopping = true
+        hostBusy = false
         t.cancel()
         finishTurn(null)
+        // 按下去就当停了：方块立刻变回发送，不等宿主回执
+        updateSendAffordance()
     }
 
     /** 发送位此刻是不是「中断」形态：框里没字、且这一轮真在跑（本机起的或电脑上的）。 */
@@ -2128,12 +2228,22 @@ class HistoryActivity : Activity() {
         val sid = PetSettings.chatSession(this)
         if (sid.isBlank()) return
         runText.text = "中断中"
+        stopping = true
+        userStopped = true
+        hostBusy = false
+        localBusy = false
+        updateSendAffordance()
         Thread({
             val res = try { PetClient { PetSettings.load(this) }.cancel(sid) } catch (_: Exception) { null }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                if (res?.ok != true) toast("没停下来，再点一次")
+                if (res?.ok != true) {
+                    stopping = false
+                    toast("没停下来，再点一次")
+                }
                 hostBusy = false
+                runText.text = "已终止"
+                runBar.visibility = View.VISIBLE
                 refreshHeader()
                 syncSession()
             }

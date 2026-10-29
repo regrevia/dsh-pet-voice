@@ -2071,3 +2071,45 @@ App 这边：运行条写「引导中」，这一轮照常计时（不按「排�
   ② 是 JSON 但 `pinned:null` → 看 `~/.dsh/pet-voice/pet-session.json` 的 `workspaceId`；
   ③ 两个都正常才轮到 App 侧。
 - 插件改自愈要**宿主重启**才生效；不重启也不影响恢复——那份 `pet-session.json` 已经是对的。
+
+## 23.41 会话状态三处错位：回前台丢状态 / 队列只能撤 / 终止看着像失败（0.9.138）
+
+三份反馈其实是**同一个根因**的三种表现：桌面端的 GUI 把「这一轮还活着、谁在推、能不能取消」
+都放在宿主里，App 以前只在自己内存里记 `running / sending / hostBusy / stopping` 这几个布尔，
+**回前台时没有人去跟宿主重新对一遍**，于是：
+
+- 离开再回来 → 本地那几个标记早被回收，按钮退回「发送」，也再没人接着拉这一轮的回复；
+- 停掉一轮 → 本地只把 `running` 清掉，落款走的是普通失败分支，屏上写「没收到回复，请重试」；
+- 队列行只有「撤掉」——桌面端那行是「直接发送」+「撤销」两件事。
+
+改法（`HistoryActivity.kt`，都落在同一份状态上）：
+
+1. **回前台重新对状态**：`onResume()` 先 `syncSession{ reattach() }`；`syncSession` 用 `/api/state`
+   的 `turns[<会话 uuid>]` 判断这一轮在不在（有键 + `since` 很新 = 还活着），
+   活着就 `ChatWatch.start()` 重新挂上推送、并起 `attachPull` 每 2.5 s 拉一次，
+   等 `turn == null && !stopping && !busy` 再收掉。用户看到的就是「回来还是方块，回复照常落地」。
+2. **终止 = 已终止**：`stopTurn()` / 宿主取消分支统一置 `userStopped + stopping`，
+   `finishTurn` 末尾按 `userStopped` 优先走「已终止」分支（`runText = 已终止`、清掉错误行、不排重试），
+   并且**立刻** `updateSendAffordance()` 把按钮换回「发送」。
+3. **队列行加「直接发送」**：`renderQueueOf(detail)` 从 `/api/session` 的 `inbox` 渲染，
+   每行左侧 `待输入 · …`，右侧 **`直接发送`** 与 `撤掉`；点整行 = 引导进当前这轮（原有行为，等价桌面端「插话」）。
+   `sendQueuedNow(item)`：先 `cancel` 当前轮 → 轮询 `/api/state` 直到这一轮从 `turns` 里消失（最多 20×120 ms）
+   → 从 inbox `remove(item.id)` → 再走普通发送把这句话发出去，屏上先落「已终止」再进新一轮。
+
+实测（真机 `com.whale.pet` 0.9.138 / versionCode 208，公网链路，会话 `863211a4-…`）：
+
+- 回前台：发一句后按 Home 离开 40 s 再回来，按钮仍是「中断」，头部「正在回复」，
+  回复整段落地后按钮自己回到「发送」，全程没有重发、没有「没收到回复」。
+- 终止：`adb_ui` 里等到 `#chatSend` 的 content-desc 变「中断」（304 ms）后点它 →
+  立刻变「发送」、`#chatTyping` 消失、`#chatRunText` = **`已终止`**，屏上**没有**「没收到回复，请重试」。
+- 队列（两条都验过同一屏）：
+  - 队列行渲染：`待输入 · 排队项J：点直接发送应当立刻开跑这句` + `直接发送` + `撤掉`
+    （[截图](/Users/apple/Desktop/work/Pet/docs/img/queue-direct-send-0.9.138.jpg)）。
+  - 点「直接发送」后：`#chatRunText` 变 `已终止`、`#chatSend` desc 回落「发送」、
+    `/pet-voice/api/inbox` 变 `{"ok":true,"inbox":[]}`，会话记录里出现
+    `user | 排队项N：这一条验证直接发送动作`，紧接着正常回复——即「先停当前这轮、再把排队这条发出去」。
+- 复现（下次自测）：`POST /pet-voice/api/command {"text":"让 <项目> 做<长任务>"}` 起一轮桌面端回合，
+  再 `POST /pet-voice/api/dispatch {"sessionId":"session-…","text":"<排队内容>"}`（返回 `queued:true`），
+  App 里约 3–6 s 出现队列行；inbox 项会被宿主很快取走，**读屏与点击要在同一次 `adb_ui` 快照里完成**。
+- 仍未做：`SessionActivity`（原文页）只补了同一份状态模型的一半，队列「直接发送」与「已终止」尚未在那里落，
+  见下一节待办。
