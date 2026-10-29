@@ -2188,6 +2188,8 @@ user 消息正文是 `三图连发自检 0.9.139\n\n![图片](/Users/apple/.dsh/
   ① DNS-01（阿里云 AccessKey + `github.com/caddy-dns/alidns` 重编 Caddy，Caddy v2.11.7 现在没有 DNS 模块）；
   ② 把 ICP 备案走完再回 http-01；③ 把 NS 迁到 Cloudflare 用 Tunnel（等于换 DNS 服务商）。
   在拿到密钥/备案之前，文档和设置页都只承诺「IP 入口 + token」，不准写「HTTPS 已修好」。
+- 决定（用户 2026-10-29 选 ④）：**先用 IP 入口**，域名那条路等备案/DNS-01 有外部条件了再说；
+  所以现在的交付形态就是 `http://42.193.189.240/pet-voice/` + token，本文上面第 4 节即最终记录。
 - 隧道清理（做过的事）：之前有两份转发在抢 8443——launchd 代理 `com.local.regrevia-pet-tunnel`
   拉起一份旧的 `-R 8443:127.0.0.1:8443`，手工又起了一份。现在只留 launchd 管的那一份，
   脚本 `/Users/apple/.ssh/regrevia-tunnel.sh` 改成 `-R 127.0.0.1:8443:127.0.0.1:9443`
