@@ -2024,3 +2024,50 @@ App 这边：运行条写「引导中」，这一轮照常计时（不按「排�
 - 插件改动（`handleUpdate` 补 `ok:true`）要**宿主重启**才生效；当天不重启也恢复了，是因为
   `~/.dsh/pet-voice/update/latest.json` 里先手工补了 `"ok": true`，App 读宿主回包时就不再踩缺字段。
   发布脚本已补上这个字段，之后每版清单自带。
+
+### 23.40 项目名不显示、进来只有「没有项目」也不加载（0.9.137 / 插件 0.1.37）
+
+用户报的现象是一句话：绑定之后进来不显示项目名，只显示「没有项目」，也不加载。
+拆开是两条独立的故障叠在一起，先修传输、再修数据。
+
+1. **传输层：9443 反代还指着上一个宿主进程的端口。** 宿主每次重启监听端口都会变
+   （这轮是 57650 → 57037）。9443 的 TLS 反代的 upstream 是启动时写死的，重启后仍打
+   57650；那个端口已经被 OpenClaw Control 的网页占住，于是**带令牌的 `/pet-voice/api/*`
+   也返回 HTTP 200——但响应体是那个应用的 HTML**。App 解析 JSON 失败 → 项目接口等于空。
+   识别特征：公网 `/pet-voice/api/workspaces` 返回 200 却是 HTML（正常应当是：无令牌 401、
+   带令牌 200 + `{"ok":true,…}`）。
+   恢复：`bash scripts/pv-public.sh restart`（脚本会重新探测存活的 DSH 端口再拉起 9443 反代）。
+   同一轮还清了一次隧道假死：本机残留 `ssh -N` + 服务器上残留 `sshd: root` 占着 8443，
+   顺序是 `pkill -f "ssh -N"` → 服务器 `pkill -9 -f 'sshd: root'` → `pv-public.sh restart`。
+   健康判据（必须两条都对）：
+   - 无令牌：`curl -s -o /dev/null -w '%{http_code}' http://42.193.189.240/pet-voice/api/state` → `401`
+   - 带令牌：回包里 `{"ok":true,"pluginVersion":…}`，且 `/api/workspaces` 的 `pinned` 是个对象而不是 `null`
+2. **数据层：`pet-session.json` 里 `workspaceId` 是空串。** 项目名和会话都靠
+   `GET /api/workspaces` 回的 `pinned` 决定，而插件的解析逻辑是：
+   `row = workspaces.find(w => w.id === stored.workspaceId)`，`row && stored.sessionId` 才去查那只会话、
+   否则只在 `!stored.sessionId` 时才退回 `petCore.status()`。
+   文件里 `sessionId` 有值、`workspaceId` 却是 `""`（`workspaceTitle`/`cwd` 都对）——
+   两个分支都不走，`pinned` 就一直是 `null`，`hint` 变成「还没有专属会话」，
+   于是 App 头部没有项目名、项目面板也没有「当前」、会话列表也没得加载。
+   修法两步，缺一不可：
+   - 当场把文件补对：`workspaceId` 填 odd 项目的真实 id（`d714d6ad-1ee6-4d9e-8cb9-cca3059e0221`）。
+   - 插件加**自愈**（0.1.37）：`workspaceId` 查不到项目时，先用 `cwd` 反查同路径项目；
+     再不行就用 `sessionId` 查活着的会话、拿它的 `cwd` 反查项目；认出来就把
+     `{workspaceId, workspaceTitle, cwd, sessionId}` 写回 `pet-session.json`（0o600），并打一行日志
+     「pet-session.json 的项目 id 是空的/对不上，已按 … 补成 …」。以后这类脏文件自己会好，
+     不用再手工改。
+
+- 实测（0.9.137 / versionCode 207，真机 `com.whale.pet`，公网链路）：
+  - `/pet-voice/api/workspaces`（带令牌）→ `pinned={"title":"odd","id":"d714d6ad-…","sessionId":"session-863211a4-…"}`，
+    `hint` 消失（原来是「还没有专属会话（宿主缺少 sessionController 或专属项目不存在）」）。
+  - 首页头部：`大肥鱼 · 已连接` + 副标题 **`odd`**
+    （[截图](/Users/apple/Desktop/work/Pet/docs/img/project-fixed-0.9.138.jpg)）。
+  - 点「对话」进会话页：顶栏左侧 `odd`、右侧当前会话标题、消息列表整段加载出来。
+  - 点「会话 → 项目」：面板标题 `odd`，列出 Re / dsh-mobile-use / Symate / **odd（当前）** / Pet / Envoy /
+    creator-studio / DSH 八项 + 「新建项目」
+    （[截图](/Users/apple/Desktop/work/Pet/docs/img/project-picker-0.9.138.jpg)）。
+  - 切回「会话」：列 `+ 新建对话` 与当前项目的历史会话（今天 17:35 / 16:36 / 05:40 / 05:29·当前 / …）。
+- 排查顺序（下次先看哪）：① 公网 `/api/workspaces` 200 是不是 JSON（不是 → 传输，重启反代）；
+  ② 是 JSON 但 `pinned:null` → 看 `~/.dsh/pet-voice/pet-session.json` 的 `workspaceId`；
+  ③ 两个都正常才轮到 App 侧。
+- 插件改自愈要**宿主重启**才生效；不重启也不影响恢复——那份 `pet-session.json` 已经是对的。

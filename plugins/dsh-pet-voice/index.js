@@ -6504,7 +6504,30 @@ export function apply(ctx, config) {
         // 只读 pet-session.json 报「现在钉在哪」，**不能**顺手把 pin 拉回默认项目
         // （那样手机上刚切的 web 会被一次列项目请求打回 Pet）。
         const stored = readPetSessionFile()
-        const row = rows.find((w) => w.id === stored.workspaceId)
+        let row = rows.find((w) => w.id === stored.workspaceId)
+        // pet-session.json 里的 workspaceId 可能是空的（早期版本写的、或宿主重启后项目 id 变了），
+        // 那 pinned 就永远是 null：手机上「项目」退成默认标题、会话列表也加载不出来。
+        // 按记着的 cwd 找回同路径项目；再不行用那只会话自己的 cwd 找；找到了顺手补写回文件。
+        if (!row && stored.cwd) {
+          row = rows.find((w) => trailPath(w.path) === trailPath(stored.cwd))
+        }
+        if (!row && stored.sessionId) {
+          try {
+            const live = (await sessionRows(ctx)).find((item) => item.id === stored.sessionId)
+            const cwd = trailPath(live?.cwd)
+            if (cwd) row = rows.find((w) => trailPath(w.path) === cwd)
+          } catch (error) {
+            LOG('按会话找回项目失败：', error?.message ?? error)
+          }
+        }
+        if (row && row.id !== stored.workspaceId) {
+          writeFileSync(
+            petSessionFile(),
+            `${JSON.stringify({ workspaceId: row.id, workspaceTitle: row.title, cwd: row.path || stored.cwd, sessionId: stored.sessionId }, null, 2)}\n`,
+            { mode: 0o600 },
+          )
+          LOG(`pet-session.json 的项目 id 是空的/对不上，已按 ${row.path} 补成 ${row.id}`)
+        }
         try {
           if (row && stored.sessionId) {
             const alive = (await sessionRows(ctx)).some((item) => item.id === stored.sessionId)
