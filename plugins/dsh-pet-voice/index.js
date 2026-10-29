@@ -3554,6 +3554,10 @@ const INJECTED_USER_PATTERNS = [
   // 压缩摘要正文本身（标题头被宿主吃掉时只剩这些小节）：同样一条都不上屏。
   /^##\s*Primary Request and Intent\b/im,
   /^##\s*Key Technical Concepts\b/im,
+  // 摘要末尾残留的闭合标签（正文被切走时只剩它），以及中文摘要的小节标题。
+  /<\/?compacted[-_ ]?summary>/i,
+  /^##\s*主要请求(与|和)意图\b/im,
+  /^##\s*(当前工作|关键上下文|待办)\b/im,
 ]
 
 function isInjectedUserText(text) {

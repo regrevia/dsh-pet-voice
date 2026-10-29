@@ -43,6 +43,9 @@ https://<你的地址>/pet-voice/?k=<一次性配对码>
 | 局域网 | 手机和电脑同一个 WiFi | 无 | 局域网 |
 | 自建域名 | 长期用、自己有域名 | 一台能跑 nginx/caddy 的机器 + 证书 | 自建域名，填自己的域名 |
 | 服务器中转 | 在外面也想用，不想碰路由器和证书 | 装 `cloudflared` / `ngrok`，或自己的中转服务器 | 自建域名，填工具给的 https 地址 |
+| 公网 IP 直连 | 域名还没备案，或不想折腾证书 | 一台有公网 IP 的机器 + 反代 + token | 自建域名，填 `http://<公网IP>/pet-voice/` |
+
+域名走 HTTPS 需要 ICP 备案（国内机器）或 DNS-01 证书，没备案时 80/443 会被云厂商拦到备案页——这时直接用公网 IP + token，功能一样全。
 
 细节、证书与排错：[docs/self-host.md](docs/self-host.md)。不想买域名也能 https：[docs/tls-self-signed.md](docs/tls-self-signed.md)。
 
@@ -50,7 +53,7 @@ https://<你的地址>/pet-voice/?k=<一次性配对码>
 
 | 项 | 状态 |
 | --- | --- |
-| APK | `0.9.33`（versionCode 103），Android 8.0+（API 26），targetSdk 35 |
+| APK | `0.9.139`（versionCode 209），Android 8.0+（API 26），targetSdk 35 |
 | 验证环境 | Android 11 模拟器跑通全链路：配对、语音、回复、动作、历史、检查更新 |
 | 真机 | 厂商权限跳转与硬件麦克风只在 AOSP 页面验证过，各家 ROM 仍可能不同，欢迎回报 |
 | Android 14/15 | 未做实机验证：后台恢复、麦克风前台服务在收紧后的行为【需真机确认】，见 [docs/android-app.md](docs/android-app.md) |

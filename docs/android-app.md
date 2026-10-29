@@ -2113,3 +2113,87 @@ App 这边：运行条写「引导中」，这一轮照常计时（不按「排�
   App 里约 3–6 s 出现队列行；inbox 项会被宿主很快取走，**读屏与点击要在同一次 `adb_ui` 快照里完成**。
 - 仍未做：`SessionActivity`（原文页）只补了同一份状态模型的一半，队列「直接发送」与「已终止」尚未在那里落，
   见下一节待办。
+
+## 23.42 注入文本全链路过滤 · 多图连发 · 语音二重音 · 隧道与域名的真实状态（0.9.139）
+
+这一节记四件在真机上验过（或被真机证明做不通）的事，全部指 `com.whale.pet` 0.9.139 / versionCode 209。
+
+### 1. 思考过程与会话摘要一律不上屏
+
+问题：宿主每轮都会往会话里塞非用户内容——`<compacted-summary>`、`## 主要请求与意图` 这类摘要块、
+system-reminder、checkpoint 头、fast-mode 提醒。App 之前照单全收，聊天页里出现整屏英文/中文摘要。
+
+改法：新增 `android/app/src/main/java/com/whale/pet/InjectedText.kt`，一个 `isInjected(CharSequence?)`
+收口全部判据（前缀：`Time sampled while preparing turn`、`Current runtime context.`、`<system-reminder>`、
+`<available_skills>`、`<environment_context>`、`This is an automatically generated checkpoint`、
+`The context was just compacted`、`Fast mode reminder`、`Auto schedule`；包含：`## Primary Request and Intent`、
+`## Key Technical Concepts`、`## Files and Code`、`## 主要请求与意图`、`## 主要请求和意图`、`## 当前工作`、
+`## 关键上下文`、`## 待办`；标签 `</compacted-summary>` 任意大小写/连字符变体；
+以及「长度 ≥600 且 ≥4 行以 `- **` 开头」的摘要 dump 兜底）。
+过滤点在**渲染**而非入库：`HistoryActivity.kt:1033` / `:1102`、`SessionActivity.kt:342` 三处丢弃，
+磁盘上的原始记录保持不动（将来规则变宽还能重渲染）。插件侧同步把同样的模式加进
+`plugins/dsh-pet-voice/index.js` 的 `INJECTED_USER_PATTERNS`，两条路都挡。
+
+真机证据（`session-863211a4-…`）：先在会话里落三条测试输入——裸 `</compacted-summary>`、
+中文摘要 dump、以及对照行「过滤器自检：这一条应该显示」。同一次渲染里只有对照片出现，
+另两条在服务器 `/api/session` 里仍然存在但屏上没有；宠物回执「三条测试输入里只有正常那条被渲染出来。」。
+截图：[injected-text-filtered-0.9.139.jpg](/Users/apple/Desktop/work/Pet/docs/img/injected-text-filtered-0.9.139.jpg)。
+
+自测脚本要清场：测试记录直接写进真实历史会留垃圾。做法是 `adb shell am force-stop com.whale.pet`
+→ 改 `/data/data/com.whale.pet/shared_prefs/pet_history.xml`（short key：`r/t/ts/s/q`，HTML 转义 JSON 数组，
+上限 200 条）→ `chown 10297:10297` + `restorecon` → `am start -n com.whale.pet/.MainActivity`。
+进程活着时写 SharedPreferences 会被下一次 flush 覆盖，必须先停。
+
+### 2. 发图对齐桌面端：多选 ≤6、输入框预览、图文同发、桌面收到真图
+
+流程已可用：输入框左侧 `#chatAttach` → 选「图片」→ 系统 Hyper photo picker（`com.android.photopicker`，
+带 `#checkbox_touch_area` 多选）→ 勾 3 张 → 「确认」回聊天页 → 输入框上方托盘出现 3 个缩略图
+（每个右上角 `×`，`adb_ui` 数得到 3 个 `×`）→ 打字 → 发送。
+
+真机证据（同上会话）：一条消息里 3 张截图 + 文本「三图连发自检 0.9.139」，服务端 `/api/session` 里这条
+user 消息正文是 `三图连发自检 0.9.139\n\n![图片](/Users/apple/.dsh/pet-voice/imgcache/3…)`（附件走 Markdown 图片引用，
+不是 base64 塞正文），桌面端直接读到了三张图——回复逐张描述「第一张已连接、设置全部展开…第二张变成未连接…第三张是
+系统显示在其他应用的上层」，即桌面端拿到的是真附件。截图：
+[image-multisend-0.9.139.jpg](/Users/apple/Desktop/work/Pet/docs/img/image-multisend-0.9.139.jpg)。
+上限 `SEND_IMAGE_MAX = 6`，超过不再加；单张下发前按 `SEND_IMAGE_MAX_PX` 缩边再传。
+
+### 3. 「死亡二重音」：同一句只许一个播放器出声
+
+成因：悬浮窗服务、聊天页、主页各自持有一个 `TtsPlayer`，一轮回复的 `onSentence` 可能同时喂给两个，
+两把嗓子错开几十毫秒就是双音。修法在 `TtsPlayer.claimVoice()`（commit `ebfd611`）：
+`synchronized(voiceLock)` 记「上一句文本 + 播放器 ownerId + 时刻」，**不同播放器、同一句、1.5 s 内**判重丢弃，
+同一播放器重复排同一句（用户让它再说一遍）不拦；丢弃时写一条 `NetLog`「这句已由别的播放器播过」。
+另有 `streamedPlayed` / `gaplessStarted` 两个集合，防边下边播与「预接」两条路径把同一次出声放第二遍。
+
+真机证据：两轮语音回复共 4 句，`/data/data/com.whale.pet/files/net.log` 里每句只有一次
+`开流 seq=N`，接着 `播完 seq=N（流式）` → `轮到 seq=N+1`，句间空档 40 ms 与 0 ms（预接），
+没有任何一句出现第二次 `开流`；也没有「已由别的播放器播过」——说明这一轮根本没有第二个播放器拿到同一句。
+看日志的命令：`adb shell "su -c 'grep TTS /data/data/com.whale.pet/files/net.log | tail -24'"`。
+
+### 4. 隧道与域名：IP 入口可用，域名 HTTPS 被备案挡住（未解决，如实记录）
+
+- DNS 是好的：`pet.regrevia.com` / `pet.regrevia.cn` 都是单条 A → `42.193.189.240`，TTL 600，
+  `dig` / 8.8.8.8 / 223.5.5.5 / 1.1.1.1 四路一致；权威服务器 `dns1.hichina.com`。
+- **卡在备案**：`curl -D- http://pet.regrevia.com/pet-voice/api/state` 返回 `302` +
+  `Location: https://dnspod.qcloud.com/static/webblock.html?d=pet.regrevia.com` —— 腾讯云/DNSPod 对未备案域名
+  在 **80 端口**做拦截，请求根本到不了这台机器。所以 ACME `http-01` 必然失败
+  （`HTTP 403 urn:ietf:params:acme:error:unauthorized`）；443 端口开着但没有证书，`curl https://…` 直接 `000`（握手失败）。
+  拦截节点 IP 会轮换，靠 hosts 或白名单绕不过去。
+- **现在能用的入口是 IP**：`http://42.193.189.240/pet-voice/` 返回 `401`（未带 token），带上 token 就是完整功能，
+  手机端 `base_url` 就是它。App 与桌面端走的是同一条链路：
+  手机 → `:80` Caddy → `127.0.0.1:8443`（ssh 远程转发）→ Mac `127.0.0.1:9443`（`scripts/tls-proxy.mjs`）→ DSH。
+  所以 **Caddyfile 里 `:80` 那段 IP 反代必须留着**：只留域名块时 Caddy 会把 IP 入口 308 到被拦的域名，
+  手机立刻「大肥鱼 · 未连接」——这个坑踩过一次。
+- 想真上 HTTPS 只有三条路，都要外部条件：
+  ① DNS-01（阿里云 AccessKey + `github.com/caddy-dns/alidns` 重编 Caddy，Caddy v2.11.7 现在没有 DNS 模块）；
+  ② 把 ICP 备案走完再回 http-01；③ 把 NS 迁到 Cloudflare 用 Tunnel（等于换 DNS 服务商）。
+  在拿到密钥/备案之前，文档和设置页都只承诺「IP 入口 + token」，不准写「HTTPS 已修好」。
+- 隧道清理（做过的事）：之前有两份转发在抢 8443——launchd 代理 `com.local.regrevia-pet-tunnel`
+  拉起一份旧的 `-R 8443:127.0.0.1:8443`，手工又起了一份。现在只留 launchd 管的那一份，
+  脚本 `/Users/apple/.ssh/regrevia-tunnel.sh` 改成 `-R 127.0.0.1:8443:127.0.0.1:9443`
+  （转发到 Mac 上 9443 的 tls-proxy，而不是 8443），手起的 pid 已 kill，
+  `launchctl kickstart -k gui/$(id -u)/com.local.regrevia-pet-tunnel` 重启后只剩一个
+  `ssh -N -T … -R 127.0.0.1:8443:127.0.0.1:9443 regrevia`（当前 pid 8812），`ip80=401` 复验通过。
+  另一个代理 `com.local.net14tunnel` 是 192.168.14.81 的内网中继，与本项目无关，没动。
+  教训：`~/Library/LaunchAgents` 里的 `com.local.*tunnel*.plist` 会在你 kill 之后悄悄把旧转发拉回来，
+  宣布「清理完成」之前必须先枚举一遍。

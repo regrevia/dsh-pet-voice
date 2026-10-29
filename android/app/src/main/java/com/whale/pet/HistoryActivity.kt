@@ -1034,31 +1034,8 @@ class HistoryActivity : Activity() {
         return if (t.length <= 22) t else t.take(21).trimEnd() + "…"
     }
 
-    /** 宿主塞进来的上下文：对看对话的人没有意义，标题和气泡里都不出现。 */
-    private fun isInjectedText(text: String): Boolean {
-        val body = text.trim()
-        if (body.isEmpty()) return true
-        // 宿主塞进 user 槽的上下文：压缩摘要、Fast mode 提醒，都不是主人说的话。
-        return body.startsWith("Time sampled while preparing turn") ||
-            body.startsWith("Current runtime context.") ||
-            body.startsWith("<system-reminder>") ||
-            body.startsWith("<available_skills>") ||
-            body.startsWith("<environment_context>") ||
-            body.startsWith("This is an automatically generated checkpoint") ||
-            body.startsWith("The context was just compacted") ||
-            body.startsWith("Fast mode reminder") ||
-            body.startsWith("Auto schedule") ||
-            // 压缩摘要正文：标题头被宿主吃掉时只剩这些小节的正文
-            body.contains("## Primary Request and Intent") ||
-            body.contains("## Key Technical Concepts") || looksLikeCheckpointDump(body)
-    }
-
-    /** 摘要碎块：长文 + 一串「- `/绝对路径`」清单；主人自己讲话很少长这样。 */
-    private fun looksLikeCheckpointDump(body: String): Boolean {
-        if (body.length < 600) return false
-        val bullets = Regex("(?m)^[-*]\\s*`").findAll(body).count()
-        return bullets >= 4
-    }
+    /** 宿主塞进来的上下文：对模型有用，对看对话的人没有意义（规则见 [InjectedText]）。 */
+    private fun isInjectedText(text: String): Boolean = InjectedText.isInjected(text)
 
     /** 会话 id 在 state 里查名字；查不到回空串（宁可不显示，也不把 id 糊到脸上）。 */
     private fun titleOf(state: JSONObject, id: String): String {
