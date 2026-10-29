@@ -7,6 +7,7 @@
 //   node scripts/tls-proxy.mjs                       # 127.0.0.1:8443 → 127.0.0.1:52356
 //   node scripts/tls-proxy.mjs --bind 0.0.0.0        # 让同一局域网/真机的 IP 也能连（注意暴露面）
 //   node scripts/tls-proxy.mjs --port 9443 --upstream 127.0.0.1:52356
+//   node scripts/tls-proxy.mjs --port 8443 --upstream auto   # 每次都跟当前在跑的 DSH 端口
 //
 // 只放行 /pet-voice/*，其它路径 404 —— 它不是通用代理，别拿它开公网。
 // SSE 是流式的：响应直接 pipe，不做整体缓冲，所以 /api/ask 的增量回复能原样出来。
@@ -80,7 +81,7 @@ function probesUpstream (host) {
     req.end()
   })
 }
-async function pickUpstream () {
+async function pickUpstream (soft = false) {
   const seen = []
   const add = (h) => { if (h && !seen.includes(h)) seen.push(h) }
   add(upstreamArg)
@@ -90,16 +91,40 @@ async function pickUpstream () {
   for (const h of seen) {
     if (await probesUpstream(h)) return h
   }
+  if (soft) return ''
   console.error(`找不到 DSH Web 的上游端口，试过：${seen.join(', ') || '（无）'}`)
   console.error('先确认电脑上 DSH 在跑，再重试；或用 --upstream 127.0.0.1:<端口> 指定。')
   process.exit(2)
 }
-const upstream = await pickUpstream()
+/**
+ * --upstream auto：DSH Web 每次启动端口都可能变，代理跟着走，不用人工重跑。
+ * 判断「上游过期了」只看探测结果，不看时间：探测一次 1.2s 才失败，比回给手机 502 便宜。
+ */
+const followUpstream = upstreamArg === 'auto'
 
-const [upHost, upPortRaw] = upstream.split(':')
-const upPort = Number(upPortRaw || 80)
+let upstream = ''
+let upHost = ''
+let upPort = 80
+function applyUpstream (value) {
+  upstream = value
+  const [h, p] = value.split(':')
+  upHost = h
+  upPort = Number(p || 80)
+}
+applyUpstream(await pickUpstream())
 
-const server = createServer({ cert: readFileSync(certPath), key: readFileSync(keyPath), minVersion: 'TLSv1.2' }, (req, res) => {
+/** 跟随模式：上游变了就换；探测还通就不动，避免每条请求都扫一遍 lsof。 */
+async function refreshUpstream () {
+  if (!followUpstream) return
+  if (upstream && await probesUpstream(upstream)) return
+  const next = await pickUpstream(true)
+  if (!next) return
+  applyUpstream(next)
+  if (!quiet) console.log(`上游切到 ${upstream}`)
+}
+
+const server = createServer({ cert: readFileSync(certPath), key: readFileSync(keyPath), minVersion: 'TLSv1.2' }, async (req, res) => {
+  await refreshUpstream()
   const verdict = normalizeTarget(req.url || '/')
   if (!verdict) {
     res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' })
@@ -141,6 +166,7 @@ const server = createServer({ cert: readFileSync(certPath), key: readFileSync(ke
   })
   up.on('error', (err) => {
     if (!quiet) console.error(`上游错误：${err.message}`)
+    if (followUpstream) upstream = ''
     if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
     res.end('上游不可达（DSH 没开？）\n')
   })

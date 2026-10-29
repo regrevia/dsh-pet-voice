@@ -50,6 +50,27 @@ class TtsPlayer(
     /** 已经边下边播完、等调度来还位的 seq：同一次出声不能放第二遍。 */
     private val streamedPlayed = HashSet<Long>()
 
+    /** 这个播放器的编号：跨播放器去重用（见 companion 的 claimVoice）。 */
+    private val ownerId: Int = synchronized(voiceLock) { ++ownerGen }
+
+    /**
+     * 同一句话只播一次，不管是谁来排的。
+     *
+     * 悬浮窗、聊天页、主页各自有 TtsPlayer，一轮回复的 onSentence 可能同时喂到两个播放器；
+     * 两边都播，用户听到的就是两把嗓子错开几十毫秒的「死亡二重音」。
+     * 只去重「不同播放器 + 同一句 + 1.5 秒内」，同一个播放器重复播同一句（用户让它再说一遍）不受影响。
+     */
+    private fun claimVoice(text: String): Boolean = synchronized(voiceLock) {
+        val now = SystemClock.elapsedRealtime()
+        val dup = text == lastClaimText && ownerId != lastClaimOwner && now - lastClaimAt < 1500L
+        if (!dup) {
+            lastClaimText = text
+            lastClaimAt = now
+            lastClaimOwner = ownerId
+        }
+        !dup
+    }
+
     /** 打断轮次：迟到的准备/下载回调据此判废；由 [doStop] 与 [TtsQueue.stopAll] 同时递增。 */
     @Volatile
     private var epoch = 0
@@ -136,6 +157,12 @@ class TtsPlayer(
     fun enqueue(text: String) {
         val t = text.trim()
         if (t.isEmpty()) return
+        if (!claimVoice(t)) {
+            // 同一个 App 里好几个播放器（悬浮窗、聊天页、主页）都可能收到同一句：
+            // 各放各的听感就是「一前一后两把嗓子」。同一句只让第一个播。
+            NetLog.record("TTS", 0, 0, "这句已由别的播放器播过，跳过「${t.take(12)}」")
+            return
+        }
         main.post {
             rememberSpoken(t)
             val preset = config().preset
@@ -817,5 +844,14 @@ class TtsPlayer(
         speaking = v
         if (!v) lastAudioEndAt = SystemClock.elapsedRealtime()
         onSpeaking(v)
+    }
+
+    companion object {
+        /** 跨播放器去重用的锁与「上一句被谁排了」。 */
+        private val voiceLock = Any()
+        private var ownerGen = 0
+        private var lastClaimText = ""
+        private var lastClaimAt = 0L
+        private var lastClaimOwner = 0
     }
 }

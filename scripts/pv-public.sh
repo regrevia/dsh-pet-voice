@@ -24,6 +24,9 @@ for f in "$HOME/.dsh/pet-voice/public.env" "$ROOT/local/server.env"; do
 done
 
 PV_REMOTE_PORT=${PV_REMOTE_PORT:-8443}
+# 本机反代端口：8443 可能被别的进程（比如宿主自带的同名反代）占着，
+# 那一层一旦指向旧 DSH 端口就永远 502，我们改用自己的端口，链路完全归本脚本管。
+PV_LOCAL_PORT=${PV_LOCAL_PORT:-9443}
 PV_SSH=${PV_SSH:-${SERVER_USER:+$SERVER_USER@}${SERVER_HOST:-}}
 PV_SSH_KEY=${PV_SSH_KEY:-${SERVER_KEY:-}}
 PV_PUBLIC=${PV_PUBLIC:-${SERVER_HOST:+https://$SERVER_HOST:$PV_REMOTE_PORT}}
@@ -48,15 +51,15 @@ pid_alive() { [ -f "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null; }
 #   2) 现在这个端口由 DSH 宿主进程自己接（它内置了同一套 TLS 反代），pid 文件里的号是别人的 → 永远判没跑。
 # 改判「端口在听 + 真的能按 TLS 回一个 HTTP 状态」。返回 200/401/403 都算通。
 proxy_healthy() {
-  port_up 8443 || return 1
+  port_up "$PV_LOCAL_PORT" || return 1
   local code
   code=$(curl -s -o /dev/null -m 3 -w '%{http_code}' \
-    ${CA:+--cacert "$CA"} "https://127.0.0.1:8443/pet-voice/api/update" 2>/dev/null)
+    ${CA:+--cacert "$CA"} "https://127.0.0.1:${PV_LOCAL_PORT}/pet-voice/api/update" 2>/dev/null)
   case "$code" in 200|401|403) return 0 ;; esac
   return 1
 }
 
-proxy_running() { pid_alive "$PROXY_PID" && port_up 8443 && return 0; proxy_healthy; }
+proxy_running() { pid_alive "$PROXY_PID" && port_up "$PV_LOCAL_PORT" && return 0; proxy_healthy; }
 # 只看 pid 文件会骗人：ssh -R 可能活着但 pid 文件丢了（上次手工起的、或进程重启后没回写），
 # 那 status 就说「没跑」、keepalive 再起一个，结果 remote 8443 被占住、新连接立刻失败。
 # 所以 pid 文件失效时按命令行找活的 ssh -R，找到就把 pid 写回去（自愈），别重复起。
@@ -65,7 +68,7 @@ tunnel_running() {
   p=$(cat "$TUNNEL_PID" 2>/dev/null)
   if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then return 0; fi
   # 两种写法都要认：`-R 0.0.0.0:8443:…`（旧脚本起的）和 `-R 8443:…`（launchd 里的 owner 用的是这个）
-  p=$(pgrep -f -- "-R (0\.0\.0\.0:)?${PV_REMOTE_PORT}:127\.0\.0\.1:8443" 2>/dev/null | head -1)
+  p=$(pgrep -f -- "-R (0\.0\.0\.0:)?${PV_REMOTE_PORT}:127\.0\.0\.1:${PV_LOCAL_PORT}" 2>/dev/null | head -1)
   [ -n "$p" ] || return 1
   mkdir -p "$RUN_DIR" && printf '%s\n' "$p" >"$TUNNEL_PID"
   return 0
@@ -93,16 +96,17 @@ cmd_start() {
 
   if proxy_running; then
     if pid_alive "$PROXY_PID"; then
-      echo "· 本机 8443 反代已在跑（pid $(cat "$PROXY_PID")）"
+      echo "· 本机 ${PV_LOCAL_PORT} 反代已在跑（pid $(cat "$PROXY_PID")）"
     else
-      echo "· 本机 8443 反代已在跑（宿主自带，不重复起）"
+      echo "· 本机 ${PV_LOCAL_PORT} 反代已在跑（宿主自带，不重复起）"
     fi
   else
-    echo "· 起本机 8443 反代 → 127.0.0.1:$port"
-    nohup node "$ROOT/scripts/tls-proxy.mjs" --quiet --upstream "127.0.0.1:$port" \
+    echo "· 起本机 ${PV_LOCAL_PORT} 反代 → 127.0.0.1:$port"
+    # 自动跟随：DSH 重启换端口时不用再手动 restart（代理自己换上游）
+    nohup node "$ROOT/scripts/tls-proxy.mjs" --quiet --port "$PV_LOCAL_PORT" --upstream auto \
       >"$RUN_DIR/tls-proxy.log" 2>&1 &
     echo $! >"$PROXY_PID"
-    wait_for 10 port_up 8443 || die "8443 没起来，看 $RUN_DIR/tls-proxy.log"
+    wait_for 10 port_up "$PV_LOCAL_PORT" || die "${PV_LOCAL_PORT} 没起来，看 $RUN_DIR/tls-proxy.log"
   fi
 
   if tunnel_running; then
@@ -110,11 +114,11 @@ cmd_start() {
   else
     local keyopt=()
     [ -n "$PV_SSH_KEY" ] && keyopt=(-i "$PV_SSH_KEY")
-    echo "· 起 ssh -R：$PV_SSH 的 $PV_REMOTE_PORT → 本机 8443"
+    echo "· 起 ssh -R：$PV_SSH 的 $PV_REMOTE_PORT → 本机 ${PV_LOCAL_PORT}"
     nohup ssh -N -T "${keyopt[@]}" \
       -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
       -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-      -R "0.0.0.0:$PV_REMOTE_PORT:127.0.0.1:8443" "$PV_SSH" \
+      -R "0.0.0.0:$PV_REMOTE_PORT:127.0.0.1:${PV_LOCAL_PORT}" "$PV_SSH" \
       >"$RUN_DIR/tunnel.log" 2>&1 &
     echo $! >"$TUNNEL_PID"
     sleep 2
@@ -133,7 +137,7 @@ cmd_start() {
 }
 
 cmd_stop() {
-  for pair in "$TUNNEL_PID:ssh 隧道" "$PROXY_PID:8443 反代"; do
+  for pair in "$TUNNEL_PID:ssh 隧道" "$PROXY_PID:${PV_LOCAL_PORT} 反代"; do
     local f=${pair%%:*} name=${pair#*:}
     if pid_alive "$f"; then
       kill "$(cat "$f")" 2>/dev/null || true; echo "· 已停 $name"
@@ -149,9 +153,9 @@ cmd_status() {
   local port code
   port=$(local_port) && echo "· DSH 端口 $port" || echo "· DSH 没在跑"
   if proxy_running; then
-    if pid_alive "$PROXY_PID"; then echo "· 8443 反代 在跑（pid $(cat "$PROXY_PID")）"
-    else echo "· 8443 反代 在跑（宿主自带）"; fi
-  else echo "· 8443 反代 没跑"; fi
+    if pid_alive "$PROXY_PID"; then echo "· ${PV_LOCAL_PORT} 反代 在跑（pid $(cat "$PROXY_PID")）"
+    else echo "· ${PV_LOCAL_PORT} 反代 在跑（宿主自带）"; fi
+  else echo "· ${PV_LOCAL_PORT} 反代 没跑"; fi
   if tunnel_running; then echo "· ssh -R 在跑（→ $PV_SSH 的 ${PV_REMOTE_PORT}）"; else echo "· ssh -R 没跑"; fi
   code=$(public_code)
   if [ -z "$code" ]; then echo "· 公网 跳过（缺 PV_PUBLIC 或 CA）"; else echo "· 公网 HTTP $code"; fi
