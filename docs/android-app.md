@@ -2021,3 +2021,6 @@ App 这边：运行条写「引导中」，这一轮照常计时（不按「排�
   `su -c "pm install -r -g /data/local/tmp/x.apk"`。重装会把运行时权限打回未授予，
   装完要 `pm grant com.whale.pet android.permission.RECORD_AUDIO/CAMERA/POST_NOTIFICATIONS`，
   否则一进 App 就弹授权框挡住首页。
+- 插件改动（`handleUpdate` 补 `ok:true`）要**宿主重启**才生效；当天不重启也恢复了，是因为
+  `~/.dsh/pet-voice/update/latest.json` 里先手工补了 `"ok": true`，App 读宿主回包时就不再踩缺字段。
+  发布脚本已补上这个字段，之后每版清单自带。
