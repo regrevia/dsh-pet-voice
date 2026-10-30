@@ -51,6 +51,7 @@ class MainActivity : Activity() {
     private lateinit var wakeHint: TextView
     private lateinit var autoStartCheck: CheckBox
     private lateinit var bubbleCheck: CheckBox
+    private lateinit var inAppCheck: CheckBox
     private lateinit var wakeNameInput: EditText
     private lateinit var spriteSpinner: Spinner
     private lateinit var outfitSpinner: Spinner
@@ -108,6 +109,20 @@ class MainActivity : Activity() {
         wakeHint = findViewById(R.id.wakeHint)
         autoStartCheck = findViewById(R.id.autoStartCheck)
         bubbleCheck = findViewById(R.id.bubbleCheck)
+        inAppCheck = findViewById(R.id.inAppCheck)
+        inAppCheck.isChecked = PetSettings.showInApp(this)
+        inAppCheck.setOnCheckedChangeListener { _, on ->
+            PetSettings.saveShowInApp(this, on)
+            // 关了就别等 1.2 秒轮询才收：当场撤；开了由聊天页自己请出来
+            if (!on && FloatingPetService.alive) {
+                runCatching {
+                    startService(
+                        Intent(this, FloatingPetService::class.java)
+                            .setAction(FloatingPetService.ACTION_HIDE),
+                    )
+                }
+            }
+        }
         wakeNameInput = findViewById(R.id.wakeNameInput)
         spriteSpinner = findViewById(R.id.spriteSpinner)
         outfitSpinner = findViewById(R.id.outfitSpinner)

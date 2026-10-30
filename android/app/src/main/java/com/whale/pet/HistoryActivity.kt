@@ -110,11 +110,14 @@ class HistoryActivity : Activity() {
     private lateinit var goalState: TextView
     private lateinit var goalText: TextView
     private lateinit var goalAction: TextView
+    private lateinit var goalEditBtn: android.widget.ImageButton
+    private lateinit var goalDeleteBtn: android.widget.ImageButton
     private lateinit var goalQueue: TextView
     private lateinit var queueBar: LinearLayout
     /** 队列里那几句：id 是宿主给的，撤掉/调顺序都按它认。 */
     private data class Queued(val id: String, val text: String)
     @Volatile private var goalId = ""
+    @Volatile private var goalObjective = ""
     @Volatile private var goalRevision = 0
     @Volatile private var goalPhase = ""
     @Volatile private var goalPending = false
@@ -183,12 +186,19 @@ class HistoryActivity : Activity() {
     private var videoView: android.widget.VideoView? = null
     /** 屏幕上这只对话的名字（宿主说叫什么就叫什么，查不到就空着）。 */
     private var liveSessionTitle = ""
+    /** 顶上那行项目名：跟着屏幕上这只会话走，不跟独立钉住的项目走。 */
+    private var liveProjectTitle = ""
     /** 电脑上这只正在跑回合（`/api/state.turns`）；手机自己发起的回合另有进度条。 */
     @Volatile private var hostBusy = false
     /** 发送位当前是不是中断形态（避免每帧重复换图标）。 */
     private var sendIsStop = false
     /** 这一轮是手机自己发的：进度条已经在说话，标题行不再重复。 */
     @Volatile private var localBusy = false
+    /** 这一轮从什么时候开始算：标题行的「用时」靠它，退出重进也不会从 0 重新数。 */
+    private var busySince = 0L
+    private var busyTick: Runnable? = null
+    /** 输入框上面那行此刻是不是被「这一轮还没跑完」占着：占着才由它收走。 */
+    private var runBusyOwned = false
     /** 刚按过终止、宿主还没收尾：这段时间别把中断方块又摆回发送位。 */
     @Volatile private var stopping = false
     private var peekTitle = ""
@@ -241,9 +251,6 @@ class HistoryActivity : Activity() {
         data class Action(val text: String) : PickerRow()
         /** 「新建对话」：就在当前项目里开一只新的。 */
         data class NewChat(val text: String) : PickerRow()
-
-        /** 看这只会话在宿主那边的原文（工具调用、长回复都在里面）。 */
-        data class Detail(val text: String) : PickerRow()
     }
 
     /** 待发队列把某句补发成功后，这儿把会话再拉一遍，用户能直接看到回复。 */
@@ -295,7 +302,17 @@ class HistoryActivity : Activity() {
         goalQueue = findViewById(R.id.goalQueue)
         queueBar = findViewById(R.id.chatQueue)
         goalAction.setOnClickListener { toggleGoal() }
-        // 删除跟桌面端那个 🗑 一样：长按整行才出现，避免误触
+        // 目标条上的操作一律用图标：改（铅笔）、删（垃圾桶）。这两个常驻，
+        // 包括已完成的阶段——那时候「暂停 / 继续」本来就不该出现，能做的只剩改和删。
+        goalEditBtn = goalIcon(R.drawable.ic_goal_edit, R.color.pet_accent, "改目标")
+        goalDeleteBtn = goalIcon(R.drawable.ic_goal_delete, R.color.pet_text_dim, "删目标")
+        (goalState.parent as? LinearLayout)?.let { row ->
+            row.addView(goalEditBtn)
+            row.addView(goalDeleteBtn)
+        }
+        goalEditBtn.setOnClickListener { editGoal() }
+        goalDeleteBtn.setOnClickListener { confirmClearGoal() }
+        // 长按整行也能删，省得去记那个小图标在哪
         goalBar.setOnLongClickListener {
             confirmClearGoal()
             true
@@ -488,6 +505,9 @@ class HistoryActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        // 页面在前：这一轮的话归页面讲，旁观者闭嘴只记进度
+        VoiceGate.pageSpeaks = true
+        chatPage(true)
         refreshHeader()
         reload()
         // 回到页面：宿主若还在跑，发送位摆回中断、回答接着上屏
@@ -622,6 +642,9 @@ class HistoryActivity : Activity() {
     }
 
     override fun onPause() {
+        // 人走了：话交给常驻服务的旁观者，页面别再出声
+        VoiceGate.pageSpeaks = false
+        chatPage(false)
         super.onPause()
         ui.removeCallbacks(hostWatch)
         ui.removeCallbacks(attachPull)
@@ -635,6 +658,7 @@ class HistoryActivity : Activity() {
     }
 
     override fun onDestroy() {
+        VoiceGate.pageSpeaks = false
         Outbox.removeDeliveredListener(outboxDelivered)
         Outbox.removeReplyListener(outboxReply)
         Outbox.removeFailedListener(outboxFailed)
@@ -666,20 +690,19 @@ class HistoryActivity : Activity() {
     private fun refreshHeader() {
         // 面板关掉「语音对话」时这一页就别留着话筒：留着点了也没用
         micBtn.visibility = if (PetSettings.feature(this, "voice")) View.VISIBLE else View.GONE
-        val title = PetSettings.pinnedTitle(this)
+        val title = liveProjectTitle.ifBlank { PetSettings.pinnedTitle(this) }
         projectBtn.text = title.ifBlank { "项目" }
         // 第二行是「这一问落在哪只会话」。还没拿到会话名（刚开的新会话、名字还没生成）
         // 就直说「新会话」：拿项目名顶上会让人以为自己在旧对话里。
         val base = liveSessionTitle.ifBlank {
             if (PetSettings.chatSession(this).isNotBlank()) "新会话" else ""
         }
-        // 电脑那边这一轮还没跑完（比如上一条是从别处发的、或本地回合被系统掐了）：
-        // 名字行末尾挂一句状态，不用盯着屏幕猜它是不是还在想。
-        val line = when {
-            base.isBlank() -> ""
-            hostBusy && !localBusy -> "$base · 正在回复"
-            else -> base
-        }
+        // 顶行只放「项目名 / 会话名」：这两样人不动它就不该变。
+        // 这一轮跑到哪了放到输入框上面那行（跟「传图/中断」共用），不占标题。
+        val busy = hostBusy || localBusy
+        if (!busy) busySince = 0L
+        val line = base
+        refreshRunBar()
         sessionLabel.text = line
         sessionLabel.visibility = if (line.isBlank()) View.GONE else View.VISIBLE
         // 「在旁听：别的那只」只在 5 分钟内有材料时出现，过期自己收起来。
@@ -705,6 +728,62 @@ class HistoryActivity : Activity() {
      * 目标行：有目标才出现，没目标就整块收起（不占地方、不说空话）。
      * 右边那个动作跟桌面端一致——在跑的给「暂停」，停下的给「继续」。
      */
+    /**
+     * 「用时」起点：这一轮不是这次打开才开始的，退出重进得接着数。
+     * 先认本地发的那句的时间（手机发的），再认历史里最后一句我说的，都没有就从现在起。
+     */
+    private fun busySinceNow(): Long {
+        if (busySince > 0L) return busySince
+        val now = System.currentTimeMillis()
+        val last = runCatching {
+            PetHistory.all(this).lastOrNull { it.role == PetHistory.ROLE_ME && now - it.ts in 0..30 * 60_000L }?.ts
+        }.getOrNull()
+        busySince = last ?: now
+        return busySince
+    }
+
+    /**
+     * 输入框上面那行：本地这一轮由 ticker 自己写；这里只管
+     * 「这轮是别处发起的、还没答完」——退出重进、或电脑那边自己发的。
+     */
+    private fun refreshRunBar() {
+        val hostOnly = hostBusy && turn == null
+        if (hostOnly) {
+            runBusyOwned = true
+            runBar.visibility = View.VISIBLE
+            runText.text = "深度求索中 · 用时 ${busyElapsed()}"
+            startBusyTick()
+        } else if (runBusyOwned) {
+            runBusyOwned = false
+            runBar.visibility = View.GONE
+            stopBusyTick()
+        }
+    }
+
+    private fun busyElapsed(): String {
+        val sec = ((System.currentTimeMillis() - busySinceNow()) / 1000).coerceAtLeast(0)
+        return String.format("%02d:%02d", sec / 60, sec % 60)
+    }
+
+    /** 每秒只改标题行那几个字，不碰列表。 */
+    private fun startBusyTick() {
+        if (busyTick != null) return
+        val r = object : Runnable {
+            override fun run() {
+                if (!hostBusy && !localBusy) { busyTick = null; return }
+                refreshHeader()
+                ui.postDelayed(this, 1_000)
+            }
+        }
+        busyTick = r
+        ui.postDelayed(r, 1_000)
+    }
+
+    private fun stopBusyTick() {
+        busyTick?.let { ui.removeCallbacks(it) }
+        busyTick = null
+    }
+
     private fun renderGoal(detail: JSONObject) {
         // 待输入队列和目标是同一份 detail，但队列条不依赖目标：先渲染，别被下面的提前 return 吞掉
         renderQueueOf(detail)
@@ -712,6 +791,7 @@ class HistoryActivity : Activity() {
         if (goal == null || goal.optString("id").isBlank()) {
             goalPending = false
             goalId = ""
+            goalObjective = ""
             goalPhase = ""
             goalBar.visibility = View.GONE
             return
@@ -723,6 +803,7 @@ class HistoryActivity : Activity() {
         goalPhase = phase
         goalRevision = goal.optInt("revision", 0)
         val objective = goal.optString("objective").trim()
+        goalObjective = objective
         goalText.text = objective.ifBlank { "目标" }
         goalState.text = when (phase) {
             "active" -> "目标进行中"
@@ -739,6 +820,11 @@ class HistoryActivity : Activity() {
             goalAction.text = if (phase == "complete") "" else if (phase == "active") "暂停" else "继续"
         }
         goalAction.visibility = if (goalAction.text.isBlank()) View.GONE else View.VISIBLE
+        // 改 / 删两个图标任何阶段都在，包括已完成：那是唯一还能做的两件事
+        goalEditBtn.visibility = View.VISIBLE
+        goalDeleteBtn.visibility = View.VISIBLE
+        goalEditBtn.isEnabled = !goalPending
+        goalDeleteBtn.isEnabled = !goalPending
         goalQueue.visibility = View.GONE
         goalBar.visibility = View.VISIBLE
     }
@@ -904,6 +990,77 @@ class HistoryActivity : Activity() {
         }, "pet-goal-action").apply { isDaemon = true }.start()
     }
 
+    /** 改目标正文：多行输入，预填现在的目标；确认后走宿主 goals.edit。 */
+    private fun editGoal() {
+        val id = goalId
+        if (id.isBlank() || goalPending) return
+        val input = android.widget.EditText(this).apply {
+            setText(goalObjective)
+            setSelection(text.length)
+            isSingleLine = false
+            minLines = 3
+            maxLines = 6
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            val pad = dp(16)
+            setPadding(pad, dp(8), pad, dp(8))
+        }
+        val box = android.widget.FrameLayout(this).apply {
+            val pad = dp(8)
+            setPadding(pad, 0, pad, 0)
+            addView(
+                input,
+                android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("改目标")
+            .setView(box)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("保存", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val next = input.text?.toString()?.trim().orEmpty()
+                if (next.isEmpty()) {
+                    toast("目标不能为空")
+                    return@setOnClickListener
+                }
+                dialog.dismiss()
+                submitGoalEdit(id, next)
+            }
+        }
+        dialog.show()
+    }
+
+    /** 提交新的目标正文：成功后整块重拉，失败的提示按宿主原话给。 */
+    private fun submitGoalEdit(id: String, objective: String) {
+        val sid = PetSettings.chatSession(this)
+        val rev = goalRevision
+        goalPending = true
+        goalObjective = objective
+        goalText.text = objective
+        goalState.text = "目标改着…"
+        goalAction.visibility = View.GONE
+        Thread({
+            val res = try {
+                PetClient { PetSettings.load(this) }.goalEdit(sid, id, rev, objective)
+            } catch (_: Exception) { null }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                goalPending = false
+                val body = res?.json
+                if (body?.optBoolean("ok") != true) {
+                    toast(body?.optString("error").orEmpty().ifBlank { "没改成，稍后再试" })
+                }
+                syncSession()
+            }
+        }, "pet-goal-edit").apply { isDaemon = true }.start()
+    }
+
     /** 长按目标行：确认后清掉这个目标（宿主留墓碑，历史里还能查到）。 */
     private fun confirmClearGoal() {
         val id = goalId
@@ -1012,6 +1169,13 @@ class HistoryActivity : Activity() {
             liveSessionTitle = niceTitle(title)
             refreshHeader()
         }
+        // 顶上两行必须是一对：项目名从这只会话自己的 workspace 推，不再拿独立钉的项目名凑
+        val projTitle = projectTitleOf(state, shown)
+        if (projTitle.isNotBlank() && projTitle != liveProjectTitle) {
+            liveProjectTitle = projTitle
+            if (projTitle != PetSettings.pinnedTitle(this)) PetSettings.savePinnedTitle(this, projTitle)
+            refreshHeader()
+        }
         // 本地没钉：从这一刻起明确钉在宿主当前落点上，之后电脑上再换也不会把它带走
         if (mine.isBlank() && hostId.isNotBlank()) PetSettings.saveChatSession(this, hostId)
         // 最近会话表里查不到名字（太老、掉出列表）：单独问这只一句，只补标题
@@ -1028,7 +1192,9 @@ class HistoryActivity : Activity() {
             val index = cut.indexOf(marker)
             if (index >= 0) cut = cut.substring(0, index)
         }
-        val t = cut.replace(Regex("[#*>`]+"), " ").replace(Regex("\\s+"), " ").trim()
+        // 插件观察块（视觉辅助 IntelliF 之类）混在第一句里时先切掉，剩下正文才拿来当标题
+        val t = InjectedText.stripPluginBlocks(cut)
+            .replace(Regex("[#*>`]+"), " ").replace(Regex("\\s+"), " ").trim()
         // 宿主把「运行时上下文」这类注入内容当成第一句时，会话名就是一段系统提示词——不上屏。
         if (t.isBlank() || isInjectedText(t)) return ""
         return if (t.length <= 22) t else t.take(21).trimEnd() + "…"
@@ -1048,6 +1214,28 @@ class HistoryActivity : Activity() {
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
             if (o.optString("id") == id) return o.optString("title").orEmpty()
+        }
+        return ""
+    }
+
+    /** 这只会话属于哪个项目（宿主给了 projectId，项目表里查名字）。 */
+    private fun projectTitleOf(state: JSONObject, id: String): String {
+        if (id.isBlank()) return ""
+        var pid = ""
+        val cur = state.optJSONObject("current")
+        if (cur != null && cur.optString("id") == id) pid = cur.optString("projectId").orEmpty()
+        if (pid.isBlank()) {
+            val arr = state.optJSONArray("sessions")
+            for (i in 0 until (arr?.length() ?: 0)) {
+                val o = arr?.optJSONObject(i) ?: continue
+                if (o.optString("id") == id) { pid = o.optString("projectId").orEmpty(); break }
+            }
+        }
+        if (pid.isBlank()) return ""
+        val projects = state.optJSONArray("projects") ?: return ""
+        for (i in 0 until projects.length()) {
+            val p = projects.optJSONObject(i) ?: continue
+            if (p.optString("id") == pid) return p.optString("title").orEmpty()
         }
         return ""
     }
@@ -1080,6 +1268,8 @@ class HistoryActivity : Activity() {
         val wasPinned = mine.isNotBlank()
         PetSettings.saveChatSession(this, id)
         liveSessionTitle = ""
+        // 项目名也是一对的另一半：不清就会拿上一张单子的项目名配这只新会话
+        liveProjectTitle = ""
         refreshHeader()
         if (wasPinned) {
             PetHistory.append(this, PetHistory.ROLE_NOTE, "原来那只对话不在了，换了一只继续")
@@ -1102,8 +1292,11 @@ class HistoryActivity : Activity() {
                 if (isInjectedText(item.text)) return@forEachIndexed
                 rows.add(ChatRow.Me(item.text, item.ts, item.atts))
             } else {
+                // 本地库里可能有旧版本落下的插件观察块：显示前再剥一道，剥完是空的就不摆
+                val shown = InjectedText.stripPluginBlocks(item.text)
+                if (shown.isBlank() || isInjectedText(shown)) return@forEachIndexed
                 // 只有最后一条助手消息挂富文本渲染器：历史长列表里塞多个 WebView 会卡
-                rows.add(ChatRow.Pet(item.text, rich = true))
+                rows.add(ChatRow.Pet(shown, rich = true))
             }
         }
         val live = liveText
@@ -1186,10 +1379,12 @@ class HistoryActivity : Activity() {
                     val page = ArrayList<PetHistory.Item>(arr.length())
                     for (i in 0 until arr.length()) {
                         val o = arr.optJSONObject(i) ?: continue
-                        val text = o.optString("text").trim()
+                        // 插件的观察块（视觉辅助 IntelliF 之类）整块切掉；切完只剩空白的整条不摆
+                        val text = InjectedText.stripPluginBlocks(o.optString("text"))
                         if (text.isEmpty()) continue
                         // 运行时注入的上下文（<goal_round> 之类）不是人说的话，对话里不摆
                         if (text.startsWith("<")) continue
+                        if (isInjectedText(text)) continue
                         val role = when (o.optString("role")) {
                             "user" -> PetHistory.ROLE_ME
                             "assistant" -> PetHistory.ROLE_PET
@@ -1520,6 +1715,11 @@ class HistoryActivity : Activity() {
                         NetLog.record("TTS", 0, 0, "面板关了语音，这句不出声")
                         return
                     }
+                    // 人已经离开页面：这一轮由常驻服务的旁观者接着讲，页面别在后头再开一把嗓子
+                    if (!VoiceGate.pageSpeaks) {
+                        NetLog.record("TTS", 0, 0, "页面不在前面，这句交给旁观者")
+                        return
+                    }
                     NetLog.record("TTS", 0, 0, "再排一句「${sentence.take(14)}」")
                     val cfg = PetSettings.load(this@HistoryActivity)
                     val player = tts ?: TtsPlayer(this@HistoryActivity, client, { cfg }, {}, {}).also { tts = it }
@@ -1681,7 +1881,8 @@ class HistoryActivity : Activity() {
                 finishTurn(null)
                 return
             }
-            runText.text = if (ms > 90_000) "还在跑 ${ms / 1000} s · 可中断" else "处理中 ${ms / 1000} s"
+            val el = String.format("%02d:%02d", ms / 60_000, (ms / 1000) % 60)
+            runText.text = if (ms > 90_000) "还在跑 · 用时 $el · 可中断" else "深度求索中 · 用时 $el"
             updateSendAffordance()
             ui.postDelayed(this, 1000)
         }
@@ -2335,6 +2536,8 @@ class HistoryActivity : Activity() {
                 pickerLoading = false
                 projects = out
                 if (pinnedTitle.isNotBlank()) {
+                    // 项目单独存一份之外，页面自己也得记住这一行，别等下次轮询才对齐
+                    liveProjectTitle = pinnedTitle
                     PetSettings.savePinnedTitle(this, pinnedTitle)
                     refreshHeader()
                 }
@@ -2367,6 +2570,7 @@ class HistoryActivity : Activity() {
                     if (id.isNotBlank()) pickerProjectId = id
                     if (title.isNotBlank()) {
                         pickerProject = title
+                        liveProjectTitle = title
                         PetSettings.savePinnedTitle(this, title)
                         refreshHeader()
                     }
@@ -2433,6 +2637,7 @@ class HistoryActivity : Activity() {
                 if (curWs.isNotBlank() && curTitle.isNotBlank() &&
                     curTitle != PetSettings.pinnedTitle(this)
                 ) {
+                    liveProjectTitle = curTitle
                     PetSettings.savePinnedTitle(this, curTitle)
                     refreshHeader()
                 }
@@ -2443,7 +2648,6 @@ class HistoryActivity : Activity() {
                     pickerRows.add(PickerRow.Head(if (wsId.isBlank()) "还没有对话" else "这个项目还没有对话"))
                 } else {
                     out.forEach { pickerRows.add(PickerRow.SessRow(it)) }
-                    if (cur.isNotBlank()) pickerRows.add(PickerRow.Detail("看这只对话的原文"))
                 }
                 pickerAdapter.notifyDataSetChanged()
                 sizePicker()
@@ -2482,12 +2686,16 @@ class HistoryActivity : Activity() {
                 pickerProject = row.ws.title
                 pickProject(row.ws)
             }
-            is PickerRow.SessRow -> pickSession(row.s)
+            is PickerRow.SessRow -> {
+                // 点会话就是进这只：原文、目标真实状态、待输出队列一次到位，
+                // 不再多一个「看这只对话的原文」的中转。
+                pickSession(row.s)
+                startActivity(SessionActivity.intent(this, row.s.id, row.s.title.ifBlank { liveSessionTitle }))
+            }
             is PickerRow.NewChat -> {
                 closePicker()
                 newChat()
             }
-            is PickerRow.Detail -> openSessionDetail()
             is PickerRow.Action -> toast("新建项目在电脑上做")
             else -> {}
         }
@@ -2496,7 +2704,8 @@ class HistoryActivity : Activity() {
     /** 选项目 = 定好工作区，并在里面开一只新会话；操作完直接回到对话。 */
     private fun pickProject(ws: Ws) {
         closePicker()
-        refreshHeader()
+        // 项目与会话是 header 的一对：换项目先把这个位占好，随后开的新会话只补下半行
+        liveProjectTitle = ws.title
         PetSettings.savePinnedTitle(this, ws.title)
         refreshHeader()
         val client = PetClient { PetSettings.load(this) }
@@ -2515,17 +2724,6 @@ class HistoryActivity : Activity() {
     }
 
     /** 选会话 = 把 App 的对话钉到那只上。 */
-    /** 跳到这只会话的原文页：工具调用、长回复、更早的记录都在那边。 */
-    private fun openSessionDetail() {
-        val id = PetSettings.chatSession(this)
-        if (id.isBlank()) {
-            toast("先选一只对话")
-            return
-        }
-        closePicker()
-        startActivity(SessionActivity.intent(this, id, liveSessionTitle.ifBlank { projectBtn.text.toString() }))
-    }
-
     private fun pickSession(s: Sess) {
         closePicker()
         // 切会话前先把旧会话上那一轮收掉：不 cancel 的话 turn 一直非空，新会话里连一个字
@@ -2639,6 +2837,19 @@ class HistoryActivity : Activity() {
 
     /* ---------------- 小工具 ---------------- */
 
+    /** 「会话页也显示小人」开着时，进这一页把小人请出来，走的时候收回去。 */
+    private fun chatPage(on: Boolean) {
+        if (on && !PetSettings.showInApp(this)) return
+        if (!FloatingPetService.alive) return
+        runCatching {
+            startService(
+                Intent(this, FloatingPetService::class.java)
+                    .setAction(FloatingPetService.ACTION_CHAT_PAGE)
+                    .putExtra(FloatingPetService.EXTRA_ON, on),
+            )
+        }
+    }
+
     private fun sendServiceAction(action: String) {
         runCatching {
             startService(Intent(this, FloatingPetService::class.java).setAction(action))
@@ -2669,6 +2880,21 @@ class HistoryActivity : Activity() {
         "😴", "😭", "😮", "🙄", "😅", "🤗", "👍", "👏",
         "🙏", "💪", "❤️", "🔥", "✨", "🎉", "🌙", "☀️",
     )
+
+    /** 目标条上的图标按钮：图标 24dp、点击区 32dp，跟旁边的文字同一个色系。 */
+    private fun goalIcon(icon: Int, colorRes: Int, label: String): android.widget.ImageButton {
+        val size = dp(32)
+        val pad = dp(4)
+        return android.widget.ImageButton(this).apply {
+            setImageResource(icon)
+            imageTintList = android.content.res.ColorStateList.valueOf(getColor(colorRes))
+            scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+            setPadding(pad, pad, pad, pad)
+            background = null
+            contentDescription = label
+            layoutParams = LinearLayout.LayoutParams(size, size).apply { marginStart = dp(4) }
+        }
+    }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
@@ -3102,12 +3328,6 @@ class HistoryActivity : Activity() {
                 is PickerRow.Action -> {
                     title.text = row.text
                     title.setTextColor(getColor(R.color.pet_accent))
-                }
-                is PickerRow.Detail -> {
-                    title.text = row.text
-                    title.setTextColor(getColor(R.color.pet_text_dim))
-                    chevron.visibility = View.VISIBLE
-                    line.visibility = View.GONE
                 }
             }
             return v

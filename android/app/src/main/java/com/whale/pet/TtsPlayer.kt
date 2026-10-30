@@ -154,15 +154,28 @@ class TtsPlayer(
 
     /* ---------------- 对外 ---------------- */
 
+    /** 这一句是不是刚排过：同一句连着来两遍，只放一遍（跨播放器、跨通道都算）。 */
+    private var lastQueued = ""
+    private var lastQueuedAt = 0L
+
     fun enqueue(text: String) {
         val t = text.trim()
         if (t.isEmpty()) return
+        // 宿主把同一句话推两遍（SSE 重连、页面与旁观者各走一条通道）时，听感就是自己重复一遍。
+        // 只掐「紧挨着的同一句」：隔了几秒或者中间夹了别的句子，那可能是用户让它再说一遍。
+        val now = SystemClock.elapsedRealtime()
+        if (t == lastQueued && now - lastQueuedAt < 10_000L) {
+            NetLog.record("TTS", 0, 0, "同一句连着来两遍，跳过「${t.take(12)}」")
+            return
+        }
         if (!claimVoice(t)) {
             // 同一个 App 里好几个播放器（悬浮窗、聊天页、主页）都可能收到同一句：
             // 各放各的听感就是「一前一后两把嗓子」。同一句只让第一个播。
             NetLog.record("TTS", 0, 0, "这句已由别的播放器播过，跳过「${t.take(12)}」")
             return
         }
+        lastQueued = t
+        lastQueuedAt = now
         main.post {
             rememberSpoken(t)
             val preset = config().preset
@@ -854,4 +867,15 @@ class TtsPlayer(
         private var lastClaimAt = 0L
         private var lastClaimOwner = 0
     }
+}
+
+/**
+ * 这一轮的话语权归谁。
+ *
+ * 聊天页停在前面时由页面那个播放器讲；一旦离开页面，页面不再出声，
+ * 由常驻服务的旁观者接着讲。两边同时讲就是这个问题的老根：同一句话两把嗓子。
+ */
+object VoiceGate {
+    @Volatile
+    var pageSpeaks: Boolean = false
 }

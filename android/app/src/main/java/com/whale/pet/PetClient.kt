@@ -159,7 +159,11 @@ class PetClient(private val config: () -> PetConfig) {
 
     /** 宿主上的图片字节（`/api/file?path=`）：聊天里要直接看到电脑上的图。 */
     fun fileBytes(path: String): ByteArray? {
-        val conn = open("file", mapOf("path" to path), "GET", 15_000)
+        val conn = try {
+            open("file", mapOf("path" to path), "GET", 15_000)
+        } catch (_: Exception) {
+            return null
+        }
         return try {
             if (conn.responseCode !in 200..299) {
                 conn.errorStream?.close()
@@ -202,16 +206,29 @@ class PetClient(private val config: () -> PetConfig) {
         return get("session", q)
     }
 
-    /** 目标操作：暂停 / 继续 / 标记完成。走的是桌面端同一套宿主接口。 */
-    fun goalAction(sessionId: String, action: String, id: String, revision: Int): Result =
-        postJson(
-            "goal",
-            JSONObject()
-                .put("sessionId", sessionId)
-                .put("action", action)
-                .put("id", id)
-                .put("revision", revision),
-        )
+    /**
+     * 目标操作：暂停 / 继续 / 标记完成 / 改目标 / 删除。走的是桌面端同一套宿主接口。
+     * [objective] 只有「改目标」带：别的动作传 null 就不进请求体，老宿主照样认。
+     */
+    fun goalAction(
+        sessionId: String,
+        action: String,
+        id: String,
+        revision: Int,
+        objective: String? = null,
+    ): Result {
+        val body = JSONObject()
+            .put("sessionId", sessionId)
+            .put("action", action)
+            .put("id", id)
+            .put("revision", revision)
+        if (!objective.isNullOrBlank()) body.put("objective", objective)
+        return postJson("goal", body)
+    }
+
+    /** 改目标正文：宿主按 revision 做并发保护，过时了会回 409。 */
+    fun goalEdit(sessionId: String, id: String, revision: Int, objective: String): Result =
+        goalAction(sessionId, "edit", id, revision, objective)
 
     /** 切项目：把专属会话钉到目标项目上。 */
     fun switchWorkspace(workspaceId: String): Result =
@@ -580,7 +597,9 @@ class PetClient(private val config: () -> PetConfig) {
                 }
             }
         }
-        throw last as? java.io.IOException ?: IOException(last?.message ?: "请求失败")
+        // 连不上就是这一次读不到，不能把异常抛到后台线程：那会把整个 App 带走，
+        // 用户看到的是「App 自己退了」。交给调用方按「没连上」处理。
+        return Result(0, "", null)
     }
 
     private fun open(
@@ -590,7 +609,12 @@ class PetClient(private val config: () -> PetConfig) {
         readTimeoutMs: Int,
     ): HttpURLConnection {
         val cfg = config()
-        val sb = StringBuilder(cfg.apiBase).append(path)
+        // 没配对时 apiBase 是空的：URL("") 会抛 MalformedURLException，把后台线程带走。
+        val base = cfg.apiBase.trim().trimEnd('/')
+        if (base.isBlank()) throw IOException("还没连上电脑")
+        val sb = StringBuilder(
+            if (path.startsWith("http")) path else base + if (path.startsWith("/")) path else "/$path",
+        )
         if (query.isNotEmpty()) {
             sb.append('?')
             sb.append(

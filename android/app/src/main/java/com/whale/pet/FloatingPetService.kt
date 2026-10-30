@@ -363,8 +363,15 @@ class FloatingPetService : Service() {
                 // 用户收起小人（含打开本 App）：立刻结束自动重听，且不偷偷把麦克风再抢回来
                 stopContinuous("收起", resumeWake = false)
                 stopHomeWatch()
+                chatPageOn = false
                 setPetVisible(false)
             }
+            return START_STICKY
+        }
+        if (action == ACTION_CHAT_PAGE) {
+            chatPageOn = intent?.getBooleanExtra(EXTRA_ON, false) == true
+            // 进出聊天页不必重建窗口：只按「现在该不该出现」重算一次
+            if (root != null) applyDisplayMode()
             return START_STICKY
         }
         if (action == ACTION_STOP) {
@@ -621,8 +628,11 @@ class FloatingPetService : Service() {
             return
         }
         startHomeWatch()
-        foregroundIsLauncher()?.let { onLauncherChanged(it) }
+        foregroundKind()?.let { onForegroundChanged(it) }
     }
+
+    /** 聊天页在前台：只有它 + 开关同时成立，才在本应用界面里留小人。 */
+    private var chatPageOn = false
 
     private fun startHomeWatch() {
         if (homeWatchOn) return
@@ -643,22 +653,25 @@ class FloatingPetService : Service() {
                 homeWatchOn = false
                 return
             }
-            foregroundIsLauncher()?.let { onLauncherChanged(it) }
+            foregroundKind()?.let { onForegroundChanged(it) }
             main.postDelayed(this, HOME_POLL_MS)
         }
     }
 
-    private fun onLauncherChanged(launcher: Boolean) {
+    private fun onForegroundChanged(kind: Int) {
         val nowMs = SystemClock.elapsedRealtime()
         val sinceMs = if (lastLauncherFlipAt == 0L) -1L else nowMs - lastLauncherFlipAt
         lastLauncherFlipAt = nowMs
-        if (launcher) {
-            if (root?.visibility != View.VISIBLE) Log.i("PetDisplay", "回到桌面 → 显示")
-            Log.d("PetDisplay", "回到桌面 ms=$sinceMs")
+        // 本应用自己的聊天页：开关开着才算「该出现」，别让设置页/主界面也挂一只
+        val keep = kind == KIND_LAUNCHER ||
+            (kind == KIND_SELF && chatPageOn && PetSettings.showInApp(this))
+        if (keep) {
+            if (root?.visibility != View.VISIBLE) Log.i("PetDisplay", "前台可显示 → 显示 kind=$kind")
+            Log.d("PetDisplay", "显示 kind=$kind ms=$sinceMs")
             setPetVisible(true)
         } else {
-            if (root?.visibility == View.VISIBLE) Log.i("PetDisplay", "离开桌面 → 收起")
-            Log.d("PetDisplay", "离开桌面 ms=$sinceMs")
+            if (root?.visibility == View.VISIBLE) Log.i("PetDisplay", "前台不适合 → 收起 kind=$kind")
+            Log.d("PetDisplay", "收起 kind=$kind ms=$sinceMs")
             setPetVisible(false)
         }
     }
@@ -667,7 +680,7 @@ class FloatingPetService : Service() {
      * 最近一条前台事件是不是桌面。
      * null = 5 分钟内查不到前台事件（刚开机 / ROM 限流），保持现状，别乱切。
      */
-    private fun foregroundIsLauncher(): Boolean? {
+    private fun foregroundKind(): Int? {
         val usm = getSystemService(UsageStatsManager::class.java) ?: return null
         val end = System.currentTimeMillis()
         val events = try {
@@ -682,9 +695,8 @@ class FloatingPetService : Service() {
             if (e.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) pkg = e.packageName.orEmpty()
         }
         if (pkg.isEmpty()) return null
-        // 本应用自己的 Activity 在前台时也算「不在桌面」
-        if (pkg == packageName) return false
-        return launchers().contains(pkg)
+        if (pkg == packageName) return KIND_SELF
+        return if (launchers().contains(pkg)) KIND_LAUNCHER else KIND_OTHER
     }
 
     private fun launchers(): Set<String> {
@@ -2456,6 +2468,13 @@ class FloatingPetService : Service() {
         const val ACTION_HIDE = "com.whale.pet.action.HIDE"
     const val ACTION_SHOW = "com.whale.pet.action.SHOW"
     const val ACTION_STOP = "com.whale.pet.action.STOP"
+    /** 聊天页/会话详情前后台：开着「会话页也显示小人」时，这些页面上要留着小人在。 */
+    const val ACTION_CHAT_PAGE = "com.whale.pet.action.CHAT_PAGE"
+    const val EXTRA_ON = "on"
+    /** 前台应用分类：桌面 / 本应用 / 别的应用。 */
+    private const val KIND_LAUNCHER = 0
+    private const val KIND_SELF = 1
+    private const val KIND_OTHER = 2
 
     /** 被杀后自愈：首次 1 分钟，之后每 15 分钟一次系统闹钟把自己叫醒。 */
     private const val KEEPALIVE_REQ = 8
@@ -2488,6 +2507,13 @@ class FloatingPetService : Service() {
         val s = inst ?: return
         val body = text.trim()
         if (body.isEmpty()) return
+        // 这四个守卫必须在投递那一刻同步判一次：以前全放在 main.post 里，
+        // 两次投递的 post 被并发排队时看到的还是旧状态，同一句就排了两遍。
+        if (s.destroyed) return
+        if (s.turnActive) return
+        if (appReplySpeaking) return
+        if (s.appFg) return
+        if (VoiceGate.pageSpeaks) return
         s.main.post {
             if (s.destroyed) return@post
             if (s.turnActive) return@post // 自己的语音回合正在跑，别两条线抢麦

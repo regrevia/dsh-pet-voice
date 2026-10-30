@@ -97,15 +97,17 @@
                 android:textSize="14sp"
                 android:visibility="gone" />
 
-            <TextView
-                android:id="@+id/chatSending"
-                android:layout_width="wrap_content"
+            <!-- 首屏还在路上时摆的灰块，代码里按行拼（宽度不均、左右交替） -->
+            <LinearLayout
+                android:id="@+id/chatSkeleton"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_gravity="center_horizontal|bottom"
-                android:layout_marginBottom="10dp"
-                android:text="发送中"
-                android:textColor="@color/pet_hint"
-                android:textSize="12sp"
+                android:layout_gravity="bottom"
+                android:orientation="vertical"
+                android:paddingStart="12dp"
+                android:paddingTop="14dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="18dp"
                 android:visibility="gone" />
         </FrameLayout>
 
@@ -126,6 +128,22 @@
             android:paddingEnd="12dp"
             android:paddingBottom="6dp"
             android:textColor="@color/pet_hint"
+            android:textSize="12.5sp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/chatRun"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="20dp"
+            android:layout_marginEnd="20dp"
+            android:layout_marginBottom="2dp"
+            android:clickable="true"
+            android:focusable="true"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:contentDescription="中断"
+            android:textColor="@color/pet_accent"
             android:textSize="12.5sp"
             android:visibility="gone" />
 
@@ -157,40 +175,40 @@
                 android:textColorHint="@color/pet_hint"
                 android:textSize="15sp" />
 
-            <TextView
+            <ImageView
                 android:id="@+id/chatMic"
-                android:layout_width="76dp"
-                android:layout_height="76dp"
+                android:layout_width="56dp"
+                android:layout_height="56dp"
                 android:layout_marginStart="8dp"
                 android:background="@drawable/bg_mic"
                 android:clickable="true"
+                android:contentDescription="按住说话"
                 android:focusable="true"
-                android:gravity="center"
-                android:text="按住&#10;说话"
-                android:textColor="@color/pet_bg"
-                android:textSize="12.5sp" />
+                android:padding="14dp"
+                android:src="@drawable/ic_mic"
+                android:tint="@color/pet_bg" />
 
             <ImageView
                 android:id="@+id/chatSend"
                 android:layout_width="46dp"
                 android:layout_height="46dp"
                 android:layout_marginStart="8dp"
-                android:background="@drawable/bg_btn_primary"
+                android:background="@drawable/bg_btn_outline"
                 android:contentDescription="发送"
-                android:padding="12dp"
+                android:padding="11dp"
                 android:src="@drawable/ic_send"
-                android:tint="@color/pet_bg" />
+                android:tint="@color/pet_accent" />
 
             <ImageView
                 android:id="@+id/chatStop"
                 android:layout_width="46dp"
                 android:layout_height="46dp"
                 android:layout_marginStart="8dp"
-                android:background="@drawable/bg_btn_primary"
+                android:background="@drawable/bg_btn_outline"
                 android:contentDescription="中断"
-                android:padding="12dp"
+                android:padding="11dp"
                 android:src="@drawable/ic_stop"
-                android:tint="@color/pet_bg"
+                android:tint="@color/pet_accent"
                 android:visibility="gone" />
         </LinearLayout>
     </LinearLayout>

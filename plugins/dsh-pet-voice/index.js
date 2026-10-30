@@ -1778,10 +1778,11 @@ function entriesOfTranscript(text) {
     } else if (type === 'assistant/message') {
       const message = data.message ?? data
       const parts = message?.content ?? data.content
-      const body = partsText(parts)
+      // 插件（视觉辅助 IntelliF 之类）会把观察块灌进助手消息里：块切掉，正文照常上屏。
+      const body = stripPluginBlocks(partsText(parts))
       const reasoning = partsTextOfType(parts, 'reasoning')
       // 只有工具调用 / 只有推理的 assistant 消息不单独上屏：没正文就是空气泡。
-      if (!body) continue
+      if (!body || isInjectedUserText(body)) continue
       const entry = { seq, role: 'assistant', text: clipText(body, MESSAGE_TEXT_LIMIT), time }
       if (reasoning) entry.reasoningPreview = clipText(reasoning, REASONING_PREVIEW_LIMIT)
       entries.push(entry)
@@ -2309,7 +2310,7 @@ async function inboxActionRoute(ctx, body) {
 }
 
 /**
- * 目标操作：暂停 / 继续 / 标记完成。桌面端点的是同一套宿主接口，这里只是给手机让路。
+ * 目标操作：暂停 / 继续 / 标记完成 / 改目标 / 删除。桌面端点的是同一套宿主接口，这里只是给手机让路。
  * revision 是并发保护——手机上的版本号过时了就拒绝，避免把桌面刚改的状态覆盖掉。
  */
 async function goalActionRoute(ctx, body) {
@@ -2317,8 +2318,13 @@ async function goalActionRoute(ctx, body) {
   const action = String(body?.action ?? '').trim()
   const id = String(body?.id ?? '').trim()
   const revision = Number(body?.revision ?? 0) || 0
-  if (!sessionId || !['pause', 'resume', 'complete', 'clear'].includes(action) || !id) {
+  // 改目标正文只有 edit 带：空白当没填，别把目标改成空字符串
+  const objective = String(body?.objective ?? '').trim()
+  if (!sessionId || !['pause', 'resume', 'complete', 'clear', 'edit'].includes(action) || !id) {
     return { status: 400, body: { ok: false, error: '参数不对' } }
+  }
+  if (action === 'edit' && !objective) {
+    return { status: 400, body: { ok: false, error: '目标不能为空' } }
   }
   const controller = ctx.get?.('sessionController')
   if (typeof controller?.resolveAgent !== 'function') {
@@ -2331,7 +2337,9 @@ async function goalActionRoute(ctx, body) {
     const goals = agent.ctx?.get?.('goals') ?? ctx.get?.('goals')
     const run = goals?.[action]
     if (typeof run !== 'function') return { status: 503, body: { ok: false, error: '宿主没有目标接口' } }
-    const view = run.call(goals, agent, { id, revision })
+    const view = action === 'edit'
+      ? run.call(goals, agent, { id, revision }, { objective })
+      : run.call(goals, agent, { id, revision })
     // clear 返回的是墓碑 ref（没有 objective/phase），这里统一收成 null 表示「已经没有目标了」
     const cleared = action === 'clear'
     netLog('goal-action', { sessionId, action })
@@ -3558,7 +3566,24 @@ const INJECTED_USER_PATTERNS = [
   /<\/?compacted[-_ ]?summary>/i,
   /^##\s*主要请求(与|和)意图\b/im,
   /^##\s*(当前工作|关键上下文|待办)\b/im,
+  // 旁挂插件（视觉辅助 IntelliF 之类）观察块：残留的单行标记也不上屏。
+  /^[#>*\s·\-]*[\[【]?\s*(视觉辅助观察|IntelliF|intellif)\s*[\]】]?\s*$/im,
+  /^[#>*\s·\-]*[\[【]\s*\/?\s*(视觉辅助观察|IntelliF|intellif)/im,
 ]
+
+/**
+ * 插件往会话里灌的观察块：`[视觉辅助观察 …] … [/视觉辅助观察]`。
+ * 整条只有这块就整条丢；块和正常正文混在同一条里时只切块，正文照常。
+ */
+function stripPluginBlocks(text) {
+  const raw = String(text ?? '')
+  if (!/视觉辅助观察|IntelliF|intellif/i.test(raw)) return raw.trim()
+  return raw
+    .replace(/\[\s*(?:视觉辅助观察|IntelliF|intellif)[^\]]*\][\s\S]*?\[\s*\/\s*(?:视觉辅助观察|IntelliF|intellif)[^\]]*\]/gi, '')
+    .replace(/[\[【]\s*\/?\s*(?:视觉辅助观察|IntelliF|intellif)[^\]】]*[\]】]/gi, '')
+    .replace(/^[\s#>*·\-]*[\[【]?\s*(?:视觉辅助观察|IntelliF|intellif)[^，。！？；\n]{0,40}[\]】]?\s*$/gim, '')
+    .trim()
+}
 
 function isInjectedUserText(text) {
   const body = String(text ?? '').trim()
@@ -4898,13 +4923,15 @@ export function apply(ctx, config) {
   /** say 是全局播报：所有 SSE 订阅者都推一遍，不分会话。 */
   function broadcastSay(item) {
     const frame = `event: say\ndata: ${JSON.stringify(sayItem(item))}\n\n`
-    for (const set of streams.values()) {
-      for (const res of set) {
-        if (safeWrite(res, frame)) continue
-        set.delete(res)
-        streamGuards.get(res)?.()
-        streamGuards.delete(res)
-      }
+    // 一条连接同时挂在「自己的会话」和「*」两个集合里，照着 streams.values() 写
+    // 会把同一帧推两遍——手机侧听起来就是同一句被念两次。按连接去重再写。
+    const targets = new Set()
+    for (const set of streams.values()) for (const res of set) targets.add(res)
+    for (const res of targets) {
+      if (safeWrite(res, frame)) continue
+      streamGuards.get(res)?.()
+      streamGuards.delete(res)
+      for (const set of streams.values()) set.delete(res)
     }
   }
 
@@ -6111,7 +6138,22 @@ export function apply(ctx, config) {
         // 往专属会话 prompt 一次就会把它顶到第一位。若直接把 sessions[0] 当 current，
         // 用户会看到界面上的当前会话被小爱「抢方向盘」。所以这里跳过专属会话那只。
         const petNow = readPetSessionFile()
-        const current = sessions.find((item) => item.id && item.id !== petNow.sessionId) ?? null
+        const projects = workspaceRows(ctx)
+        const byPath = new Map(projects.map((p) => [String(p.path).replace(/\/+$/, ''), p.id]))
+        // 宿主重启后 list() 只回 cwd、不带 title/projectId；App 靠这两项写顶上两行。
+        // 投影缓存里有真名，这里补齐，别让 App 拿着旧名字跟新项目对不上。
+        const enrich = (row) => {
+          if (!row) return row
+          const meta = projectCacheOf(row.id)
+          const cwd = row.cwd || meta.cwd || ''
+          return {
+            ...row,
+            title: row.title || meta.title || '',
+            cwd,
+            projectId: row.projectId || projectIdOfPath(byPath, cwd),
+          }
+        }
+        const current = enrich(sessions.find((item) => item.id && item.id !== petNow.sessionId) ?? null)
         // 记忆里的会话可能早被删了（自测残留的 sess-new-2 就是死 id），活着才算数
         if (sessions.length) {
           const alive = new Set(sessions.map((item) => item.id))
@@ -6131,9 +6173,9 @@ export function apply(ctx, config) {
           // 绝不回显完整 token：只给前 8 位，让用户能比对「现在生效的是哪一把」。
           tokenHint: currentToken().slice(0, 8),
           linkHint: `在电脑上执行 cat ${TOKEN_PATH} 可查看完整配对链接里的 token`,
-          projects: workspaceRows(ctx),
+          projects,
           presets,
-          sessions: sessions.slice(0, 20),
+          sessions: sessions.slice(0, 20).map(enrich),
           // current 只用于界面展示（用户最近在用的那只，已排除专属会话），**不参与派发**；
           // 派发落点看 dispatchTarget，它恒等于 pet-session.json 里那只。
           current,

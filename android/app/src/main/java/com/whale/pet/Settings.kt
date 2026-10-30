@@ -140,6 +140,7 @@ object PetSettings {
     private const val K_SPRITE = "sprite_size"
     private const val K_OUTFIT = "pet_outfit"
     private const val K_DISPLAY = "display_mode"
+    private const val K_IN_APP = "show_in_app"
     private const val K_PINNED = "pinned_title"
     private const val K_CHAT_SESSION = "chat_session"
     /** 上一次看到的「电脑上开着哪只对话」：用来发现桌面端换过会话。 */
@@ -335,6 +336,13 @@ object PetSettings {
      * 存成一行 `interact=1,voice=1,link=1,bubble=0`：App 重启也知道上次的状态，
      * 拿不到宿主状态时按默认全开，别把功能悄悄关掉。
      */
+    /** 会话页（聊天页 / 会话详情）也要留着小人在：小人是这套东西的入口，别一进去就没了。 */
+    fun showInApp(context: Context): Boolean = prefs(context).getBoolean(K_IN_APP, false)
+
+    fun saveShowInApp(context: Context, on: Boolean) {
+        prefs(context).edit().putBoolean(K_IN_APP, on).apply()
+    }
+
     fun feature(context: Context, key: String): Boolean {
         val raw = prefs(context).getString(K_FEAT, "").orEmpty()
         if (raw.isBlank()) return true

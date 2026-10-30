@@ -450,6 +450,15 @@
                 android:textSize="13sp" />
 
             <CheckBox
+                android:id="@+id/inAppCheck"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:buttonTint="@color/pet_accent"
+                android:text="会话页也显示小人"
+                android:textColor="@color/pet_text"
+                android:textSize="13sp" />
+
+            <CheckBox
                 android:id="@+id/bubbleCheck"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"

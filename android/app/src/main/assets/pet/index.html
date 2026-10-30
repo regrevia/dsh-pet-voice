@@ -209,7 +209,9 @@ function createPet (container) {
     dance: [74, 113, 274, 296],
     drag: [42, 75, 354, 347],
     idle: [52, 77, 317, 346],
-    jump: [87, 67, 247, 352],
+    // jump 的星辉顶在头上方、和人物连通，量主体框时必须排除，否则缩放被星顶拉小（人物缩到八成）。
+    // 这里只框人物本身。
+    jump: [77, 134, 266, 290],
     look_around: [58, 90, 322, 339],
     sleep: [69, 125, 278, 289],
     startle: [76, 109, 276, 296],
@@ -762,13 +764,14 @@ function createPet (container) {
    */
   const SIZE = {
     cheer: 1.00, curtsy: 1.02, dance: 1.16, drag: 0.97, idle: 1.00,
-    jump: 1.22, look_around: 1.01, sleep: 1.17, startle: 1.16, stretch: 1.16,
+    // jump 星顶到脚底占满整个内容框：想让人物腾空时和 idle 一样高（要 1.26）必然把星切掉一半，
+    // 星是这段素材的观感主体，切一半比略小更扎眼。取「星顶刚好留在画布内」的上限 1.10。
+    jump: 1.10, look_around: 1.01, sleep: 1.17, startle: 1.16, stretch: 1.16,
     tail_slap: 1.14, talking: 1.02, tap: 1.00, tap_joy: 1.19, tap_pout: 1.03,
     tap_proud: 1.20, tap_shy: 1.00, tap_tickle: 1.00, tap_wave: 1.17, thinking: 1.01,
     wake_up: 1.01, whale_bubble: 1.16, yawn: 0.99
   }
-  // 面积判据对「收臂/腾空」这种窄姿势会高估：jump 的投影面积只有 idle 的六成，
-  // 但身高一样，直接按面积放到 1.22 会把人拉成竹竿、头顶还冲出画布。再用身高封顶：
+  // 面积判据对「收臂/腾空」这种窄姿势会高估，再用身高封顶：
   // 渲染后主体高不超过 360 画布像素（画布 465、主体目标高 346），只对个别极端段生效。
   const scaleFor = (clip) => {
     const s = SIZE[clip] || SIZE.idle

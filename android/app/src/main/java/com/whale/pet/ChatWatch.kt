@@ -23,6 +23,8 @@ object ChatWatch {
     private const val STABLE_POLLS = 4
 
     @Volatile private var gen = 0
+    /** 只在日志里说一次「这一轮是页面在讲」，别每句都刷。 */
+    private var skippedLogged = false
 
     /** 同一只会话只保留一只观察者：再发一句就把上一条停掉重开。 */
     fun start(ctx: Context, sessionId: String) {
@@ -139,6 +141,15 @@ object ChatWatch {
 
     private fun deliver(app: Context, piece: String, final: Boolean) {
         if (piece.isBlank()) return
+        // 页面停在前面、面板也开着语音：这一轮归页面讲，旁观者只往前记进度，不出第二把嗓子。
+        // 人一走开 pageSpeaks 就是 false，这里立刻接上，接着讲没讲过的部分。
+        if (VoiceGate.pageSpeaks && PetSettings.feature(app, "voice")) {
+            if (!skippedLogged) {
+                skippedLogged = true
+                Log.i(TAG, "页面自己在讲，旁观只记进度")
+            }
+            return
+        }
         FloatingPetService.deliverWatched(piece, final)
     }
 
