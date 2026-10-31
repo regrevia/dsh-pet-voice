@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/sbin:/sbin:/usr/bin:/bin:/Users/apple/.local/opt/node-current/bin</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.local.regrevia-pet-proxy</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/apple/.local/opt/node-current/bin/node</string>
+		<string>/Users/apple/Desktop/work/Pet/scripts/tls-proxy.mjs</string>
+		<string>--quiet</string>
+		<string>--port</string>
+		<string>9443</string>
+		<string>--upstream</string>
+		<string>auto</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/apple/.dsh/pet-voice/run/tls-proxy.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/apple/.dsh/pet-voice/run/tls-proxy.log</string>
+</dict>
+</plist>

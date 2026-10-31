@@ -2282,3 +2282,19 @@ user 消息正文是 `三图连发自检 0.9.139\n\n![图片](/Users/apple/.dsh/
 这次现场：宿主端口从 59356 变成 53939，代理重启带上 `--port 9443 --upstream 127.0.0.1:53939`，
 `/api/state` 从 502 回到 200。以后遇到 502 先查代理的 `--upstream` 和设备 `base_url` 是否还指向
 `http://42.193.189.240/pet-voice/`。
+
+## 23.44 绑定时 502：代理跟着宿主端口走（0.9.142 之后）
+
+宿主一重启 Web 端口就换（这次 53939 → 56251），`scripts/tls-proxy.mjs` 还指着旧端口，
+手机用链接绑定时整条链路 502。手动重启代理能好一次，但下次重启又复发。
+
+改法两处：`tls-proxy.mjs --upstream auto` 原本只认进程名叫 `node` 的监听端口，宿主是
+Electron 时一个都挑不出来 —— 现在本地回环端口全试一遍，按 `/pet-voice/api/pair` 回
+200/401/403 认领；再把这个命令挂成 LaunchAgent
+（`scripts/com.local.regrevia-pet-proxy.plist`，`KeepAlive` + `--upstream auto`，
+PATH 要带上 node 目录，launchd 的默认 PATH 里没有）。管理命令：
+`launchctl kickstart -k gui/$(id -u)/com.local.regrevia-pet-proxy`。
+
+验证：公网 `http://42.193.189.240/pet-voice/api/state`、`/api/pair`、`/api/sessions` 全 200，
+`launchctl list | grep pet-proxy` 退出码 0，模拟 launchd 环境（`env -i PATH=...`）跑
+`--upstream auto` 自动认出 `127.0.0.1:56251`。

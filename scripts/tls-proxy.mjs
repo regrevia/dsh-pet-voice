@@ -62,9 +62,10 @@ function listeningPorts () {
     const out = execSync('lsof -nP -iTCP -sTCP:LISTEN', { encoding: 'utf8', timeout: 4000 })
     const ports = new Set()
     for (const line of out.split('\n')) {
-      if (!/\bnode\b/.test(line)) continue
       const m = line.match(/127\.0\.0\.1:(\d+)|\[::1\]:(\d+)/)
-      if (m) ports.add(Number(m[1] || m[2]))
+      if (!m) continue
+      // 宿主是 Electron 时进程名不是 node，本地回环端口也要挨个试
+      if (/\b(node|DeepSeek|dsh)\b/i.test(line) || !/\bnode\b/.test(out)) ports.add(Number(m[1] || m[2]))
     }
     return [...ports]
   } catch (e) { return [] }
